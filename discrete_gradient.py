@@ -45,27 +45,21 @@ def v_to_ancestry_matrix(v: np.ndarray) -> np.ndarray:
 
     M = np.empty((n_pairs, 2), dtype=np.int32)
     parents_uf = np.arange(n_nodes_r, dtype=np.int32)
-    siblings_uf = np.arange(n_nodes_r, dtype=np.int32)
 
     for k in range(n_pairs):
         u = n_leaves + k
-        c1 = pairs[k, 0]
-        c2 = pairs[k, 1]
-        p1 = parents_uf[c1]
-        p2 = parents_uf[c2]
+        p1 = pairs[k, 0]
+        p2 = pairs[k, 1]
+        while parents_uf[p1] != p1:
+            parents_uf[p1] = parents_uf[parents_uf[p1]]
+            p1 = parents_uf[p1]
+        while parents_uf[p2] != p2:
+            parents_uf[p2] = parents_uf[parents_uf[p2]]
+            p2 = parents_uf[p2]
         M[k, 0] = p2
         M[k, 1] = p1
-
-        s1 = siblings_uf[c1]
-        s2 = siblings_uf[c2]
-        parents_uf[c1] = u
-        parents_uf[c2] = u
-        parents_uf[s1] = u
-        parents_uf[s2] = u
         parents_uf[p1] = u
         parents_uf[p2] = u
-        siblings_uf[c1] = c2
-        siblings_uf[c2] = c1
 
     return M
 
@@ -348,7 +342,7 @@ def evaluate_spr_gradient_matrix(
     n_nodes_u = 2 * n_leaves - 2
 
     edge_delta = np.zeros(n_nodes_u, dtype=np.float64)
-    delta = np.zeros((n_pairs, n_pairs), dtype=np.float64)
+    delta = np.zeros((n_pairs, n_pairs - 1), dtype=np.float64)
 
     q_node = np.empty(n_nodes_u, dtype=np.int32)
     q_prev = np.empty(n_nodes_u, dtype=np.int32)
@@ -418,83 +412,130 @@ class DiscreteGradient:
     """
 
     def __init__(self, backend: str = "auto"):
+        if backend not in ("auto", "c", "numba"):
+            raise ValueError(f"Unknown backend '{backend}'; expected 'auto', 'c', or 'numba'.")
         self._c_lib = None
-        if backend in ("auto", "c"):
-            here = os.path.dirname(os.path.abspath(__file__))
-            c_src = os.path.join(here, "phylo2vec_fastme.c")
-            dylib_path = os.path.join(here, "libphylo2vec_fastme.dylib")
-            if (
-                not os.path.exists(dylib_path)
-                or (os.path.exists(c_src) and os.path.getmtime(c_src) > os.path.getmtime(dylib_path))
-            ) and os.path.exists(c_src):
-                subprocess.run(
-                    [
-                        "/usr/bin/clang",
-                        "-O3",
-                        "-march=native",
-                        "-ffast-math",
-                        "-shared",
-                        "-fPIC",
-                        c_src,
-                        "-o",
-                        dylib_path,
-                    ],
-                    check=True,
-                )
-            if os.path.exists(dylib_path):
+        here = os.path.dirname(os.path.abspath(__file__))
+        c_src = os.path.join(here, "phylo2vec_fastme.c")
+        dylib_path = os.path.join(here, "libphylo2vec_fastme.dylib")
+
+        def _build_dylib() -> None:
+            subprocess.run(
+                [
+                    "/usr/bin/clang",
+                    "-O3",
+                    "-arch",
+                    "arm64",
+                    "-arch",
+                    "x86_64",
+                    "-shared",
+                    "-fPIC",
+                    c_src,
+                    "-o",
+                    dylib_path,
+                ],
+                check=True,
+            )
+
+        if (
+            not os.path.exists(dylib_path)
+            or (os.path.exists(c_src) and os.path.getmtime(c_src) > os.path.getmtime(dylib_path))
+        ) and os.path.exists(c_src):
+            _build_dylib()
+        if os.path.exists(dylib_path):
+            try:
                 lib = ctypes.CDLL(dylib_path)
-                lib.calculate_discrete_gradient_c.argtypes = [
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_double),
-                    ctypes.c_int32,
-                    ctypes.POINTER(ctypes.c_double),
-                ]
-                lib.calculate_discrete_gradient_c.restype = None
+            except OSError:
+                if os.path.exists(c_src):
+                    _build_dylib()
+                    lib = ctypes.CDLL(dylib_path)
+                else:
+                    raise
+            lib.calculate_discrete_gradient_c.argtypes = [
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            lib.calculate_discrete_gradient_c.restype = None
 
-                lib.calculate_discrete_gradient_full_c.argtypes = [
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_double),
-                    ctypes.c_int32,
-                    ctypes.POINTER(ctypes.c_double),
-                ]
-                lib.calculate_discrete_gradient_full_c.restype = None
+            lib.calculate_discrete_gradient_full_c.argtypes = [
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            lib.calculate_discrete_gradient_full_c.restype = None
 
-                lib.relabel_cherry_first_c.argtypes = [
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.c_int32,
-                    ctypes.c_int32,
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_int32),
-                ]
-                lib.relabel_cherry_first_c.restype = None
+            lib.relabel_cherry_first_c.argtypes = [
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.c_int32,
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int32),
+            ]
+            lib.relabel_cherry_first_c.restype = None
 
-                lib.optimize_phylo2vec_bme_c.argtypes = [
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_double),
-                    ctypes.c_int32,
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_int32),
-                    ctypes.POINTER(ctypes.c_double),
-                ]
-                lib.optimize_phylo2vec_bme_c.restype = ctypes.c_double
+            lib.optimize_phylo2vec_bme_c.argtypes = [
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            lib.optimize_phylo2vec_bme_c.restype = ctypes.c_double
 
-                lib.optimize_fastme_bme_c.argtypes = [
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_double),
-                    ctypes.c_int32,
-                    ctypes.POINTER(ctypes.c_int64),
-                    ctypes.POINTER(ctypes.c_int32),
-                    ctypes.POINTER(ctypes.c_double),
-                ]
-                lib.optimize_fastme_bme_c.restype = ctypes.c_double
-                self._c_lib = lib
+            lib.optimize_fastme_bme_c.argtypes = [
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_double),
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.POINTER(ctypes.c_double),
+            ]
+            lib.optimize_fastme_bme_c.restype = ctypes.c_double
+            self._c_lib = lib
 
+        if backend == "c" and self._c_lib is None:
+            raise RuntimeError("Requested backend='c', but libphylo2vec_fastme.dylib could not be loaded.")
         self.backend = "c" if (self._c_lib is not None and backend != "numba") else "numba"
+
+    @staticmethod
+    def _validate_v(v: np.ndarray, cherry_first_only: bool = False) -> np.ndarray:
+        v_arr = np.ascontiguousarray(v, dtype=np.int64)
+        if v_arr.ndim != 1 or len(v_arr) < 3:
+            raise ValueError(f"Expected 1D Phylo2Vec vector of length N-1 >= 3, got shape {v_arr.shape}.")
+        i_idx = np.arange(len(v_arr), dtype=np.int64)
+        upper = i_idx if cherry_first_only else (2 * i_idx)
+        if np.any(v_arr < 0) or np.any(v_arr > upper):
+            bound_str = "0 <= v[i] <= i" if cherry_first_only else "0 <= v[i] <= 2*i"
+            raise ValueError(f"Invalid Phylo2Vec vector entries; required {bound_str}.")
+        return v_arr
+
+    @classmethod
+    def _validate_v_and_D(
+        cls, v: np.ndarray, D: np.ndarray, cherry_first_only: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
+        v_arr = cls._validate_v(v, cherry_first_only=cherry_first_only)
+        D_arr = np.ascontiguousarray(D, dtype=np.float64)
+        n_leaves = len(v_arr) + 1
+        if D_arr.ndim != 2 or D_arr.shape != (n_leaves, n_leaves):
+            raise ValueError(f"Expected D of shape ({n_leaves}, {n_leaves}), got {D_arr.shape}.")
+        if not np.all(np.isfinite(D_arr)):
+            raise ValueError("Distance matrix D contains NaN or Inf entries.")
+        if not np.allclose(D_arr, D_arr.T, rtol=1e-7, atol=1e-8):
+            raise ValueError("Distance matrix D must be symmetric.")
+        return v_arr, D_arr
+
+    def _require_c_lib(self) -> ctypes.CDLL:
+        if self._c_lib is None:
+            raise RuntimeError("C shared library backend (libphylo2vec_fastme.dylib) is not available.")
+        return self._c_lib
 
     def calculate_discrete_gradient(self, v: np.ndarray, D: np.ndarray) -> np.ndarray:
         """Lower-triangular j < i discrete gradient (shape: (N-1, N-2))."""
-        v_arr = np.ascontiguousarray(v, dtype=np.int64)
-        D_arr = np.ascontiguousarray(D, dtype=np.float64)
+        v_arr, D_arr = self._validate_v_and_D(v, D, cherry_first_only=False)
         if self.backend == "c":
             n_leaves = D_arr.shape[0]
             n_pairs = n_leaves - 1
@@ -513,12 +554,12 @@ class DiscreteGradient:
         Full 0 <= j <= 2i discrete gradient for cherry-first Phylo2Vec vector v (v_k <= k).
         Returns array of shape (N-1, 2N-3) where row i has valid entries at columns 0 <= j <= 2i.
         """
-        v_arr = np.ascontiguousarray(v, dtype=np.int64)
-        D_arr = np.ascontiguousarray(D, dtype=np.float64)
+        v_arr, D_arr = self._validate_v_and_D(v, D, cherry_first_only=True)
+        lib = self._require_c_lib()
         n_leaves = D_arr.shape[0]
         n_pairs = n_leaves - 1
         delta_full = np.empty((n_pairs, 2 * n_pairs - 1), dtype=np.float64)
-        self._c_lib.calculate_discrete_gradient_full_c(
+        lib.calculate_discrete_gradient_full_c(
             v_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
             D_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.c_int32(n_leaves),
@@ -531,12 +572,13 @@ class DiscreteGradient:
         O(N) cherry-first taxon relabeling: converts any v in V (0 <= v_i <= 2i) into
         an isomorphic cherry-first vector v_new (0 <= v_new[i] <= i) and leaf permutation perm.
         """
-        v_arr = np.ascontiguousarray(v, dtype=np.int64)
+        v_arr = self._validate_v(v, cherry_first_only=False)
+        lib = self._require_c_lib()
         n_pairs = len(v_arr)
         n_leaves = n_pairs + 1
         v_out = np.empty(n_pairs, dtype=np.int64)
         perm_out = np.empty(n_leaves, dtype=np.int32)
-        self._c_lib.relabel_cherry_first_c(
+        lib.relabel_cherry_first_c(
             v_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
             ctypes.c_int32(n_leaves),
             ctypes.c_int32(flip_mode),
@@ -552,13 +594,13 @@ class DiscreteGradient:
         O(N) cherry-first taxon relabeling, and 2-SPR local-minimum escape kicks.
         Returns (v_opt, bme_length, n_grad_evals, elapsed_ms).
         """
-        v_arr = np.ascontiguousarray(v_init, dtype=np.int64)
-        D_arr = np.ascontiguousarray(D, dtype=np.float64)
+        v_arr, D_arr = self._validate_v_and_D(v_init, D, cherry_first_only=False)
+        lib = self._require_c_lib()
         n_leaves = D_arr.shape[0]
         v_out = np.empty(n_leaves - 1, dtype=np.int64)
         n_evals = ctypes.c_int32(0)
         elapsed_ms = ctypes.c_double(0.0)
-        bme_len = self._c_lib.optimize_phylo2vec_bme_c(
+        bme_len = lib.optimize_phylo2vec_bme_c(
             v_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
             D_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.c_int32(n_leaves),
@@ -573,13 +615,13 @@ class DiscreteGradient:
         Full unrooted FastME SPR hill-climber in C99 (evaluates all 2N-3 subtrees per step).
         Returns (v_opt, bme_length, n_iters, elapsed_ms).
         """
-        v_arr = np.ascontiguousarray(v_init, dtype=np.int64)
-        D_arr = np.ascontiguousarray(D, dtype=np.float64)
+        v_arr, D_arr = self._validate_v_and_D(v_init, D, cherry_first_only=False)
+        lib = self._require_c_lib()
         n_leaves = D_arr.shape[0]
         v_out = np.empty(n_leaves - 1, dtype=np.int64)
         n_iters = ctypes.c_int32(0)
         elapsed_ms = ctypes.c_double(0.0)
-        bme_len = self._c_lib.optimize_fastme_bme_c(
+        bme_len = lib.optimize_fastme_bme_c(
             v_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
             D_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
             ctypes.c_int32(n_leaves),

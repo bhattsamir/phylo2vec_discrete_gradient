@@ -19,7 +19,7 @@
  *   5. Full Apple M5 Metal GPU (End-to-End GPU: `subdist` + Heavy-First Register-Stack GPU SPR Scan)
  *
  * Compile & run:
- *   /usr/bin/clang -O3 -march=native -ffast-math -framework Metal -framework Foundation \
+ *   /usr/bin/clang -O3 -march=native -fobjc-arc -framework Metal -framework Foundation \
  *       bench_parallel_gpu.m phylo2vec_fastme.c -o bench_parallel_gpu && ./bench_parallel_gpu
  */
 
@@ -510,7 +510,9 @@ static void calculate_discrete_gradient_multicore_f64(
                 for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
                     out_row[j] = edge_delta[(2 * n_leaves - 2) - 2 * i + j];
                 }
-                out_row[2 * i - 1] = edge_delta[other_root_child];
+                if (2 * i - 1 > i) {
+                    out_row[2 * i - 1] = edge_delta[other_root_child];
+                }
                 out_row[2 * i]     = edge_delta[other_root_child];
             }
 
@@ -748,7 +750,9 @@ static void calculate_discrete_gradient_tiled_f64(
                 for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
                     out_row[j] = edge_delta[(2 * n_leaves - 2) - 2 * i + j];
                 }
-                out_row[2 * i - 1] = edge_delta[other_root_child];
+                if (2 * i - 1 > i) {
+                    out_row[2 * i - 1] = edge_delta[other_root_child];
+                }
                 out_row[2 * i]     = edge_delta[other_root_child];
             }
 
@@ -762,8 +766,8 @@ static void calculate_discrete_gradient_tiled_f64(
 
 /* ============================================================================
  * Metal GPU Shaders:
- *   - Stage 2: Lockstep Column-Parallel `subdist` + O(N log N) Ancestor Top-Down
- *   - Stage 3: Register-Stack Heavy-First DFS SPR Scan (16-32 slots, zero DRAM queue!)
+ *   - Stage 2: Lockstep Column-Parallel `subdist` + 16x16 Threadgroup-Tiled
+ *     Transpose + O(sum_v depth(v)) Stackless Ancestor-Walk Top-Down Pass
  * ============================================================================ */
 static NSString *const kMetalShaderSource = @"\n\
 #include <metal_stdlib>\n\
@@ -791,13 +795,24 @@ kernel void gpu_transpose_leaf_block(\n\
     device float *subdist [[buffer(0)]],\n\
     constant int &n_leaves [[buffer(1)]],\n\
     constant int &n_nodes_u [[buffer(2)]],\n\
-    uint2 gid [[thread_position_in_grid]]\n\
+    uint2 tid [[thread_position_in_threadgroup]],\n\
+    uint2 tgid [[threadgroup_position_in_grid]]\n\
 ) {\n\
-    int u = n_leaves + (int)gid.x;\n\
-    int x = (int)gid.y;\n\
-    int root_u = n_nodes_u - 1;\n\
-    if (u >= root_u || x >= n_leaves) return;\n\
-    subdist[(size_t)x * n_nodes_u + u] = subdist[(size_t)u * n_nodes_u + x];\n\
+    threadgroup float tile[16][17];\n\
+    int n_int = (n_nodes_u - 1) - n_leaves;\n\
+    int x_in = (int)(tgid.x * 16 + tid.x);\n\
+    int k_in = (int)(tgid.y * 16 + tid.y);\n\
+    if (x_in < n_leaves && k_in < n_int) {\n\
+        int u_in = n_leaves + k_in;\n\
+        tile[tid.y][tid.x] = subdist[(size_t)u_in * n_nodes_u + x_in];\n\
+    }\n\
+    threadgroup_barrier(mem_flags::mem_threadgroup);\n\
+    int k_out = (int)(tgid.y * 16 + tid.x);\n\
+    int x_out = (int)(tgid.x * 16 + tid.y);\n\
+    if (x_out < n_leaves && k_out < n_int) {\n\
+        int u_out = n_leaves + k_out;\n\
+        subdist[(size_t)x_out * n_nodes_u + u_out] = tile[tid.x][tid.y];\n\
+    }\n\
 }\n\
 \n\
 kernel void gpu_bottom_up_int_cols(\n\
@@ -831,7 +846,10 @@ kernel void gpu_top_down_cols(\n\
 ) {\n\
     int v_node = (int)gid;\n\
     int root_u = n_nodes_u - 1;\n\
-    if (v_node >= root_u) return;\n\
+    if (v_node >= root_u) {\n\
+        if (v_node == root_u) subdist[(size_t)root_u * n_nodes_u + root_u] = 0.0f;\n\
+        return;\n\
+    }\n\
     int tv = tin[v_node];\n\
     int curr;\n\
     float val_r;\n\
@@ -863,318 +881,454 @@ kernel void gpu_top_down_cols(\n\
 }\n\
 ";
 
+static id<MTLComputePipelineState> create_pso(id<MTLDevice> dev, id<MTLLibrary> lib, NSString *name) {
+    NSError *err = nil;
+    id<MTLFunction> fn = [lib newFunctionWithName:name];
+    if (!fn) {
+        fprintf(stderr, "Metal Error: function '%s' not found.\n", [name UTF8String]);
+        exit(1);
+    }
+    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];
+    if (!pso) {
+        fprintf(stderr, "Metal PSO Error (%s): %s\n", [name UTF8String], [[err localizedDescription] UTF8String]);
+        exit(1);
+    }
+    return pso;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) {
+            fprintf(stderr, "Metal Error: No default Metal device available.\n");
+            return 1;
+        }
         NSError *error = nil;
         id<MTLLibrary> library = [device newLibraryWithSource:kMetalShaderSource options:nil error:&error];
         if (!library) {
             fprintf(stderr, "Metal compilation error: %s\n", [[error localizedDescription] UTF8String]);
             return 1;
         }
-        id<MTLComputePipelineState> psoLeafCols  = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"gpu_bottom_up_leaf_cols"] error:&error];
-        id<MTLComputePipelineState> psoTransLeaf = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"gpu_transpose_leaf_block"] error:&error];
-        id<MTLComputePipelineState> psoIntCols   = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"gpu_bottom_up_int_cols"] error:&error];
-        id<MTLComputePipelineState> psoTopDown   = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"gpu_top_down_cols"] error:&error];
+        id<MTLComputePipelineState> psoLeafCols  = create_pso(device, library, @"gpu_bottom_up_leaf_cols");
+        id<MTLComputePipelineState> psoTransLeaf = create_pso(device, library, @"gpu_transpose_leaf_block");
+        id<MTLComputePipelineState> psoIntCols   = create_pso(device, library, @"gpu_bottom_up_int_cols");
+        id<MTLComputePipelineState> psoTopDown   = create_pso(device, library, @"gpu_top_down_cols");
         id<MTLCommandQueue> queue = [device newCommandQueue];
+        if (!queue) {
+            fprintf(stderr, "Metal Error: Failed to create command queue.\n");
+            return 1;
+        }
 
-        printf("========================================================================================================================================\n");
-        printf("LARGE-N SCALING ON APPLE M5: 1-Core vs. 10-Core vs. Metal GPU `subdist` vs. Hybrid GPU+CPU vs. Column-Tiled Low-Memory (1/4th RAM)\n");
-        printf("========================================================================================================================================\n");
-        printf("%5s | %11s | %11s %8s | %12s %11s %8s | %12s %8s | %12s | %10s\n",
-               "N", "1-Core CPU", "10-Core CPU", "Speedup", "1-Core subdist", "GPU subdist", "GPU Spd", "Hybrid Total", "Hyb Spd", "Tiled (1/4M)", "Max Diff");
-        printf("----------------------------------------------------------------------------------------------------------------------------------------\n");
+        printf("========================================================================================================================================================\n");
+        printf("LARGE-N SCALING ON APPLE M5 (%s): 1-Core vs. 10-Core vs. Metal GPU `subdist` vs. Hybrid GPU+CPU vs. Column-Tiled (1/4 subdist RAM)\n",
+               [[device name] UTF8String]);
+        printf("========================================================================================================================================================\n");
+        printf("%5s | %10s | %10s %7s | %11s %11s %10s %7s | %11s %7s | %11s | %9s %9s\n",
+               "N", "1-Core F64", "10-Core F64", "Speedup", "1C sub(F64)", "1C sub(F32)", "GPU sub(F32)", "GPU Spd",
+               "Hybrid F32", "Hyb Spd", "Tiled F64", "F64 Diff", "F32 Diff");
+        printf("--------------------------------------------------------------------------------------------------------------------------------------------------------\n");
 
         const int32_t sizes[] = {100, 250, 500, 1000, 2000, 3000, 4000};
         for (int s = 0; s < 7; ++s) {
-            int32_t N = sizes[s];
-            int32_t n_pairs = N - 1;
-            int32_t n_nodes_r = 2 * N - 1;
-            int32_t n_nodes_u = 2 * N - 2;
-            int32_t root_u = n_nodes_u - 1;
-            int32_t max_cols = 2 * n_pairs - 1;
-            int32_t n_trials = (N <= 500) ? 10 : ((N <= 2000) ? 4 : 2);
+            @autoreleasepool {
+                int32_t N = sizes[s];
+                int32_t n_pairs = N - 1;
+                int32_t n_nodes_r = 2 * N - 1;
+                int32_t n_nodes_u = 2 * N - 2;
+                int32_t root_u = n_nodes_u - 1;
+                int32_t max_cols = 2 * n_pairs - 1;
+                int32_t n_trials = (N <= 500) ? 10 : ((N <= 2000) ? 4 : 2);
 
-            int64_t *v = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
-            double *D = (double *)malloc((size_t)N * N * sizeof(double));
-            float *D_f32 = (float *)malloc((size_t)N * N * sizeof(float));
-            double *delta_1core = (double *)malloc((size_t)n_pairs * max_cols * sizeof(double));
-            double *delta_mcore = (double *)malloc((size_t)n_pairs * max_cols * sizeof(double));
-            float *delta_hyb = (float *)malloc((size_t)n_pairs * max_cols * sizeof(float));
-            int32_t *iwork = (int32_t *)malloc((size_t)50 * N * sizeof(int32_t));
-            int32_t *thr_iwork = (int32_t *)malloc((size_t)N_CPU_THREADS * N * sizeof(int32_t));
-            double *dwork = (double *)malloc(((size_t)n_nodes_u * n_nodes_u + (size_t)10 * n_nodes_u) * sizeof(double));
-            double *thr_dwork = (double *)malloc((size_t)N_CPU_THREADS * n_nodes_u * sizeof(double));
-            float *thr_fwork = (float *)malloc((size_t)N_CPU_THREADS * n_nodes_u * sizeof(float));
+                int64_t *v = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
+                double *D = (double *)malloc((size_t)N * N * sizeof(double));
+                float *D_f32 = (float *)malloc((size_t)N * N * sizeof(float));
+                double *delta_1core = (double *)calloc((size_t)n_pairs * max_cols, sizeof(double));
+                double *delta_mcore = (double *)calloc((size_t)n_pairs * max_cols, sizeof(double));
+                float *delta_hyb = (float *)calloc((size_t)n_pairs * max_cols, sizeof(float));
+                int32_t *iwork = (int32_t *)malloc((size_t)50 * N * sizeof(int32_t));
+                int32_t *thr_iwork = (int32_t *)malloc((size_t)N_CPU_THREADS * N * sizeof(int32_t));
+                double *dwork = (double *)malloc(((size_t)n_nodes_u * n_nodes_u + (size_t)10 * n_nodes_u) * sizeof(double));
+                float *fwork_subdist = (float *)malloc((size_t)n_nodes_u * n_nodes_u * sizeof(float));
+                double *thr_dwork = (double *)malloc((size_t)N_CPU_THREADS * n_nodes_u * sizeof(double));
+                float *thr_fwork = (float *)malloc((size_t)N_CPU_THREADS * n_nodes_u * sizeof(float));
 
-            v[0] = 0;
-            for (int32_t i = 1; i < n_pairs; ++i) v[i] = (int64_t)(xorshift32() % (uint32_t)(i + 1));
-            for (int32_t i = 0; i < N; ++i) {
-                D[i * N + i] = 0.0;
-                D_f32[i * N + i] = 0.0f;
-                for (int32_t j = i + 1; j < N; ++j) {
-                    double d = 0.1 + 2.0 * rand_uniform();
-                    D[i * N + j] = d;
-                    D[j * N + i] = d;
-                    D_f32[i * N + j] = (float)d;
-                    D_f32[j * N + i] = (float)d;
-                }
-            }
-
-            // 1. 1-Core CPU Total
-            calculate_discrete_gradient_full_c(v, D, N, delta_1core);
-            double t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) {
-                calculate_discrete_gradient_full_c(v, D, N, delta_1core);
-            }
-            double ms_1core = (now_ms() - t0) / n_trials;
-
-            // 2. 10-Core CPU Total (FP64)
-            calculate_discrete_gradient_multicore_f64(v, D, N, delta_mcore, iwork, dwork, thr_iwork, thr_dwork);
-            t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) {
-                calculate_discrete_gradient_multicore_f64(v, D, N, delta_mcore, iwork, dwork, thr_iwork, thr_dwork);
-            }
-            double ms_mcore = (now_ms() - t0) / n_trials;
-
-            double max_diff = 0.0;
-            for (size_t idx = 0; idx < (size_t)n_pairs * max_cols; ++idx) {
-                double err = fabs(delta_mcore[idx] - delta_1core[idx]);
-                if (err > max_diff) max_diff = err;
-            }
-
-            // 3. Measure 1-Core `subdist` time
-            int32_t *pairs = iwork;
-            int32_t *child1_r = pairs + 2 * n_pairs;
-            int32_t *child2_r = child1_r + n_nodes_r;
-            int32_t *parents_uf = child2_r + n_nodes_r;
-            int32_t *min_leaf = parents_uf + n_nodes_r;
-            int32_t *v_map = min_leaf + n_nodes_r;
-            int32_t *m_lmin = v_map + N;
-            int32_t *parent_u = m_lmin + N;
-            int32_t *sub_size = parent_u + n_nodes_u;
-            int32_t *tin = sub_size + n_nodes_u;
-            int32_t *dfs_order = tin + n_nodes_u;
-            int32_t *adj_u = dfs_order + n_nodes_u;
-            int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
-            int32_t other_root_child = (rc1 < rc2) ? rc1 : rc2;
-            int32_t root_u_c0 = child1_r[root_u], root_u_c1 = child2_r[root_u], root_u_c2 = other_root_child;
-            double *subdist = dwork;
-
-            t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) {
+                v[0] = 0;
+                for (int32_t i = 1; i < n_pairs; ++i) v[i] = (int64_t)(xorshift32() % (uint32_t)(i + 1));
                 for (int32_t i = 0; i < N; ++i) {
-                    memcpy(&subdist[(size_t)i * n_nodes_u], &D[(size_t)i * N], (size_t)N * sizeof(double));
-                }
-                for (int32_t u = N; u < root_u; ++u) {
-                    const double * restrict row_c1 = &subdist[(size_t)child1_r[u] * n_nodes_u];
-                    const double * restrict row_c2 = &subdist[(size_t)child2_r[u] * n_nodes_u];
-                    double * restrict row_u = &subdist[(size_t)u * n_nodes_u];
-                    for (int32_t v_node = 0; v_node < u; ++v_node) row_u[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
-                    for (int32_t v_node = 0; v_node < u; ++v_node) subdist[(size_t)v_node * n_nodes_u + u] = row_u[v_node];
-                }
-                for (int32_t p = root_u - 1; p >= N; --p) {
-                    int32_t g = parent_u[p], c1 = child1_r[p], c2 = child2_r[p];
-                    const double * restrict row_c1 = &subdist[(size_t)c1 * n_nodes_u];
-                    const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
-                    const double * restrict row_g  = &subdist[(size_t)g * n_nodes_u];
-                    double * restrict row_p = &subdist[(size_t)p * n_nodes_u];
-                    int32_t end1 = tin[c1] + sub_size[c1];
-                    for (int32_t idx = tin[c1]; idx < end1; ++idx) {
-                        int32_t v_node = dfs_order[idx];
-                        row_p[v_node] = 0.5 * (row_c2[v_node] + row_g[v_node]);
-                        subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
-                    }
-                    int32_t end2 = tin[c2] + sub_size[c2];
-                    for (int32_t idx = tin[c2]; idx < end2; ++idx) {
-                        int32_t v_node = dfs_order[idx];
-                        row_p[v_node] = 0.5 * (row_c1[v_node] + row_g[v_node]);
-                        subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+                    D[(size_t)i * N + i] = 0.0;
+                    D_f32[(size_t)i * N + i] = 0.0f;
+                    for (int32_t j = i + 1; j < N; ++j) {
+                        double d = 0.1 + 2.0 * rand_uniform();
+                        D[(size_t)i * N + j] = d;
+                        D[(size_t)j * N + i] = d;
+                        D_f32[(size_t)i * N + j] = (float)d;
+                        D_f32[(size_t)j * N + i] = (float)d;
                     }
                 }
-            }
-            double ms_1core_subdist = (now_ms() - t0) / n_trials;
 
-            // 4. Metal GPU `subdist` DP + Zero-Copy Hybrid GPU+CPU Unified Memory Pipeline
-            id<MTLBuffer> bufSubdist = [device newBufferWithLength:(size_t)n_nodes_u * n_nodes_u * sizeof(float) options:MTLResourceStorageModeShared];
-            id<MTLBuffer> bufC1      = [device newBufferWithLength:(size_t)n_nodes_r * sizeof(int32_t) options:MTLResourceStorageModeShared];
-            id<MTLBuffer> bufC2      = [device newBufferWithLength:(size_t)n_nodes_r * sizeof(int32_t) options:MTLResourceStorageModeShared];
-            id<MTLBuffer> bufTin     = [device newBufferWithLength:(size_t)n_nodes_u * sizeof(int32_t) options:MTLResourceStorageModeShared];
+                // 1. 1-Core CPU Total (FP64)
+                calculate_discrete_gradient_full_c(v, D, N, delta_1core);
+                double t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) {
+                    calculate_discrete_gradient_full_c(v, D, N, delta_1core);
+                }
+                double ms_1core = (now_ms() - t0) / n_trials;
 
-            float *gpu_subdist_ptr = (float *)[bufSubdist contents];
-            for (int32_t i = 0; i < N; ++i) {
-                memcpy(&gpu_subdist_ptr[(size_t)i * n_nodes_u], &D_f32[(size_t)i * N], (size_t)N * sizeof(float));
-            }
-            memcpy([bufC1 contents], child1_r, (size_t)n_nodes_r * sizeof(int32_t));
-            memcpy([bufC2 contents], child2_r, (size_t)n_nodes_r * sizeof(int32_t));
-            memcpy([bufTin contents], tin, (size_t)n_nodes_u * sizeof(int32_t));
+                // 2. 10-Core CPU Total (FP64)
+                calculate_discrete_gradient_multicore_f64(v, D, N, delta_mcore, iwork, dwork, thr_iwork, thr_dwork);
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) {
+                    calculate_discrete_gradient_multicore_f64(v, D, N, delta_mcore, iwork, dwork, thr_iwork, thr_dwork);
+                }
+                double ms_mcore = (now_ms() - t0) / n_trials;
 
-            void (^run_gpu_subdist)(void) = ^() {
-                id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
-
-                [enc setComputePipelineState:psoLeafCols];
-                [enc setBuffer:bufSubdist offset:0 atIndex:0];
-                [enc setBuffer:bufC1      offset:0 atIndex:1];
-                [enc setBuffer:bufC2      offset:0 atIndex:2];
-                [enc setBytes:&N          length:sizeof(int32_t) atIndex:3];
-                [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
-                [enc dispatchThreads:MTLSizeMake((NSUInteger)N, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)N), 1, 1)];
-
-                int32_t n_int = root_u - N;
-                [enc setComputePipelineState:psoTransLeaf];
-                [enc setBuffer:bufSubdist offset:0 atIndex:0];
-                [enc setBytes:&N          length:sizeof(int32_t) atIndex:1];
-                [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:2];
-                [enc dispatchThreads:MTLSizeMake((NSUInteger)n_int, (NSUInteger)N, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-
-                [enc setComputePipelineState:psoIntCols];
-                [enc setBuffer:bufSubdist offset:0 atIndex:0];
-                [enc setBuffer:bufC1      offset:0 atIndex:1];
-                [enc setBuffer:bufC2      offset:0 atIndex:2];
-                [enc setBytes:&N          length:sizeof(int32_t) atIndex:3];
-                [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
-                [enc dispatchThreads:MTLSizeMake((NSUInteger)n_int, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)n_int), 1, 1)];
-
-                [enc setComputePipelineState:psoTopDown];
-                [enc setBuffer:bufSubdist offset:0 atIndex:0];
-                [enc setBuffer:bufC1      offset:0 atIndex:1];
-                [enc setBuffer:bufC2      offset:0 atIndex:2];
-                [enc setBuffer:bufTin     offset:0 atIndex:3];
-                [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
-                [enc setBytes:&root_u_c0  length:sizeof(int32_t) atIndex:5];
-                [enc setBytes:&root_u_c1  length:sizeof(int32_t) atIndex:6];
-                [enc setBytes:&root_u_c2  length:sizeof(int32_t) atIndex:7];
-                [enc dispatchThreads:MTLSizeMake((NSUInteger)root_u, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)root_u), 1, 1)];
-
-                [enc endEncoding];
-                [cmdBuf commit];
-                [cmdBuf waitUntilCompleted];
-            };
-
-            run_gpu_subdist();
-            t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) run_gpu_subdist();
-            double ms_gpu_subdist = (now_ms() - t0) / n_trials;
-
-            // 5. Hybrid Zero-Copy GPU (`subdist`) + 10-Core CPU (`run_half_tree_dfs_f32` directly on Unified Memory)
-            float *nd_u_f32 = (float *)malloc((size_t)3 * n_nodes_u * sizeof(float));
-            dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
-
-            void (^run_hybrid)(void) = ^() {
-                int32_t orc, r0, r1, r2;
-                build_tree_structures(v, N, iwork, &orc, &r0, &r1, &r2);
-                dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
-                    int32_t i_start = (int32_t)((tid * N) / N_CPU_THREADS);
-                    int32_t i_end   = (int32_t)(((tid + 1) * N) / N_CPU_THREADS);
-                    for (int32_t i = i_start; i < i_end; ++i) {
-                        memcpy(&gpu_subdist_ptr[(size_t)i * n_nodes_u], &D_f32[(size_t)i * N], (size_t)N * sizeof(float));
+                double max_diff_f64 = 0.0;
+                for (int32_t i = 1; i < n_pairs; ++i) {
+                    for (int32_t j = 0; j <= 2 * i; ++j) {
+                        double err = fabs(delta_mcore[(size_t)i * max_cols + j] - delta_1core[(size_t)i * max_cols + j]);
+                        if (err > max_diff_f64) max_diff_f64 = err;
                     }
-                });
+                }
+
+                // 3. Measure complete 1-Core `subdist` time (including 3-way root_u row and diagonal zeroing) in both FP64 and FP32
+                int32_t *pairs = iwork;
+                int32_t *child1_r = pairs + 2 * n_pairs;
+                int32_t *child2_r = child1_r + n_nodes_r;
+                int32_t *parents_uf = child2_r + n_nodes_r;
+                int32_t *min_leaf = parents_uf + n_nodes_r;
+                int32_t *v_map = min_leaf + n_nodes_r;
+                int32_t *m_lmin = v_map + N;
+                int32_t *parent_u = m_lmin + N;
+                int32_t *sub_size = parent_u + n_nodes_u;
+                int32_t *tin = sub_size + n_nodes_u;
+                int32_t *dfs_order = tin + n_nodes_u;
+                int32_t *adj_u = dfs_order + n_nodes_u;
+                int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
+                int32_t other_root_child = (rc1 < rc2) ? rc1 : rc2;
+                int32_t root_u_c0 = child1_r[root_u], root_u_c1 = child2_r[root_u], root_u_c2 = other_root_child;
+                double *subdist = dwork;
+
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) {
+                    for (int32_t i = 0; i < N; ++i) {
+                        memcpy(&subdist[(size_t)i * n_nodes_u], &D[(size_t)i * N], (size_t)N * sizeof(double));
+                    }
+                    for (int32_t u = N; u < root_u; ++u) {
+                        const double * restrict row_c1 = &subdist[(size_t)child1_r[u] * n_nodes_u];
+                        const double * restrict row_c2 = &subdist[(size_t)child2_r[u] * n_nodes_u];
+                        double * restrict row_u = &subdist[(size_t)u * n_nodes_u];
+                        for (int32_t v_node = 0; v_node < u; ++v_node) row_u[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
+                        for (int32_t v_node = 0; v_node < u; ++v_node) subdist[(size_t)v_node * n_nodes_u + u] = row_u[v_node];
+                    }
+                    {
+                        const double * restrict row_c0 = &subdist[(size_t)root_u_c0 * n_nodes_u];
+                        const double * restrict row_c1 = &subdist[(size_t)root_u_c1 * n_nodes_u];
+                        const double * restrict row_c2 = &subdist[(size_t)root_u_c2 * n_nodes_u];
+                        double * restrict row_r = &subdist[(size_t)root_u * n_nodes_u];
+                        int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
+                        for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
+                        }
+                        int32_t end1 = tin[root_u_c1] + sub_size[root_u_c1];
+                        for (int32_t idx = tin[root_u_c1]; idx < end1; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c2[v_node]);
+                        }
+                        int32_t end2 = tin[root_u_c2] + sub_size[root_u_c2];
+                        for (int32_t idx = tin[root_u_c2]; idx < end2; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c1[v_node]);
+                        }
+                        for (int32_t v_node = 0; v_node < root_u; ++v_node) {
+                            subdist[(size_t)v_node * n_nodes_u + root_u] = row_r[v_node];
+                        }
+                    }
+                    for (int32_t p = root_u - 1; p >= N; --p) {
+                        int32_t g = parent_u[p], c1 = child1_r[p], c2 = child2_r[p];
+                        const double * restrict row_c1 = &subdist[(size_t)c1 * n_nodes_u];
+                        const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
+                        const double * restrict row_g  = &subdist[(size_t)g * n_nodes_u];
+                        double * restrict row_p = &subdist[(size_t)p * n_nodes_u];
+                        int32_t end1 = tin[c1] + sub_size[c1];
+                        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_p[v_node] = 0.5 * (row_c2[v_node] + row_g[v_node]);
+                            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+                        }
+                        int32_t end2 = tin[c2] + sub_size[c2];
+                        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_p[v_node] = 0.5 * (row_c1[v_node] + row_g[v_node]);
+                            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+                        }
+                    }
+                    for (int32_t i = 0; i < n_nodes_u; ++i) subdist[(size_t)i * n_nodes_u + i] = 0.0;
+                }
+                double ms_1core_subdist_f64 = (now_ms() - t0) / n_trials;
+
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) {
+                    for (int32_t i = 0; i < N; ++i) {
+                        memcpy(&fwork_subdist[(size_t)i * n_nodes_u], &D_f32[(size_t)i * N], (size_t)N * sizeof(float));
+                    }
+                    for (int32_t u = N; u < root_u; ++u) {
+                        const float * restrict row_c1 = &fwork_subdist[(size_t)child1_r[u] * n_nodes_u];
+                        const float * restrict row_c2 = &fwork_subdist[(size_t)child2_r[u] * n_nodes_u];
+                        float * restrict row_u = &fwork_subdist[(size_t)u * n_nodes_u];
+                        for (int32_t v_node = 0; v_node < u; ++v_node) row_u[v_node] = 0.5f * (row_c1[v_node] + row_c2[v_node]);
+                        for (int32_t v_node = 0; v_node < u; ++v_node) fwork_subdist[(size_t)v_node * n_nodes_u + u] = row_u[v_node];
+                    }
+                    {
+                        const float * restrict row_c0 = &fwork_subdist[(size_t)root_u_c0 * n_nodes_u];
+                        const float * restrict row_c1 = &fwork_subdist[(size_t)root_u_c1 * n_nodes_u];
+                        const float * restrict row_c2 = &fwork_subdist[(size_t)root_u_c2 * n_nodes_u];
+                        float * restrict row_r = &fwork_subdist[(size_t)root_u * n_nodes_u];
+                        int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
+                        for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5f * (row_c1[v_node] + row_c2[v_node]);
+                        }
+                        int32_t end1 = tin[root_u_c1] + sub_size[root_u_c1];
+                        for (int32_t idx = tin[root_u_c1]; idx < end1; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5f * (row_c0[v_node] + row_c2[v_node]);
+                        }
+                        int32_t end2 = tin[root_u_c2] + sub_size[root_u_c2];
+                        for (int32_t idx = tin[root_u_c2]; idx < end2; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_r[v_node] = 0.5f * (row_c0[v_node] + row_c1[v_node]);
+                        }
+                        for (int32_t v_node = 0; v_node < root_u; ++v_node) {
+                            fwork_subdist[(size_t)v_node * n_nodes_u + root_u] = row_r[v_node];
+                        }
+                    }
+                    for (int32_t p = root_u - 1; p >= N; --p) {
+                        int32_t g = parent_u[p], c1 = child1_r[p], c2 = child2_r[p];
+                        const float * restrict row_c1 = &fwork_subdist[(size_t)c1 * n_nodes_u];
+                        const float * restrict row_c2 = &fwork_subdist[(size_t)c2 * n_nodes_u];
+                        const float * restrict row_g  = &fwork_subdist[(size_t)g * n_nodes_u];
+                        float * restrict row_p = &fwork_subdist[(size_t)p * n_nodes_u];
+                        int32_t end1 = tin[c1] + sub_size[c1];
+                        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_p[v_node] = 0.5f * (row_c2[v_node] + row_g[v_node]);
+                            fwork_subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+                        }
+                        int32_t end2 = tin[c2] + sub_size[c2];
+                        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
+                            int32_t v_node = dfs_order[idx];
+                            row_p[v_node] = 0.5f * (row_c1[v_node] + row_g[v_node]);
+                            fwork_subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+                        }
+                    }
+                    for (int32_t i = 0; i < n_nodes_u; ++i) fwork_subdist[(size_t)i * n_nodes_u + i] = 0.0f;
+                }
+                double ms_1core_subdist_f32 = (now_ms() - t0) / n_trials;
+
+                // 4. Metal GPU `subdist` DP + Zero-Copy Hybrid GPU+CPU Unified Memory Pipeline
+                id<MTLBuffer> bufSubdist = [device newBufferWithLength:(size_t)n_nodes_u * n_nodes_u * sizeof(float) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> bufC1      = [device newBufferWithLength:(size_t)n_nodes_r * sizeof(int32_t) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> bufC2      = [device newBufferWithLength:(size_t)n_nodes_r * sizeof(int32_t) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> bufTin     = [device newBufferWithLength:(size_t)n_nodes_u * sizeof(int32_t) options:MTLResourceStorageModeShared];
+                if (!bufSubdist || !bufC1 || !bufC2 || !bufTin) {
+                    fprintf(stderr, "Metal Error: Failed to allocate shared buffers at N=%d.\n", N);
+                    return 1;
+                }
+
+                float *gpu_subdist_ptr = (float *)[bufSubdist contents];
+                for (int32_t i = 0; i < N; ++i) {
+                    memcpy(&gpu_subdist_ptr[(size_t)i * n_nodes_u], &D_f32[(size_t)i * N], (size_t)N * sizeof(float));
+                }
                 memcpy([bufC1 contents], child1_r, (size_t)n_nodes_r * sizeof(int32_t));
                 memcpy([bufC2 contents], child2_r, (size_t)n_nodes_r * sizeof(int32_t));
                 memcpy([bufTin contents], tin, (size_t)n_nodes_u * sizeof(int32_t));
 
-                run_gpu_subdist();
-                gpu_subdist_ptr[(size_t)root_u * n_nodes_u + root_u] = 0.0f;
+                void (^run_gpu_subdist)(void) = ^() {
+                    @autoreleasepool {
+                        id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+                        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-                for (int32_t u = N; u <= root_u; ++u) {
-                    int32_t n0 = adj_u[3 * u + 0], n1 = adj_u[3 * u + 1], n2 = adj_u[3 * u + 2];
-                    nd_u_f32[3 * u + 0] = gpu_subdist_ptr[(size_t)n1 * n_nodes_u + n2];
-                    nd_u_f32[3 * u + 1] = gpu_subdist_ptr[(size_t)n0 * n_nodes_u + n2];
-                    nd_u_f32[3 * u + 2] = gpu_subdist_ptr[(size_t)n0 * n_nodes_u + n1];
+                        [enc setComputePipelineState:psoLeafCols];
+                        [enc setBuffer:bufSubdist offset:0 atIndex:0];
+                        [enc setBuffer:bufC1      offset:0 atIndex:1];
+                        [enc setBuffer:bufC2      offset:0 atIndex:2];
+                        [enc setBytes:&N          length:sizeof(int32_t) atIndex:3];
+                        [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
+                        [enc dispatchThreads:MTLSizeMake((NSUInteger)N, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)N), 1, 1)];
+
+                        int32_t n_int = root_u - N;
+                        [enc setComputePipelineState:psoTransLeaf];
+                        [enc setBuffer:bufSubdist offset:0 atIndex:0];
+                        [enc setBytes:&N          length:sizeof(int32_t) atIndex:1];
+                        [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:2];
+                        MTLSize tgCount = MTLSizeMake((NSUInteger)((N + 15) / 16), (NSUInteger)((n_int + 15) / 16), 1);
+                        [enc dispatchThreadgroups:tgCount threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+
+                        [enc setComputePipelineState:psoIntCols];
+                        [enc setBuffer:bufSubdist offset:0 atIndex:0];
+                        [enc setBuffer:bufC1      offset:0 atIndex:1];
+                        [enc setBuffer:bufC2      offset:0 atIndex:2];
+                        [enc setBytes:&N          length:sizeof(int32_t) atIndex:3];
+                        [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
+                        [enc dispatchThreads:MTLSizeMake((NSUInteger)n_int, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)n_int), 1, 1)];
+
+                        [enc setComputePipelineState:psoTopDown];
+                        [enc setBuffer:bufSubdist offset:0 atIndex:0];
+                        [enc setBuffer:bufC1      offset:0 atIndex:1];
+                        [enc setBuffer:bufC2      offset:0 atIndex:2];
+                        [enc setBuffer:bufTin     offset:0 atIndex:3];
+                        [enc setBytes:&n_nodes_u  length:sizeof(int32_t) atIndex:4];
+                        [enc setBytes:&root_u_c0  length:sizeof(int32_t) atIndex:5];
+                        [enc setBytes:&root_u_c1  length:sizeof(int32_t) atIndex:6];
+                        [enc setBytes:&root_u_c2  length:sizeof(int32_t) atIndex:7];
+                        [enc dispatchThreads:MTLSizeMake((NSUInteger)n_nodes_u, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN((NSUInteger)256, (NSUInteger)n_nodes_u), 1, 1)];
+
+                        [enc endEncoding];
+                        [cmdBuf commit];
+                        [cmdBuf waitUntilCompleted];
+                        if ([cmdBuf status] != MTLCommandBufferStatusCompleted || [cmdBuf error] != nil) {
+                            fprintf(stderr, "Metal execution failed: %s\n", [[[cmdBuf error] localizedDescription] UTF8String]);
+                            exit(1);
+                        }
+                    }
+                };
+
+                run_gpu_subdist();
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) run_gpu_subdist();
+                double ms_gpu_subdist = (now_ms() - t0) / n_trials;
+
+                // 5. Hybrid Zero-Copy GPU (`subdist`) + 10-Core CPU (`run_half_tree_dfs_f32` directly on Unified Memory)
+                float *nd_u_f32 = (float *)malloc((size_t)3 * n_nodes_u * sizeof(float));
+                dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
+
+                void (^run_hybrid)(void) = ^() {
+                    memset(delta_hyb, 0, (size_t)n_pairs * max_cols * sizeof(float));
+                    int32_t orc, r0, r1, r2;
+                    build_tree_structures(v, N, iwork, &orc, &r0, &r1, &r2);
+                    dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
+                        int32_t i_start = (int32_t)((tid * N) / N_CPU_THREADS);
+                        int32_t i_end   = (int32_t)(((tid + 1) * N) / N_CPU_THREADS);
+                        for (int32_t i = i_start; i < i_end; ++i) {
+                            memcpy(&gpu_subdist_ptr[(size_t)i * n_nodes_u], &D_f32[(size_t)i * N], (size_t)N * sizeof(float));
+                        }
+                    });
+                    memcpy([bufC1 contents], child1_r, (size_t)n_nodes_r * sizeof(int32_t));
+                    memcpy([bufC2 contents], child2_r, (size_t)n_nodes_r * sizeof(int32_t));
+                    memcpy([bufTin contents], tin, (size_t)n_nodes_u * sizeof(int32_t));
+
+                    run_gpu_subdist();
+
+                    for (int32_t u = N; u <= root_u; ++u) {
+                        int32_t n0 = adj_u[3 * u + 0], n1 = adj_u[3 * u + 1], n2 = adj_u[3 * u + 2];
+                        nd_u_f32[3 * u + 0] = gpu_subdist_ptr[(size_t)n1 * n_nodes_u + n2];
+                        nd_u_f32[3 * u + 1] = gpu_subdist_ptr[(size_t)n0 * n_nodes_u + n2];
+                        nd_u_f32[3 * u + 2] = gpu_subdist_ptr[(size_t)n0 * n_nodes_u + n1];
+                    }
+
+                    int32_t n_rows = N - 2;
+                    dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
+                        int32_t r_start = 2 + (int32_t)((tid * n_rows) / N_CPU_THREADS);
+                        int32_t r_end   = 2 + (int32_t)(((tid + 1) * n_rows) / N_CPU_THREADS);
+                        if (r_start >= r_end) return;
+
+                        float *edge_delta = &thr_fwork[tid * n_nodes_u];
+                        int32_t *dest_row = &thr_iwork[tid * N];
+
+                        int32_t i_init = r_end - 2;
+                        for (int32_t j = 0; j < N; ++j) dest_row[j] = j;
+                        for (int32_t k = 0; k < (N - 2 - i_init); ++k) {
+                            dest_row[m_lmin[k]] = N + k;
+                        }
+
+                        for (int32_t v_index = r_end - 1; v_index >= r_start; --v_index) {
+                            int32_t tree_root = v_map[v_index];
+                            int32_t parent = (tree_root == root_u) ? orc : parent_u[tree_root];
+                            const float * restrict row_root = &gpu_subdist_ptr[(size_t)tree_root * n_nodes_u];
+
+                            int32_t other0 = -1, other1 = -1;
+                            for (int32_t k = 0; k < 3; ++k) {
+                                int32_t nb_node = adj_u[3 * parent + k];
+                                if (nb_node != -1 && nb_node != tree_root) {
+                                    if (other0 == -1) other0 = nb_node;
+                                    else other1 = nb_node;
+                                }
+                            }
+                            if (other0 != -1) {
+                                for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0f;
+
+                                run_half_tree_dfs_f32(
+                                    other0, other1, parent, N, n_nodes_u, adj_u, parent_u, sub_size, nd_u_f32,
+                                    row_root, &gpu_subdist_ptr[(size_t)other1 * n_nodes_u], edge_delta
+                                );
+                                run_half_tree_dfs_f32(
+                                    other1, other0, parent, N, n_nodes_u, adj_u, parent_u, sub_size, nd_u_f32,
+                                    row_root, &gpu_subdist_ptr[(size_t)other0 * n_nodes_u], edge_delta
+                                );
+
+                                int32_t i = v_index - 1;
+                                float * restrict out_row = &delta_hyb[(size_t)i * max_cols];
+                                for (int32_t j = 0; j <= i; ++j) out_row[j] = edge_delta[dest_row[j]];
+                                for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
+                                    out_row[j] = edge_delta[(2 * N - 2) - 2 * i + j];
+                                }
+                                if (2 * i - 1 > i) {
+                                    out_row[2 * i - 1] = edge_delta[orc];
+                                }
+                                out_row[2 * i]     = edge_delta[orc];
+                            }
+
+                            int32_t k_next = N - 1 - v_index;
+                            if (k_next >= 0 && k_next < n_pairs - 1) {
+                                dest_row[m_lmin[k_next]] = N + k_next;
+                            }
+                        }
+                    });
+                };
+
+                run_hybrid();
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) run_hybrid();
+                double ms_hybrid = (now_ms() - t0) / n_trials;
+
+                double max_diff_f32 = 0.0;
+                for (int32_t i = 1; i < n_pairs; ++i) {
+                    for (int32_t j = 0; j <= 2 * i; ++j) {
+                        double err = fabs((double)delta_hyb[(size_t)i * max_cols + j] - delta_1core[(size_t)i * max_cols + j]);
+                        if (err > max_diff_f32) max_diff_f32 = err;
+                    }
                 }
 
-                int32_t n_rows = N - 2;
-                dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
-                    int32_t r_start = 2 + (int32_t)((tid * n_rows) / N_CPU_THREADS);
-                    int32_t r_end   = 2 + (int32_t)(((tid + 1) * n_rows) / N_CPU_THREADS);
-                    if (r_start >= r_end) return;
-
-                    float *edge_delta = &thr_fwork[tid * n_nodes_u];
-                    int32_t *dest_row = &thr_iwork[tid * N];
-
-                    int32_t i_init = r_end - 2;
-                    for (int32_t j = 0; j < N; ++j) dest_row[j] = j;
-                    for (int32_t k = 0; k < (N - 2 - i_init); ++k) {
-                        dest_row[m_lmin[k]] = N + k;
-                    }
-
-                    for (int32_t v_index = r_end - 1; v_index >= r_start; --v_index) {
-                        int32_t tree_root = v_map[v_index];
-                        int32_t parent = (tree_root == root_u) ? orc : parent_u[tree_root];
-                        const float * restrict row_root = &gpu_subdist_ptr[(size_t)tree_root * n_nodes_u];
-
-                        int32_t other0 = -1, other1 = -1;
-                        for (int32_t k = 0; k < 3; ++k) {
-                            int32_t nb_node = adj_u[3 * parent + k];
-                            if (nb_node != -1 && nb_node != tree_root) {
-                                if (other0 == -1) other0 = nb_node;
-                                else other1 = nb_node;
-                            }
-                        }
-                        if (other0 != -1) {
-                            for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0f;
-
-                            run_half_tree_dfs_f32(
-                                other0, other1, parent, N, n_nodes_u, adj_u, parent_u, sub_size, nd_u_f32,
-                                row_root, &gpu_subdist_ptr[(size_t)other1 * n_nodes_u], edge_delta
-                            );
-                            run_half_tree_dfs_f32(
-                                other1, other0, parent, N, n_nodes_u, adj_u, parent_u, sub_size, nd_u_f32,
-                                row_root, &gpu_subdist_ptr[(size_t)other0 * n_nodes_u], edge_delta
-                            );
-
-                            int32_t i = v_index - 1;
-                            float * restrict out_row = &delta_hyb[(size_t)i * max_cols];
-                            for (int32_t j = 0; j <= i; ++j) out_row[j] = edge_delta[dest_row[j]];
-                            for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
-                                out_row[j] = edge_delta[(2 * N - 2) - 2 * i + j];
-                            }
-                            out_row[2 * i - 1] = edge_delta[orc];
-                            out_row[2 * i]     = edge_delta[orc];
-                        }
-
-                        int32_t k_next = N - 1 - v_index;
-                        if (k_next >= 0 && k_next < n_pairs - 1) {
-                            dest_row[m_lmin[k_next]] = N + k_next;
-                        }
-                    }
-                });
-            };
-
-            run_hybrid();
-            t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) run_hybrid();
-            double ms_hybrid = (now_ms() - t0) / n_trials;
-
-            // 6. Verify & time Column-Tiled Low-Memory 10-Core CPU (4x smaller subdist_int_leaf + L1 autonomous rows)
-            double *delta_tiled = (double *)malloc((size_t)n_pairs * max_cols * sizeof(double));
-            double *subdist_int_leaf = (double *)malloc(((size_t)N * N + (size_t)3 * n_nodes_u) * sizeof(double));
-            double *thr_tile_work = (double *)malloc((size_t)N_CPU_THREADS * n_nodes_u * B_TILE * sizeof(double));
-            calculate_discrete_gradient_tiled_f64(v, D, N, delta_tiled, iwork, subdist_int_leaf, thr_iwork, thr_tile_work);
-            t0 = now_ms();
-            for (int t = 0; t < n_trials; ++t) {
+                // 6. Verify & time Column-Tiled Low-Memory 10-Core CPU (subdist_int_leaf uses 1/4th of subdist RAM)
+                double *delta_tiled = (double *)calloc((size_t)n_pairs * max_cols, sizeof(double));
+                double *subdist_int_leaf = (double *)malloc(((size_t)N * N + (size_t)3 * n_nodes_u) * sizeof(double));
+                double *thr_tile_work = (double *)malloc((size_t)N_CPU_THREADS * n_nodes_u * B_TILE * sizeof(double));
                 calculate_discrete_gradient_tiled_f64(v, D, N, delta_tiled, iwork, subdist_int_leaf, thr_iwork, thr_tile_work);
-            }
-            double ms_tiled = (now_ms() - t0) / n_trials;
-            double max_diff_tiled = 0.0;
-            for (size_t idx = 0; idx < (size_t)n_pairs * max_cols; ++idx) {
-                double err = fabs(delta_tiled[idx] - delta_1core[idx]);
-                if (err > max_diff_tiled) max_diff_tiled = err;
-            }
-            if (max_diff_tiled > max_diff) max_diff = max_diff_tiled;
+                t0 = now_ms();
+                for (int t = 0; t < n_trials; ++t) {
+                    calculate_discrete_gradient_tiled_f64(v, D, N, delta_tiled, iwork, subdist_int_leaf, thr_iwork, thr_tile_work);
+                }
+                double ms_tiled = (now_ms() - t0) / n_trials;
+                for (int32_t i = 1; i < n_pairs; ++i) {
+                    for (int32_t j = 0; j <= 2 * i; ++j) {
+                        double err = fabs(delta_tiled[(size_t)i * max_cols + j] - delta_1core[(size_t)i * max_cols + j]);
+                        if (err > max_diff_f64) max_diff_f64 = err;
+                    }
+                }
 
-            printf("%5d | %8.3f ms | %8.3f ms %7.2fx | %9.3f ms %8.3f ms %7.2fx | %9.3f ms %7.2fx | %9.3f ms | %10.2e\n",
-                   N, ms_1core, ms_mcore, ms_1core / ms_mcore,
-                   ms_1core_subdist, ms_gpu_subdist, ms_1core_subdist / ms_gpu_subdist,
-                   ms_hybrid, ms_1core / ms_hybrid, ms_tiled, max_diff);
+                printf("%5d | %7.3f ms | %7.3f ms %6.2fx | %8.3f ms %8.3f ms %7.3f ms %6.2fx | %8.3f ms %6.2fx | %8.3f ms | %9.2e %9.2e\n",
+                       N, ms_1core, ms_mcore, ms_1core / ms_mcore,
+                       ms_1core_subdist_f64, ms_1core_subdist_f32, ms_gpu_subdist, ms_1core_subdist_f64 / ms_gpu_subdist,
+                       ms_hybrid, ms_1core / ms_hybrid, ms_tiled, max_diff_f64, max_diff_f32);
 
-            free(delta_tiled); free(subdist_int_leaf); free(thr_tile_work);
-            free(nd_u_f32);
-            free(v); free(D); free(D_f32); free(delta_1core); free(delta_mcore); free(delta_hyb);
-            free(iwork); free(thr_iwork); free(dwork); free(thr_dwork); free(thr_fwork);
+                free(delta_tiled); free(subdist_int_leaf); free(thr_tile_work);
+                free(nd_u_f32);
+                free(v); free(D); free(D_f32); free(delta_1core); free(delta_mcore); free(delta_hyb);
+                free(iwork); free(thr_iwork); free(dwork); free(fwork_subdist); free(thr_dwork); free(thr_fwork);
+            }
         }
+        printf("========================================================================================================================================================\n");
     }
     return 0;
 }

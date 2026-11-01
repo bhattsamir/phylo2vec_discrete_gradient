@@ -36,7 +36,7 @@
 \maketitle
 
 \begin{abstract}
-Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference, powering standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a complete mathematical formulation and high-performance software architecture for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ top-down cherry-first gauge transformation and an $O(N)$ inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to massive trees on multi-core CPUs and GPUs, we prove four architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{$O(N \log N)$ Stackless Ancestor-Walk Top-Down Theorem}, (iii) the \emph{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with $O(1)$ incremental destination mapping, and (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $100\%$ win/tie rate in BME tree length against FastME while requiring up to $3.16\times$ fewer $O(N^2)$ evaluations and running up to $2.97\times$ faster on a single core. At large scale ($N = 100 \dots 4{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $6.79\times$ speedup on an Apple M5 Metal GPU and enable tree optimization up to $N = 350{,}000\text{--}400{,}000$ taxa on 8$\times$ NVIDIA H100 and 8$\times$ NVIDIA RTX PRO 6000 nodes.
+Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference, powering standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a complete mathematical formulation and high-performance software architecture for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ tree-based top-down cherry-first gauge transformation and an inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to large trees on multi-core CPUs and GPUs, we prove four architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{Stackless Ancestor-Walk Top-Down Theorem} ($O(N \log N)$ expected work on balanced trees, $O(N^2)$ worst-case on caterpillars, with $O(1)$ stack space), (iii) the \emph{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with $O(1)$ incremental destination mapping and race-free SIMT parallel destination indexing, and (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling paired with fused top-1 row candidate reductions. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $99.2\%$ win/tie rate ($119/120$ trials) in BME tree length against FastME while requiring up to $3.23\times$ fewer $O(N^2)$ evaluations and running up to $3.21\times$ faster on a single core. At large scale ($N = 100 \dots 4{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $7.24\times$ \texttt{subdist} speedup ($5.39\times$ end-to-end hybrid speedup) on an Apple M5 Metal GPU and provide an analytical multi-GPU scaling path up to $N = 350{,}000\text{--}400{,}000$ taxa on 8$\times$ NVIDIA H100 and 8$\times$ NVIDIA RTX PRO 6000 nodes.
 \end{abstract}
 
 \tableofcontents
@@ -46,12 +46,12 @@ Balanced Minimum Evolution (BME) is one of the most statistically consistent and
 \section{Introduction}
 % ============================================================================
 
-Under the Balanced Minimum Evolution (BME) framework introduced by Pauplin~\cite{pauplin2000direct} and formalized by Desper and Gascuel~\cite{desper2002fast}, the length $L(T)$ of an unrooted binary phylogenetic tree $T$ with $N$ leaves and pairwise leaf distance matrix $D \in \mathbb{R}^{N \times N}$ is defined as:
+Under the Balanced Minimum Evolution (BME) framework introduced by Pauplin~\cite{pauplin2000direct} and formalized by Desper and Gascuel~\cite{desper2002fast}, the standard BME length $L(T)$ of an unrooted binary phylogenetic tree $T$ with $N$ leaves and symmetric pairwise leaf distance matrix $D \in \mathbb{R}^{N \times N}$ ($D_{xx} = 0$) is defined over unordered leaf pairs as:
 \begin{equation}
-L(T) = \sum_{x=0}^{N-1} \sum_{\substack{y=0 \\ y \neq x}}^{N-1} D_{xy} \, 2^{-d_T(x, y)},
+L(T) = \frac{1}{2} \sum_{x=0}^{N-1} \sum_{\substack{y=0 \\ y \neq x}}^{N-1} D_{xy} \, 2^{-d_T(x, y)} = \sum_{0 \le x < y \le N-1} D_{xy} \, 2^{-d_T(x, y)} = \sum_{x=0}^{N-1} \sum_{\substack{y=0 \\ y \neq x}}^{N-1} D_{xy} \, 2^{-d_{\text{edge}}(x, y)},
 \label{eq:pauplin}
 \end{equation}
-where $d_T(x, y)$ denotes the number of internal degree-3 nodes on the unique path between leaf $x$ and leaf $y$ in $T$ (so that the number of edges on the path is $d_T(x,y) + 1$). Desper and Gascuel~\cite{desper2002fast} and Lefort et al.~\cite{lefort2015fastme} (FastME 2.0) showed that all $O(N^2)$ Subtree Prune and Regraft (SPR) moves on $T$ can be evaluated in $O(N^2)$ total time via a two-pass recursive tree traversal that maintains balanced clade-to-clade average distances.
+where $d_T(x, y)$ denotes the number of internal degree-3 nodes on the unique path between leaf $x$ and leaf $y$ in $T$, and $d_{\text{edge}}(x, y) = d_T(x, y) + 1$ is the number of edges on that path. For convenience in discrete gradient recurrences, we also define the ordered-pair sum $L_{\text{ord}}(T) = 2 L(T) = \sum_{x \neq y} D_{xy} 2^{-d_T(x,y)}$; our standalone discrete gradient routines (\texttt{calculate\_discrete\_gradient\_c} and \texttt{calculate\_discrete\_gradient\_full\_c}) report $\Delta L_{\text{ord}} = 2 \Delta L$, whereas the topological optimizers (\texttt{optimize\_phylo2vec\_bme\_c} and \texttt{optimize\_fastme\_bme\_c}) report the standard unordered Pauplin length $L(T)$ in Eq.~\eqref{eq:pauplin}. Desper and Gascuel~\cite{desper2002fast} and Lefort et al.~\cite{lefort2015fastme} (FastME 2.0) showed that all $O(N^2)$ Subtree Prune and Regraft (SPR) moves on $T$ can be evaluated in $O(N^2)$ total time via a two-pass recursive tree traversal that maintains balanced clade-to-clade average distances.
 
 While FastME's $O(N^2)$ per-sweep complexity is asymptotically optimal for evaluating all SPR moves of a fixed tree, pointer-based graph representations impose three fundamental computational limitations:
 \begin{enumerate}
@@ -70,10 +70,10 @@ Perturbing a single coordinate $v_i \leftarrow j$ ($j \in \{0, \dots, 2i\}$) cor
 \subsection{Contributions and Architecture Overview}
 In this paper, we describe a complete, self-contained mathematical and software framework for BME discrete gradient computation and topological tree optimization in Phylo2Vec space:
 \begin{enumerate}
-    \item \textbf{Full $0 \le j \le 2i$ Discrete Gradient in $O(N^2)$ Time (Section~\ref{sec:math}):} For any tree in cherry-first canonical gauge ($0 \le v_i \le i$), we compute the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\Delta_{i,j} = L(v^{(i \leftarrow j)}) - L(v)$ across all $2i+1$ valid regrafting coordinates $0 \le j \le 2i$—covering both leaf-incident pendant edges ($0 \le j \le i$), internal clade edges ($i+1 \le j \le 2i-2$), and root-incident edges ($j \in \{2i-1, 2i\}$).
-    \item \textbf{Exact $O(N)$ Cherry-First Gauge Transformation and Inverse Bijection (Section~\ref{sec:gauge}):} We prove that every binary tree can be relabeled into the cherry-first submanifold $\mathcal{V}_{\text{cf}} = \{v \in \mathcal{V} : 0 \le v_i \le i\}$ in $O(N)$ time via a single top-down Euler tour, and we provide an exact $O(N)$ inverse bijection (\texttt{encode\_rooted\_to\_v\_c} and \texttt{encode\_unrooted\_to\_v\_c}) that recovers $v \in \mathcal{V}$ from any rooted or unrooted tree topology.
+    \item \textbf{Full $0 \le j \le 2i$ Discrete Gradient in $O(N^2)$ Time (Section~\ref{sec:math}):} For any tree in cherry-first canonical gauge ($0 \le v_i \le i$), we compute the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\Delta_{i,j} = L_{\text{ord}}(v^{(i \leftarrow j)}) - L_{\text{ord}}(v)$ across all $2i+1$ valid regrafting coordinates $0 \le j \le 2i$—covering leaf-incident pendant edges ($0 \le j \le i$), internal clade edges ($i+1 \le j \le 2i-2$), and root-incident edges ($j \in \{2i-1, 2i\}$ with the boundary guard $2i-1 > i$ at row $i=1$).
+    \item \textbf{Cherry-First Gauge Transformation and Exact Inverse Bijection (Section~\ref{sec:gauge}):} We prove that every decoded binary tree can be relabeled into the cherry-first submanifold $\mathcal{V}_{\text{cf}} = \{v \in \mathcal{V} : 0 \le v_i \le i\}$ in $O(N)$ time via a single top-down Euler tour (\texttt{relabel\_from\_rooted\_tree}), and we provide an exact inverse bijection (\texttt{encode\_rooted\_to\_v\_c} and \texttt{encode\_unrooted\_to\_v\_c}) that recovers $v \in \mathcal{V}$ from any rooted or unrooted tree topology.
     \item \textbf{Node-Disjoint Multi-Coordinate ($K$-SPR) Batch Optimizer (Section~\ref{sec:optimizer}):} We design a hybrid optimizer that extracts multiple mutually node-disjoint improving coordinate moves from a single discrete gradient evaluation, applying $K$ non-interfering SPR moves simultaneously with exact line-search verification, dual-mode gauge rotation, and 2-SPR basin hopping.
-    \item \textbf{SIMT GPU, Multi-Core CPU, and Column-Tiled Algorithms (Section~\ref{sec:parallel}):} We prove four theorems that transform the tree-based recurrences into lockstep vector/matrix operations: the \emph{Column-Independence Theorem}, the \emph{$O(N \log N)$ Stackless Ancestor-Walk Theorem}, the \emph{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with $O(1)$ incremental destination mapping, and the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling.
+    \item \textbf{SIMT GPU, Multi-Core CPU, and Column-Tiled Algorithms (Section~\ref{sec:parallel}):} We prove four theorems that transform the tree-based recurrences into lockstep vector/matrix operations: the \emph{Column-Independence Theorem}, the \emph{Stackless Ancestor-Walk Theorem}, the \emph{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with $O(1)$ sequential and race-free SIMT destination mapping, and the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling.
 \end{enumerate}
 
 % ============================================================================
@@ -82,11 +82,11 @@ In this paper, we describe a complete, self-contained mathematical and software 
 % ============================================================================
 
 \subsection{Phylo2Vec Tree Decoding and Unrooted Representation}
-Given a vector $v \in \mathcal{V}$ in the cherry-first canonical domain ($0 \le v_i \le i$ for all $i \in \{0, \dots, N-2\}$), the corresponding rooted binary tree $T_{\text{root}}$ with $2N-1$ nodes (leaves $0 \dots N-1$ and internal nodes $N \dots 2N-2$) is decoded in $O(N)$ time in reverse coordinate order $k = 0, \dots, N-2$ (where $i = N - 2 - k$):
+Given a vector $v \in \mathcal{V}_{\text{cf}}$ in the cherry-first canonical domain ($0 \le v_i \le i$ for all $i \in \{0, \dots, N-2\}$), the corresponding rooted binary tree $T_{\text{root}}$ with $2N-1$ nodes (leaves $0 \dots N-1$ and internal nodes $N \dots 2N-2$) is decoded in $O(N)$ time in reverse coordinate order $k = 0, \dots, N-2$ (where $i = N - 2 - k$):
 \begin{equation}
 \text{pairs}[k] = (p_1, p_2) = (v_i, \, i + 1), \qquad m = N + k.
 \end{equation}
-Using a path-compressed union-find array $\text{parents\_uf}[0 \dots 2N-2]$ initialized to the identity, each step $k$ finds the current subtree roots $r_1 = \text{find}(p_1)$ and $r_2 = \text{find}(p_2)$, creates internal node $m = N + k$ with children $c_1(m) = r_2$ and $c_2(m) = r_1$, and sets $\text{parents\_uf}[r_1] = \text{parents\_uf}[r_2] = m$.
+Using a path-compressed union-find array $\text{parents\_uf}[0 \dots 2N-2]$ initialized to the identity, each step $k$ finds the current subtree roots $r_1 = \text{find}(p_1)$ and $r_2 = \text{find}(p_2)$, creates internal node $m = N + k$ with children $c_1(m) = r_2$ and $c_2(m) = r_1$, and sets $\text{parents\_uf}[r_1] = \text{parents\_uf}[r_2] = m$. (For general vectors $v \in \mathcal{V}$ with $v_i > i$, forward array-insertion decoding constructs $T_{\text{root}}$ in $O(N^2)$ worst-case time.)
 
 Because the BME tree length $L(T)$ in Eq.~\eqref{eq:pauplin} is invariant to the placement of the root on the top edge, we collapse the rooted root node $2N-2$ (whose children are $R = 2N-3$ and $c_{\text{other}} = \min(c_1(2N-2), c_2(2N-2))$) into an unrooted tree $T$ on $M = 2N-2$ nodes $\{0, 1, \dots, 2N-3\}$ rooted at the degree-3 trifurcating node $R = 2N-3$ with three children:
 \begin{equation}
@@ -100,32 +100,33 @@ Every internal node $u \in \{N, \dots, R-1\}$ has two downward children $c_1(u),
 \end{align}
 By construction, a node $v$ lies in the strict downward subtree $T_u \setminus \{u\}$ of internal node $u$ if and only if $\text{tin}[u] < \text{tin}[v] < \text{tin}[u] + \text{sub\_size}[u]$, and for $v \in T_u \setminus \{u\}$, $v$ lies in $T_{c_1(u)}$ if and only if $\text{tin}[v] < \text{tin}[c_2(u)]$.
 
-\subsection{Exact $O(N)$ Cherry-First Gauge Transformation and Inverse Bijection}
+\subsection{Cherry-First Gauge Transformation and Exact Inverse Bijection}
 \label{sec:gauge}
 
-While general Phylo2Vec vectors satisfy $0 \le v_i \le 2i$, the bottom-up union-find decoding above requires the \emph{cherry-first canonical gauge} $0 \le v_i \le i$ (in which every merge occurs on a leaf pendant edge rather than an internal ancestral edge). We establish that any binary tree can be transformed into cherry-first gauge in $O(N)$ time via a leaf permutation $\pi \in S_N$, and conversely any rooted or unrooted tree can be encoded back into $v \in \mathcal{V}$ ($0 \le v_i \le 2i$) in $O(N)$ time.
+While general Phylo2Vec vectors satisfy $0 \le v_i \le 2i$, the $O(N)$ bottom-up union-find decoding above requires the \emph{cherry-first canonical gauge} $0 \le v_i \le i$ (in which every merge occurs on a leaf pendant edge rather than an internal ancestral edge). We establish that any already-decoded rooted binary tree can be transformed into cherry-first gauge in $O(N)$ time via a leaf permutation $\pi \in S_N$ (\texttt{relabel\_from\_rooted\_tree}), and conversely any rooted or unrooted tree can be encoded back into $v \in \mathcal{V}$ ($0 \le v_i \le 2i$).
 
-\begin{theorem}[$O(N)$ Cherry-First Gauge Transformation and Clade-Flip Duality]
+\begin{theorem}[Tree-Based $O(N)$ Cherry-First Gauge Transformation and Clade-Flip Duality]
 \label{thm:relabel}
-Let $T$ be any rooted binary tree on $N$ leaves decoded from $v \in \mathcal{V}$ ($0 \le v_i \le 2i$). For every node $u \in \{0, \dots, 2N-2\}$, define the minimum leaf in $u$'s clade bottom-up by $m(x) = x$ for $x < N$ and $m(u) = \min(m(c_1(u)), m(c_2(u)))$ for $u \ge N$. Fix a clade orientation $\text{flip\_mode} \in \{0, 1\}$, and propagate leaf labels $\ell(u) \in \{0, \dots, N-1\}$ top-down from the root $\ell(2N-2) = 0$:
+Let $T$ be any rooted binary tree on $N$ leaves with child arrays $c_1, c_2$. For every node $u \in \{0, \dots, 2N-2\}$, define the minimum leaf in $u$'s clade bottom-up by $m(x) = x$ for $x < N$ and $m(u) = \min(m(c_1(u)), m(c_2(u)))$ for $u \ge N$. Fix a clade orientation $\text{flip\_mode} \in \{0, 1\}$, and propagate leaf labels $\ell(u) \in \{0, \dots, N-1\}$ top-down from the root $\ell(2N-2) = 0$:
 \begin{itemize}
     \item If $\text{flip\_mode} = 0$, order the children $(a, b)$ of $u$ so that $m(a) < m(b)$; if $\text{flip\_mode} = 1$, order $(a, b)$ so that $m(a) > m(b)$.
     \item Set $\ell(a) = \ell(u)$ and $\ell(b) = \ell(u) + \text{leaf\_count}(a)$, where $\text{leaf\_count}(a)$ is the number of leaves in $T_a$.
     \item At each internal node $u$, record the cherry-first coordinate at index $i = \ell(b) - 1$ as $v^{\text{cf}}_i = \ell(a) < \ell(b) = i + 1$.
 \end{itemize}
-Then $\pi(k) = \ell^{-1}(k)$ defines a bijection on $\{0, \dots, N-1\}$ such that $v^{\text{cf}} \in \mathcal{V}_{\text{cf}}$ ($0 \le v^{\text{cf}}_i \le i$ for all $i$) encodes the exact same tree $T$ under the permuted distance matrix $D_\pi[a, b] = D[\pi(a), \pi(b)]$, with $L(v^{\text{cf}}; D_\pi) = L(v; D)$.
+Then $\pi(k) = \ell^{-1}(k)$ defines a bijection on $\{0, \dots, N-1\}$ computed in $O(N)$ time from $T$ such that $v^{\text{cf}} \in \mathcal{V}_{\text{cf}}$ ($0 \le v^{\text{cf}}_i \le i$ for all $i$) encodes the exact same tree $T$ under the permuted distance matrix $D_\pi[a, b] = D[\pi(a), \pi(b)]$, with $L(v^{\text{cf}}; D_\pi) = L(v; D)$. (When starting from an undecoded general vector $v \in \mathcal{V}$ with $v_i > i$, initial array-insertion decoding into $T$ and explicit materialization of the $N \times N$ matrix $D_\pi$ take $O(N^2)$ time.)
 \end{theorem}
 \begin{proof}
 At every internal node $u$, the subtree $T_a$ contains $\text{leaf\_count}(a)$ leaves assigned to the contiguous integer interval $[\ell(u), \, \ell(u) + \text{leaf\_count}(a) - 1]$, with minimum leaf $\ell(a) = \ell(u)$, while $T_b$ is assigned to $[\ell(b), \, \ell(b) + \text{leaf\_count}(b) - 1]$ with minimum leaf $\ell(b) = \ell(u) + \text{leaf\_count}(a) > \ell(a)$. When $T_a$ and $T_b$ merge in bottom-up decreasing order of $\ell(b)$, all internal merges within $T_a$ and $T_b$ involving larger minimum leaves $\ell > \ell(b)$ have already completed. Thus $T_a$ and $T_b$ are represented by their minimum leaves $\ell(a)$ and $\ell(b) = i + 1$, so the merge is encoded by the leaf pair $(v^{\text{cf}}_i, \, i + 1) = (\ell(a), \, \ell(b))$ with $v^{\text{cf}}_i = \ell(a) \le i$.
 \end{proof}
 
-\begin{theorem}[$O(N)$ Exact Inverse Bijection from Trees to $\mathcal{V}$]
+\begin{theorem}[Exact Inverse Bijection from Rooted and Unrooted Trees to $\mathcal{V}$]
 \label{thm:inverse}
-Given any rooted binary tree $T$ on leaves $\{0, \dots, N-1\}$ (or any unrooted binary tree $T$ rooted at leaf $N-1$'s incident internal node), let each internal merge $m \in \{N, \dots, 2N-2\}$ combine child clades with minimum leaves $l_{\min}(m) < l_{\max}(m)$. Then $l_{\max}(m)$ takes each value in $\{1, \dots, N-1\}$ exactly once. Ordering the merges in increasing order of $l_{\max}$ ($\text{pair\_lmax\_order}[i]$ for $i = 0, \dots, N-2$), let $u_{\text{attach}}(i)$ denote the child of merge $\text{pair\_lmax\_order}[i]$ having minimum leaf $l_{\min}$. If $u_{\text{attach}}(i) < N$ is a leaf, then $v_i = l_{\min}$; if $u_{\text{attach}}(i) \ge N$ is an internal clade, then:
-\begin{equation}
-v_i = (2i + 1) - \text{rank}(u_{\text{attach}}(i)),
-\end{equation}
-where $\text{rank}(u_{\text{attach}}(i)) \in \{1, \dots, i\}$ is the number of prior merges $i' < i$ that occurred strictly after $u_{\text{attach}}(i)$ in bottom-up topological order (computable in $O(N)$ time).
+Given any rooted binary tree $T$ on leaves $\{0, \dots, N-1\}$ (or any unrooted binary tree $T$ canonically rooted on the pendant edge $(0, \text{adj\_u}[0, 0])$ incident to leaf $0$ via post-order traversal in \texttt{encode\_unrooted\_to\_v\_c}), let each internal node $m \in \{N, \dots, 2N-2\}$ combine child clades $c_1(m), c_2(m)$ with minimum leaves $l_{\min}(m) = \min(m(c_1(m)), m(c_2(m)))$ and $l_{\max}(m) = \max(m(c_1(m)), m(c_2(m)))$. Then $l_{\max}(m)$ takes each value in $\{1, \dots, N-1\}$ over the $N-1$ internal nodes. Processing step $i = 0, \dots, N-2$ (for leaf $i + 1$) along the ancestor chain from leaf $i+1$'s parent $p = \text{parent}[i+1]$ up to the current active root in the prefix tree on $\{0, \dots, i\}$ (\texttt{encode\_rooted\_to\_v\_c}):
+\begin{itemize}
+    \item If $p$ is the first active ancestor encountered on the lineage of sibling minimum leaf $s = m(\text{sib}(i+1)) < i+1$, then leaf $i+1$ attaches directly to the pendant edge of leaf $s$, so $v_i = s \in \{0, \dots, i\}$.
+    \item Otherwise, walking down the active ancestor chain of leaf $s$ to locate the predecessor internal node $q$ whose parent in the prefix tree is $p$ yields the internal edge label $v_i = \text{edge\_label}[q] \in \{i+1, \dots, 2i\}$, after which $p$ is activated with $\text{edge\_label}[p] = 2i + 1$.
+\end{itemize}
+This recovers the unique vector $v \in \mathcal{V}$ in $O(N)$ time on cherry-first trees and $O(N \cdot \text{height}(T))$ time ($O(N \log N)$ expected, $O(N^2)$ worst-case) on general rooted trees.
 \end{theorem}
 
 \subsection{Two-Pass $O(N^2)$ Balanced Clade Distance Matrix (\texttt{subdist})}
@@ -161,27 +162,27 @@ For each row $i \in \{1, \dots, N-2\}$ (corresponding to leaf index $v_{\text{in
 Traversing into the half-tree starting at $u_0 = \text{other}_0$ (with opposite anchor $\text{orig} = \text{other}_1$ and initial distance $d_{kC}^{(0)} = \text{subdist}[T_{\text{prune}}, \text{orig}]$), each step across an internal node $u$ from predecessor $C$ branches into the two outgoing neighbors $b_0, b_1$ of $u$ with path-length weight $w_\ell = 2^{-(\ell + 1)}$. Updating the path-adjusted cross-clade distance $D_{AC}$ and pruned-clade distance $d_{kC}$:
 \begin{align}
 D_{AC}(b_0) &= \text{subdist}[C, b_1]^{\text{before}} + \left(\text{subdist}[\text{orig}, b_1] - \text{subdist}[T_{\text{prune}}, b_1]\right) 2^{-(\ell+1)}, \nonumber \\
-\Delta L(u \to b_0) &= \Delta L(C \to u) + \frac{1}{4}\left(D_{AC}(b_0) + \text{subdist}[T_{\text{prune}}, b_0] - D_{AB}(u) - d_{kC}(u)\right), \nonumber \\
+\Delta L_{\text{ord}}(u \to b_0) &= \Delta L_{\text{ord}}(C \to u) + \frac{1}{4}\left(D_{AC}(b_0) + \text{subdist}[T_{\text{prune}}, b_0] - D_{AB}(u) - d_{kC}(u)\right), \nonumber \\
 d_{kC}(b_0) &= \frac{1}{2}\left(d_{kC}(u) + \text{subdist}[T_{\text{prune}}, b_1]\right),
 \label{eq:spr_recurrence}
 \end{align}
-and symmetrically for $b_1$, we store $\Delta L(u \to b)$ in $\text{edge\_delta}[c_{\text{end}}(u, b)]$, where $c_{\text{end}}(u, b) \in \{0, \dots, 2N-3\}$ is the child endpoint of the edge $(u, b)$ in the unrooted tree rooted at $R$. Running this recurrence on both $(\text{other}_0, \text{other}_1)$ and $(\text{other}_1, \text{other}_0)$ populates $\text{edge\_delta}[0 \dots 2N-3]$ in $O(N)$ time per row $i$.
+and symmetrically for $b_1$, we store $\Delta L_{\text{ord}}(u \to b)$ in $\text{edge\_delta}[c_{\text{end}}(u, b)]$, where $c_{\text{end}}(u, b) \in \{0, \dots, 2N-3\}$ is the child endpoint of the edge $(u, b)$ in the unrooted tree rooted at $R$. Running this recurrence on both $(\text{other}_0, \text{other}_1)$ and $(\text{other}_1, \text{other}_0)$ populates $\text{edge\_delta}[0 \dots 2N-3]$ in $O(N)$ time per row $i$.
 
 \begin{theorem}[Complete $0 \le j \le 2i$ Edge-to-Coordinate Mapping]
 \label{thm:full_2i}
-For any cherry-first vector $v \in \mathcal{V}_{\text{cf}}$ ($v_i \le i$) and row $i \in \{1, \dots, N-2\}$, the change in BME tree length $\Delta_{i, j} = L(v^{(i \leftarrow j)}) - L(v)$ for all $2i+1$ valid Phylo2Vec coordinates $j \in \{0, \dots, 2i\}$ is given by:
+For any cherry-first vector $v \in \mathcal{V}_{\text{cf}}$ ($v_i \le i$) and row $i \in \{1, \dots, N-2\}$, the change in ordered BME tree length $\Delta_{i, j} = L_{\text{ord}}(v^{(i \leftarrow j)}) - L_{\text{ord}}(v) = 2\big(L(v^{(i \leftarrow j)}) - L(v)\big)$ for all $2i+1$ valid Phylo2Vec coordinates $j \in \{0, \dots, 2i\}$ is given by:
 \begin{equation}
 \Delta_{i, j} = \begin{cases}
 \text{edge\_delta}\big[\text{dest\_row}_i[j]\big], & 0 \le j \le i, \\[4pt]
 \text{edge\_delta}\big[(2N - 2) - 2i + j\big], & i + 1 \le j \le 2i - 2, \\[4pt]
-\text{edge\_delta}\big[c_{\text{other}}\big], & j \in \{2i - 1, \, 2i\},
+\text{edge\_delta}\big[c_{\text{other}}\big], & j \in \{2i - 1, \, 2i\} \cap [i + 1, \, 2i],
 \end{cases}
 \label{eq:full_mapping}
 \end{equation}
-where $\text{dest\_row}_i[j]$ is the highest ancestor of leaf $j$ formed strictly after step $i$ in the bottom-up decoding order ($m \in \{N, \dots, 2N - 3 - i\}$), and $c_{\text{other}} = \min(c_1(2N-2), c_2(2N-2))$ is the non-$R$ child of the rooted root $2N-2$ representing the collapsed top edge of the unrooted tree.
+where $\text{dest\_row}_i[j]$ is the highest ancestor of leaf $j$ formed strictly after step $i$ in the bottom-up decoding order ($m \in \{N, \dots, 2N - 3 - i\}$), and $c_{\text{other}} = \min(c_1(2N-2), c_2(2N-2))$ is the non-$R$ child of the rooted root $2N-2$ representing the collapsed top edge of the unrooted tree. In particular, at row $i = 1$, $2i - 1 = 1 = i$ belongs to the leaf-pendant range $[0, i]$, so $j = 1$ receives $\text{edge\_delta}[\text{dest\_row}_1[1]]$ (guarded by $\texttt{if (2 * i - 1 > i)}$) while $j = 2i = 2$ receives $\text{edge\_delta}[c_{\text{other}}]$.
 \end{theorem}
 \begin{proof}
-At step $i$ of the Phylo2Vec decoding process, $N - 2 - i$ internal merges have already occurred (corresponding to internal nodes $m \in \{N, \dots, 2N - 3 - i\}$). For $0 \le j \le i$, regrafting onto coordinate $j$ attaches $T_{\text{prune}}$ to the current root of the clade containing leaf $j$, which is $\text{dest\_row}_i[j]$. For $i+1 \le j \le 2i$, Phylo2Vec indexes internal clades in reverse order of their creation time: $m(i, j) = N + (2i - j)$. Because the unrooted tree collapses the top edge $(2N-2)$ into $(R, c_{\text{other}})$ and shifts internal node indices above the pruned merge by $N - 2 - i$, the $2i - 2 - i = i - 2$ non-root internal edges map bijectively to $u = (2N-2) - 2i + j$ for $i+1 \le j \le 2i-2$, while the two rooted edges incident to the root of the prefix tree ($j = 2i-1$ and $j = 2i$) both correspond to the single unrooted edge indexed by $c_{\text{other}}$.
+At step $i$ of the Phylo2Vec decoding process, $N - 2 - i$ internal merges have already occurred (corresponding to internal nodes $m \in \{N, \dots, 2N - 3 - i\}$). For $0 \le j \le i$, regrafting onto coordinate $j$ attaches $T_{\text{prune}}$ to the current root of the clade containing leaf $j$, which is $\text{dest\_row}_i[j]$. For $i+1 \le j \le 2i$, Phylo2Vec indexes internal clades in reverse order of their creation time: $m(i, j) = N + (2i - j)$. Because the unrooted tree collapses the top edge $(2N-2)$ into $(R, c_{\text{other}})$ and shifts internal node indices above the pruned merge by $N - 2 - i$, the $i - 2$ non-root internal edges map bijectively to $u = (2N-2) - 2i + j$ for $i+1 \le j \le 2i-2$, while the rooted edges incident to the root of the prefix tree that satisfy $j > i$ ($j \in \{2i-1, 2i\}$ for $i \ge 2$, and $j = 2$ for $i = 1$) correspond to the unrooted edge indexed by $c_{\text{other}}$.
 \end{proof}
 
 % ============================================================================
@@ -199,16 +200,16 @@ In the BME length formula (Eq.~\eqref{eq:pauplin}), an SPR move along $\mathcal{
     \item \textbf{Vertex-Disjointness of Corridors:} $\mathcal{P}_T(P(i_a), U(i_a, j_a^*)) \cap \mathcal{P}_T(P(i_b), U(i_b, j_b^*)) = \emptyset$ for all $a \neq b$ (including source and target neighbors), and
     \item \textbf{Coordinate Prefix Independence:} No move $i_a$ modifies a subtree minimum-leaf index referenced by another move $i_b$,
 \end{enumerate}
-then the $K$ moves are topologically non-interfering and their combined BME improvement satisfies $\Delta L(\mathcal{M}) \approx \sum_{k=1}^K \Delta_{i_k, j_k^*} < 0$.
+then the $K$ moves are topologically non-interfering and their combined BME improvement satisfies $\Delta L(\mathcal{M}) \approx \frac{1}{2} \sum_{k=1}^K \Delta_{i_k, j_k^*} < 0$.
 
-Our greedy batch selector (\texttt{optimize\_phylo2vec\_bme\_c}) sorts all improving rows $i$ in ascending order of $\Delta_{i, j^*}$ (most negative first), marks the tree nodes on $\mathcal{P}_T(P(i), U(i, j^*))$ in a boolean mask $\text{blocked}[0 \dots 2N-3]$ as each move is accepted into $\mathcal{M}$, and then performs a fast backtracking line search over $K' \in \{|\mathcal{M}|, \lfloor |\mathcal{M}|/2 \rfloor, \dots, 1\}$ using an $O(N)$ cherry-first gauge canonicalization and exact $O(N^2)$ BME evaluation, guaranteeing strict monotonic descent $L(v^{(t+1)}) < L(v^{(t)})$ on every step and exact single-move fallback when $K' = 1$.
+Our greedy batch selector (\texttt{optimize\_phylo2vec\_bme\_c}) sorts all improving rows $i$ in ascending order of $\Delta_{i, j^*}$ (most negative first), marks the tree nodes on $\mathcal{P}_T(P(i), U(i, j^*))$ in a boolean mask $\text{blocked}[0 \dots 2N-3]$ as each move is accepted into $\mathcal{M}$, and then performs a fast backtracking line search over $K' \in \{|\mathcal{M}|, \lfloor |\mathcal{M}|/2 \rfloor, \dots, 1\}$ using $O(N)$ cherry-first gauge canonicalization and exact $O(N^2)$ BME evaluation, guaranteeing strict monotonic descent $L(v^{(t+1)}) < L(v^{(t)})$ on every step and exact single-move fallback when $K' = 1$.
 
 \subsection{Complete 4-Stage Phylo2Vec BME Optimization Pipeline}
 The complete topological optimizer (\texttt{optimize\_phylo2vec\_bme\_c}) combines four stages:
 \begin{enumerate}
-    \item \textbf{Stage A (Full $0 \le j \le 2i$ Discrete Gradient + Node-Disjoint $K$-SPR Batch Descent):} Computes $\nabla_{\text{disc}} L(v)$ via Theorem~\ref{thm:full_2i} and applies node-disjoint multi-coordinate updates until $\min_{i, j} \Delta_{i, j} \ge -10^{-11}$. Whenever a selected coordinate has $j^* > i$, Theorem~\ref{thm:relabel} immediately re-canonicalizes $v^{(i \leftarrow j^*)}$ back to the cherry-first domain $v^{\text{cf}}_i \le i$ in $O(N)$ time.
-    \item \textbf{Stage B (Dual-Mode $O(N)$ Cherry-First Gauge Rotation):} When a local minimum is reached in the current leaf labeling, the optimizer applies Theorem~\ref{thm:relabel} with alternating clade-orientation parity ($\text{flip\_mode} = 1$ vs.\ $\text{flip\_mode} = 0$). Reversing the left-right clade assignment swaps which child subtree acts as the movable leaf $i+1$ versus the anchor clade at every internal node, exposing a complementary set of Phylo2Vec coordinate moves in $O(N)$ time without changing the tree topology.
-    \item \textbf{Stage C (Full Unrooted BME-SPR Polish + Exact $O(N)$ Inverse Bijection):} To ensure complete parity with unrooted SPR over clades not directly indexed as a single cherry-first coordinate, the optimizer verifies convergence against the unrooted \texttt{BMEAveragesTable} + \texttt{bmeSPR} scan and encodes any polished tree back into $v \in \mathcal{V}$ via Theorem~\ref{thm:inverse} (\texttt{encode\_unrooted\_to\_v\_c}).
+    \item \textbf{Stage A (Full $0 \le j \le 2i$ Discrete Gradient + Node-Disjoint $K$-SPR Batch Descent):} Computes $\nabla_{\text{disc}} L(v)$ via Theorem~\ref{thm:full_2i} and applies node-disjoint multi-coordinate updates until $\min_{i, j} \Delta_{i, j} \ge -10^{-11}$. Whenever a selected coordinate has $j^* > i$, Theorem~\ref{thm:relabel} re-canonicalizes $v^{(i \leftarrow j^*)}$ back to the cherry-first domain $v^{\text{cf}}_i \le i$.
+    \item \textbf{Stage B (Dual-Mode $O(N)$ Cherry-First Gauge Rotation):} When a local minimum is reached in the current leaf labeling, the optimizer applies Theorem~\ref{thm:relabel} with alternating clade-orientation parity ($\text{flip\_mode} = 1$ vs.\ $\text{flip\_mode} = 0$). Reversing the left-right clade assignment swaps which child subtree acts as the movable leaf $i+1$ versus the anchor clade at every internal node, exposing a complementary set of Phylo2Vec coordinate moves without changing the tree topology.
+    \item \textbf{Stage C (Full Unrooted BME-SPR Polish + Exact Inverse Bijection):} To ensure complete parity with unrooted SPR over clades not directly indexed as a single cherry-first coordinate, the optimizer verifies convergence against the unrooted \texttt{BMEAveragesTable} + \texttt{bmeSPR} scan and encodes any polished tree back into $v \in \mathcal{V}$ via Theorem~\ref{thm:inverse} (\texttt{encode\_unrooted\_to\_v\_c}).
     \item \textbf{Stage D (Stochastic 2-SPR Basin-Hopping Kicks):} On noisy distance matrices ($\sigma > 0$), single-SPR local minima can trap greedy hill-climbers. After convergence, the optimizer applies a random 2-SPR coordinate perturbation and repeats the descent from the perturbed state, retaining the best topology found.
 \end{enumerate}
 
@@ -229,55 +230,55 @@ In the bottom-up recurrence $\text{subdist}[u, x] = \frac{1}{2}(\text{subdist}[c
 Theorem~\ref{thm:col_indep} has two major architectural consequences for SIMT GPUs (Apple Metal and NVIDIA CUDA) and multi-core CPUs:
 \begin{enumerate}
     \item \textbf{Zero Per-Level Synchronization Barriers and $100\%$ Coalesced SIMT Warps:} Instead of parallelizing across rows $u$ at the same tree depth (which requires launching a separate GPU kernel at every level of the tree and reading non-contiguous columns), we assign thread $\text{gid} = x$ to column $x$. All 32 threads in a GPU warp iterate over $u = N, \dots, R-1$ in lockstep (\texttt{k\_bottom\_up\_leaf\_cols} and \texttt{k\_bottom\_up\_int\_cols}), issuing $100\%$ coalesced 128-byte cache-line reads and writes (\texttt{subdist[u * n\_nodes\_u + x]}) with zero branch divergence.
-    \item \textbf{Elimination of Strided Scatter Writes:} Neither the bottom-up pass nor the top-down pass performs strided column scatter writes (\texttt{subdist[v * n\_nodes\_u + u]}) inside the inner loop; instead, a single 2D tiled transpose (\texttt{k\_transpose\_leaf\_block}) copies the rectangular leaf block $[N \dots R-1, \, 0 \dots N-1]$ into $[0 \dots N-1, \, N \dots R-1]$ between Pass~1 and Pass~2.
+    \item \textbf{Elimination of Strided Scatter Writes via Shared-Memory Tiled Transpose:} Neither the bottom-up pass nor the top-down pass performs strided column scatter writes (\texttt{subdist[v * n\_nodes\_u + u]}) inside the inner loop; instead, a $16 \times 16$ shared-memory tiled transpose (\texttt{k\_transpose\_leaf\_block} / \texttt{gpu\_transpose\_leaf\_block}) copies the rectangular leaf block $[N \dots R-1, \, 0 \dots N-1]$ into $[0 \dots N-1, \, N \dots R-1]$ between Pass~1 and Pass~2 with fully coalesced global memory reads and writes.
 \end{enumerate}
 
-\subsection{$O(N \log N)$ Stackless Ancestor-Walk Top-Down Theorem}
+\subsection{Stackless Ancestor-Walk Top-Down Theorem}
 
-\begin{theorem}[$O(N \log N)$ Stackless Ancestor-Walk Top-Down Pass]
+\begin{theorem}[Stackless Ancestor-Walk Top-Down Pass]
 \label{thm:ancestor_walk}
-In the top-down recurrence (Eq.~\eqref{eq:top_down}), entry $\text{subdist}[p, v]$ is updated if and only if $v \in T_p \setminus \{p\}$, i.e., if and only if $p$ is a strict ancestor of $v$ in the unrooted tree rooted at $R$. Moreover, given the Euler-tour entry times $\text{tin}$ in Eq.~\eqref{eq:euler_tin}, thread $v \in \{0, \dots, R-1\}$ can traverse the exact top-down ancestor path from $R$ to $v$ in $O(\text{depth}(v))$ steps with \textbf{zero stack memory}:
+In the top-down recurrence (Eq.~\eqref{eq:top_down}), entry $\text{subdist}[p, v]$ is updated if and only if $v \in T_p \setminus \{p\}$, i.e., if and only if $p$ is a strict ancestor of $v$ in the unrooted tree rooted at $R$. Moreover, given the Euler-tour entry times $\text{tin}$ in Eq.~\eqref{eq:euler_tin}, thread $v \in \{0, \dots, R-1\}$ can traverse the exact top-down ancestor path from $R$ to $v$ in $\text{depth}(v)$ steps with \textbf{$O(1)$ register memory and zero stack space}:
 \begin{equation}
 \text{next\_curr} = \begin{cases} c_1(p), & \text{if } \text{tin}[v] < \text{tin}[c_2(p)], \\ c_2(p), & \text{otherwise}, \end{cases} \qquad
 \text{sib} = \begin{cases} c_2(p), & \text{if } \text{tin}[v] < \text{tin}[c_2(p)], \\ c_1(p), & \text{otherwise}, \end{cases}
 \end{equation}
-writing both $\text{subdist}[p, v]$ and the symmetric entry $\text{subdist}[v, p]$ in-place without data races across threads $v$.
+writing both $\text{subdist}[p, v]$ and the symmetric entry $\text{subdist}[v, p]$ in-place without data races across threads $v$. Across all $2N-2$ threads, total work is $\sum_{v=0}^{2N-3} \text{depth}(v)$, which is $O(N \log N)$ in expectation on balanced or Yule--Harding random trees ($\max_v \text{depth}(v) = O(\log N)$) and $O(N^2)$ in the worst case on degenerate caterpillar trees ($\max_v \text{depth}(v) = O(N)$).
 \end{theorem}
 \begin{proof}
-Because $T_{c_1(p)}$ occupies $[\text{tin}[p]+1, \, \text{tin}[c_2(p)))$ and $T_{c_2(p)}$ occupies $[\text{tin}[c_2(p)], \, \text{tin}[p]+\text{sub\_size}[p])$, the single comparison $\text{tin}[v] < \text{tin}[c_2(p)]$ determines which child of $p$ contains $v$. Furthermore, at ancestor $p$ of $v$, thread $v$ reads $\text{subdist}[\text{sib}, v]$ (where $T_{\text{sib}} \cap T_p^{\text{child}} = \emptyset$, so $\text{subdist}[\text{sib}, v]$ was already finalized in the bottom-up pass) and $\text{subdist}[\text{parent\_u}[p], v]$ (computed by thread $v$ on the immediately preceding step of its top-down walk). Conversely, the symmetric write $\text{subdist}[v, p]$ modifies column $p$ at row $v \in T_p \setminus \{p\}$, which is never read by thread $p$ because thread $p$ only reads rows outside $T_p$. Thus all threads $v \in \{0, \dots, R-1\}$ execute concurrently with zero race conditions, reducing total top-down operations from $O(N^2)$ to $\sum_{v} \text{depth}(v) = O(N \log N)$.
+Because $T_{c_1(p)}$ occupies $[\text{tin}[p]+1, \, \text{tin}[c_2(p)))$ and $T_{c_2(p)}$ occupies $[\text{tin}[c_2(p)], \, \text{tin}[p]+\text{sub\_size}[p])$, the single comparison $\text{tin}[v] < \text{tin}[c_2(p)]$ determines which child of $p$ contains $v$. Furthermore, at ancestor $p$ of $v$, thread $v$ reads $\text{subdist}[\text{sib}, v]$ (where $T_{\text{sib}} \cap T_p^{\text{child}} = \emptyset$, so $\text{subdist}[\text{sib}, v]$ was already finalized in the bottom-up pass) and $\text{subdist}[\text{parent\_u}[p], v]$ (computed by thread $v$ on the immediately preceding step of its top-down walk). Conversely, the symmetric write $\text{subdist}[v, p]$ modifies column $p$ at row $v \in T_p \setminus \{p\}$, which is never read by thread $p$ because thread $p$ only reads rows outside $T_p$. Thus all threads $v \in \{0, \dots, R-1\}$ execute concurrently with zero race conditions.
 \end{proof}
 
-\subsection{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register Stack and $O(1)$ Destination Updates}
+\subsection{Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register Stack and Race-Free Destination Updates}
 
-\begin{theorem}[Heavy-First Logarithmic Stack Bound and $O(1)$ Incremental Destinations]
+\begin{theorem}[Heavy-First Logarithmic Stack Bound and Incremental / SIMT Destination Mapping]
 \label{thm:heavy_stack}
 The Stage~3 SPR sweep satisfies the following two space-reduction invariants:
 \begin{enumerate}
-    \item \textbf{Logarithmic Stack Bound:} In the Stage~3 half-tree traversal (\texttt{run\_half\_tree\_dfs}), each internal node $u$ visited from $C$ branches into two neighbors $b_0, b_1$ with remaining component sizes $S(u \to b_k) = \text{sub\_size}[b_k]$ if $\text{parent\_u}[b_k] = u$ and $(2N-2) - \text{sub\_size}[u]$ otherwise. If the neighbor with the larger component size is pushed onto a LIFO stack first and the neighbor with the smaller component size is pushed second (popped immediately next), the stack depth never exceeds $\lfloor \log_2(2N-2) \rfloor + 2$ for \textbf{any} binary tree topology (at most $16$ slots for $N \le 32{,}768$ and at most $20$ slots for $N \le 500{,}000$).
-    \item \textbf{$O(1)$ Incremental Destination Mapping:} In bottom-up Phylo2Vec merge order $m = N + k$ ($k = 0, \dots, N-3$), the larger minimum leaf of merge $m$ is deterministically $l_{\max}(N+k) = N - 1 - k$. Consequently, as row index $i = v_{\text{index}} - 1$ steps downward from $N-2$ to $1$, the destination lookup array $\text{dest\_row}[0 \dots N-1]$ (initialized to $\text{dest\_row}[j] = j$ at $i = N-2$) changes by \textbf{only a single entry per row}:
+    \item \textbf{Logarithmic Stack Bound:} In the Stage~3 half-tree traversal (\texttt{run\_half\_tree\_dfs}), each internal node $u$ visited from $C$ branches into two neighbors $b_0, b_1$ with remaining component sizes $S(u \to b_k) = \text{sub\_size}[b_k]$ if $\text{parent\_u}[b_k] = u$ and $(2N-2) - \text{sub\_size}[u]$ otherwise. If the neighbor with the larger component size is pushed onto a LIFO stack first and the neighbor with the smaller component size is pushed second (popped immediately next), the stack depth never exceeds $\lfloor \log_2(2N-2) \rfloor + 2$ for \textbf{any} binary tree topology (at most $16$ slots for $N \le 32{,}768$ and at most $20$ slots for $N \le 500{,}000$, regardless of whether the tree is balanced or a caterpillar).
+    \item \textbf{$O(1)$ Sequential and Race-Free Parallel Destination Mapping:} In bottom-up Phylo2Vec merge order $m = N + k$ ($k = 0, \dots, N-3$), the larger minimum leaf of merge $m$ is deterministically $l_{\max}(N+k) = N - 1 - k$. Consequently, as row index $i = v_{\text{index}} - 1$ steps downward from $N-2$ to $1$ on a CPU, the destination lookup array $\text{dest\_row}[0 \dots N-1]$ (initialized to $\text{dest\_row}[j] = j$ at $i = N-2$) changes by \textbf{only a single entry per row}:
     \begin{equation}
     \text{dest\_row}\big[l_{\min}(N + k)\big] \leftarrow N + k \qquad \text{for } k = N - 2 - i,
     \end{equation}
-    eliminating the $O(N^2)$ $\text{destinations}$ matrix completely.
+    eliminating the $O(N^2)$ $\text{destinations}$ matrix completely. For independent SIMT GPU threadblocks executing row $i$ with $n_{\text{active}} = N - 2 - i$ active merges, precomputing on the host the successor index $\text{next\_k\_same\_lmin}[k] = \min\{k' > k : l_{\min}(N+k') = l_{\min}(N+k)\}$ (or $N$ if none exists) ensures that for each leaf column $j$, at most one active merge $k \in \{0, \dots, n_{\text{active}}-1\}$ satisfies $\text{next\_k\_same\_lmin}[k] \ge n_{\text{active}}$, allowing all threads $k$ in a threadblock to populate $\Delta_{i, l_{\min}(N+k)} = \text{edge\_delta}[N+k]$ concurrently with \textbf{zero write-after-write race conditions}.
 \end{enumerate}
 \end{theorem}
 
 \subsection{Complete Column-Autonomy Theorem for Low-Memory Column Tiling}
 
-\begin{theorem}[Complete Column-Autonomy and $4\times$ Memory Reduction via Column Tiling]
+\begin{theorem}[Complete Column-Autonomy and $4\times$ \texttt{subdist} Memory Reduction via Column Tiling]
 \label{thm:column_tiling}
-Suppose the bottom-up recurrence (Eq.~\eqref{eq:bottom_up}) and the $O(N \log N)$ ancestor-walk top-down pass (Theorem~\ref{thm:ancestor_walk}) are executed on the $N$ leaf columns $x \in \{0, \dots, N-1\}$ in tiles of width $B_{\text{tile}}$ (e.g., $B_{\text{tile}} = 128$), storing only the internal-to-leaf table $\text{subdist\_int\_leaf}[w - N, \, x] = \text{subdist}[w, x]$ of dimension $(N-1) \times N$ ($\frac{1}{4}$ the size of $\text{subdist}$). Then for \textbf{any} node $w \in \{0, \dots, 2N-3\}$, its entire row $\text{row}_w[0 \dots 2N-3] = \text{subdist}[w, \, \cdot]$ can be reconstructed autonomously in $O(N)$ time inside a single $2N$-element L1/shared-memory buffer (\texttt{compute\_autonomous\_row\_f64} / \texttt{dev\_compute\_autonomous\_row}):
+Suppose the bottom-up recurrence (Eq.~\eqref{eq:bottom_up}) and the stackless ancestor-walk top-down pass (Theorem~\ref{thm:ancestor_walk}) are executed on the $N$ leaf columns $x \in \{0, \dots, N-1\}$ in tiles of width $B_{\text{tile}}$ (e.g., $B_{\text{tile}} = 128$), storing only the internal-to-leaf table $\text{subdist\_int\_leaf}[w - N, \, x] = \text{subdist}[w, x]$ of dimension $(N-1) \times N$ ($\frac{1}{4}$ the size of $\text{subdist}$). Then for \textbf{any} node $w \in \{0, \dots, 2N-3\}$, its entire row $\text{row}_w[0 \dots 2N-3] = \text{subdist}[w, \, \cdot]$ can be reconstructed autonomously in $O(N + \text{depth}(w)) = O(N)$ time inside a single $2N$-element L1/shared-memory buffer (\texttt{compute\_autonomous\_row\_f64} / \texttt{dev\_compute\_autonomous\_row}):
 \begin{enumerate}
     \item Copy $\text{row}_w[0 \dots N-1] \leftarrow D[w, \, 0 \dots N-1]$ (if $w < N$) or $\text{subdist\_int\_leaf}[w - N, \, 0 \dots N-1]$ (if $w \ge N$).
     \item For $u = N, \dots, R-1$: set $\text{row}_w[u] = \frac{1}{2}(\text{row}_w[c_1(u)] + \text{row}_w[c_2(u)])$.
-    \item Walk top-down along the $O(\log N)$ ancestors $p$ from $R$ to $w$, setting $\text{row}_w[p] = \frac{1}{2}(\text{row}_w[\text{sib}_p(w)] + \text{row}_w[\text{parent\_u}[p]])$, and finally set $\text{row}_w[w] = 0$.
+    \item Walk top-down along the $\text{depth}(w)$ ancestors $p$ from $R$ to $w$, setting $\text{row}_w[p] = \frac{1}{2}(\text{row}_w[\text{sib}_p(w)] + \text{row}_w[\text{parent\_u}[p]])$, and finally set $\text{row}_w[w] = 0$.
 \end{enumerate}
 \end{theorem}
 \begin{proof}
 By symmetry of $\text{subdist}$, $\text{row}_w[x] = \text{subdist}[w, x] = \text{subdist}[x, w]$ for all leaves $x \in \{0, \dots, N-1\}$. For any internal node $u \in \{N, \dots, R-1\}$: (i) if $T_u \cap T_w = \emptyset$, the bottom-up step averages $\text{subdist}[w, x]$ over $x \in T_u$, yielding $\text{subdist}[w, u]$; (ii) if $u \in T_w \setminus \{w\}$ is a strict descendant of $w$, then $T_u$ lies entirely within a single child subtree of $w$, where every leaf $x \in T_u$ already holds its exact top-down distance $\text{subdist}[w, x] = \frac{1}{2}(\text{subdist}[\text{sib}_w(u), x] + \text{subdist}[\text{parent\_u}[w], x])$; by linearity of balanced subtree averaging over $x \in T_u$, the bottom-up pass on $\text{row}_w$ automatically yields the exact top-down value $\text{row}_w[u] = \text{subdist}[w, u]$ for all $u \in T_w \setminus \{w\}$; and (iii) if $u$ is a strict ancestor of $w$ ($w \in T_u \setminus \{u\}$), Step~3 overwrites $\text{row}_w[u]$ using $\text{row}_w[\text{sib}_u(w)]$ (which falls into Case~(i) since $T_{\text{sib}_u(w)} \cap T_w = \emptyset$) and $\text{row}_w[\text{parent\_u}[u]]$.
 \end{proof}
 
-Because Stage~3 for row $v_{\text{index}}$ only ever accesses \textbf{three rows} of $\text{subdist}$ ($\text{row}_{\text{tree\_root}}$, $\text{row}_{\text{other}_0}$, and $\text{row}_{\text{other}_1}$), Theorem~\ref{thm:column_tiling} allows each CPU thread or GPU threadblock to reconstruct those three rows directly inside private L1/L2 cache or GPU shared memory without ever allocating the $(2N-2) \times (2N-2)$ $\text{subdist}$ matrix.
+Because Stage~3 for row $v_{\text{index}}$ only ever accesses \textbf{three rows} of $\text{subdist}$ ($\text{row}_{\text{tree\_root}}$, $\text{row}_{\text{other}_0}$, and $\text{row}_{\text{other}_1}$), Theorem~\ref{thm:column_tiling} allows each CPU thread or GPU threadblock to reconstruct those three rows directly inside private L1/L2 cache or GPU shared memory in $O(N)$ time per row ($O(N^2)$ total across all $N-1$ rows) without ever allocating the $(2N-2) \times (2N-2)$ $\text{subdist}$ matrix.
 
 % ============================================================================
 \section{Software Architecture and Module Reference}
@@ -286,20 +287,20 @@ Because Stage~3 for row $v_{\text{index}}$ only ever accesses \textbf{three rows
 
 The codebase is organized into modular C99, Objective-C/Metal, CUDA C++, and Python components:
 \begin{itemize}
-    \item \texttt{phylo2vec\_fastme.c} \& \texttt{libphylo2vec\_fastme.dylib}: Core C99 library providing:
+    \item \texttt{phylo2vec\_fastme.c} \& \texttt{libphylo2vec\_fastme.dylib}: Core C99 library (with overflow-safe \texttt{size\_t} dynamic workspace allocation up to $N = 100{,}000$) providing:
     \begin{itemize}
         \item \texttt{calculate\_discrete\_gradient\_c}: Lower-triangular ($0 \le j < i$) discrete gradient of shape $(N-1, N-2)$.
         \item \texttt{calculate\_discrete\_gradient\_full\_c}: Complete ($0 \le j \le 2i$) discrete gradient of shape $(N-1, 2N-3)$ implementing Theorem~\ref{thm:full_2i}.
-        \item \texttt{relabel\_cherry\_first\_c}: $O(N)$ top-down cherry-first gauge relabeling with clade-flip duality ($\text{flip\_mode} \in \{0, 1\}$, Theorem~\ref{thm:relabel}).
-        \item \texttt{encode\_rooted\_to\_v\_c} \& \texttt{encode\_unrooted\_to\_v\_c}: Exact $O(N)$ inverse bijections from rooted or unrooted trees to $v \in \mathcal{V}$ (Theorem~\ref{thm:inverse}).
+        \item \texttt{relabel\_from\_rooted\_tree} \& \texttt{relabel\_cherry\_first\_c}: Top-down cherry-first gauge relabeling with clade-flip duality ($\text{flip\_mode} \in \{0, 1\}$, Theorem~\ref{thm:relabel}).
+        \item \texttt{encode\_rooted\_to\_v\_c} \& \texttt{encode\_unrooted\_to\_v\_c}: Exact inverse bijections from rooted or unrooted trees to $v \in \mathcal{V}$ (Theorem~\ref{thm:inverse}).
         \item \texttt{optimize\_phylo2vec\_bme\_c}: 4-stage Phylo2Vec BME tree optimizer with node-disjoint $K$-SPR batch updates, dual-mode gauge rotation, and 2-SPR basin hopping.
         \item \texttt{optimize\_fastme\_bme\_c}: Reference C99 implementation of FastME's unrooted \texttt{BMEAveragesTable} and \texttt{bmeSPR} topological hill-climber~\cite{desper2002fast,lefort2015fastme}.
     \end{itemize}
-    \item \texttt{discrete\_gradient.py}: High-level Python/NumPy/\texttt{ctypes} interface wrapping \texttt{libphylo2vec\_fastme.dylib}.
-    \item \texttt{verify\_all.c}: Mathematical verification suite testing Theorem~\ref{thm:relabel}, Theorem~\ref{thm:inverse}, and Theorem~\ref{thm:full_2i} against brute-force $O(N^3)$ Pauplin evaluations.
-    \item \texttt{bench\_optimizers.c}: End-to-end benchmark suite comparing \texttt{optimize\_phylo2vec\_bme\_c} against \texttt{optimize\_fastme\_bme\_c} across additive ($\sigma = 0.00$) and noisy ($\sigma = 0.15$) phylogenetic distance matrices.
-    \item \texttt{bench\_parallel\_gpu.m}: Large-$N$ ($N = 100 \dots 4{,}000$) multi-core CPU (Grand Central Dispatch), Column-Tiled low-memory CPU (Theorem~\ref{thm:column_tiling}), Apple M5 Metal GPU shader, and Zero-Copy Hybrid Unified Memory benchmark suite.
-    \item \texttt{phylo2vec\_cuda\_8xh100.cu}: Multi-GPU NVIDIA CUDA C++ (\texttt{sm\_90} / \texttt{sm\_100}) implementation featuring lockstep column-parallel \texttt{subdist} kernels, $O(N \log N)$ ancestor walks, Hopper $228\text{ KB}$ shared-memory cooperating threadblock SPR kernels (\texttt{k\_spr\_rows\_smem}), and column-tiled autonomous row kernels (\texttt{k\_tiled\_leaf\_cols} and \texttt{dev\_compute\_autonomous\_row}).
+    \item \texttt{discrete\_gradient.py} \& \texttt{compare\_with\_fastme\_cli.py}: High-level Python/NumPy/\texttt{ctypes} interface wrapping universal (\texttt{arm64 + x86\_64}) \texttt{libphylo2vec\_fastme.dylib}, with input validation, path-compressed Union-Find ancestry decoding, and independent Newick round-trip BME verification.
+    \item \texttt{verify\_all.c}: Comprehensive mathematical verification and regression harness testing Theorem~\ref{thm:relabel}, Theorem~\ref{thm:inverse}, and Theorem~\ref{thm:full_2i} against brute-force $O(N^3)$ Pauplin evaluations, fault-injection self-tests, $N=6$ counterexamples, canonical unrooted split bipartition isomorphism, and $N \in \{1024, 1025, 1026\}$ boundary scaling under UndefinedBehaviorSanitizer (\texttt{-fsanitize=undefined}).
+    \item \texttt{bench\_optimizers.c}: End-to-end benchmark suite linked directly against \texttt{phylo2vec\_fastme.c}, comparing \texttt{optimize\_phylo2vec\_bme\_c} against \texttt{optimize\_fastme\_bme\_c} across additive ($\sigma = 0.00$) and log-normal noisy ($\sigma = 0.15$) phylogenetic distance matrices with win/tie/loss and mean/SD/median/IQR metrics.
+    \item \texttt{bench\_parallel\_gpu.m}: Large-$N$ ($N = 100 \dots 4{,}000$) multi-core CPU (Grand Central Dispatch), Column-Tiled low-memory CPU (Theorem~\ref{thm:column_tiling}), Apple M5 Metal GPU shader (with $16 \times 16$ threadgroup tiled transpose), and Zero-Copy Hybrid Unified Memory benchmark suite.
+    \item \texttt{phylo2vec\_cuda\_8xh100.cu}: Multi-GPU NVIDIA CUDA C++ (\texttt{sm\_90} / \texttt{sm\_100}) implementation featuring lockstep column-parallel \texttt{subdist} kernels, $16 \times 16$ shared-memory transpose (\texttt{k\_transpose\_leaf\_block}), race-free destination indexing (\texttt{next\_k\_same\_lmin}), dynamic shared-memory SPR kernels (\texttt{k\_spr\_rows\_smem}) with automatic global-memory fallback (\texttt{k\_spr\_rows\_gmem}), fused top-1 row candidate reduction (\texttt{k\_spr\_rows\_top1}), column-tiled autonomous row kernels (\texttt{k\_tiled\_leaf\_cols} and \texttt{k\_spr\_rows\_tiled}), and a barrier-accurate host SIMT emulator testing forward and reverse thread scheduling.
 \end{itemize}
 
 % ============================================================================
@@ -307,13 +308,17 @@ The codebase is organized into modular C99, Objective-C/Metal, CUDA C++, and Pyt
 \label{sec:experiments}
 % ============================================================================
 
-\subsection{Mathematical Exactness Verification (\texttt{verify\_all.c})}
-Running \texttt{./verify\_all} validates every mathematical identity against independent brute-force $O(N^3)$ evaluations of Pauplin's formula (Eq.~\eqref{eq:pauplin}):
+\subsection{Mathematical Exactness and Sanitizer Verification (\texttt{verify\_all.c})}
+Running \texttt{./verify\_all} compiled with UndefinedBehaviorSanitizer (\texttt{-fsanitize=undefined -fno-sanitize-recover=all}) validates every mathematical identity and edge case against independent brute-force $O(N^3)$ evaluations of Pauplin's formula (Eq.~\eqref{eq:pauplin}):
 \begin{enumerate}
-    \item \textbf{Full $0 \le j \le 2i$ Discrete Gradient Verification:} Across $100$ random trees ($N = 20$) and all $36{,}000$ coordinate perturbations $(i, j)$ with $0 \le j \le 2i$, the maximum absolute discrepancy between \texttt{calculate\_discrete\_gradient\_full\_c} and brute-force tree decoding + Pauplin evaluation is $\mathbf{3.553 \times 10^{-14}}$ (exact to IEEE 754 double-precision machine epsilon).
-    \item \textbf{$O(N)$ Cherry-First Gauge Relabeling Verification:} Across $100$ general Phylo2Vec trees with $0 \le v_i \le 2i$ ($N = 35$) tested under both $\text{flip\_mode} = 0$ and $\text{flip\_mode} = 1$ ($200$ relabelings total), $100\%$ satisfy $v^{\text{cf}}_i \le i$ for all $i$, and the maximum BME length difference $|L(v^{\text{cf}}; D_\pi) - L(v; D)|$ is $\mathbf{1.776 \times 10^{-14}}$.
-    \item \textbf{Exact $O(N)$ Inverse Bijection Verification:} Across $500$ general rooted vectors ($N = 30$) and $500$ unrooted trees ($N = 30$), \texttt{encode\_rooted\_to\_v\_c} and \texttt{encode\_unrooted\_to\_v\_c} achieve $\mathbf{1{,}000 / 1{,}000 \; (100.0\%)}$ bit-for-bit exact recovery of $v \in \mathcal{V}$.
+    \item \textbf{Test 0 (Fault-Injection Self-Test \& Counterexample Regression):} Verifies that injected $+1.0$ and $\texttt{NaN}$ perturbations are immediately caught, and tests the two $N=6$ boundary topologies $v = [0, 0, 0, 0, 0]$ (star/caterpillar) and $v = [0, 1, 1, 1, 1]$ across all $2i+1$ coordinates (including row $i=1$, column $j=1$), achieving a maximum absolute error of $\mathbf{3.553 \times 10^{-15}}$.
+    \item \textbf{Test 1 (Full $0 \le j \le 2i$ Discrete Gradient Verification):} Across $100$ random trees ($N = 20$) and all $36{,}000$ coordinate perturbations $(i, j)$ with $0 \le j \le 2i$, the maximum absolute discrepancy between \texttt{calculate\_discrete\_gradient\_full\_c} and brute-force tree decoding + Pauplin evaluation is $\mathbf{3.553 \times 10^{-14}}$ (exact to IEEE 754 double-precision machine epsilon).
+    \item \textbf{Test 2 ($O(N)$ Cherry-First Gauge Relabeling Verification):} Across $100$ general Phylo2Vec trees with $0 \le v_i \le 2i$ ($N = 35$) tested under both $\text{flip\_mode} = 0$ and $\text{flip\_mode} = 1$ ($200$ relabelings total), $100\%$ satisfy $v^{\text{cf}}_i \le i$ for all $i$ with valid bijective permutations $\pi \in S_N$, and the maximum BME length difference $|L(v^{\text{cf}}; D_\pi) - L(v; D)|$ is $\mathbf{1.776 \times 10^{-14}}$.
+    \item \textbf{Test 3 (Exact Inverse Bijection \& Canonical Split Isomorphism):} Across $500$ general rooted vectors ($N = 30$) and $500$ unrooted trees ($N = 30$), \texttt{encode\_rooted\_to\_v\_c} achieves $\mathbf{500 / 500 \; (100.0\%)}$ bit-for-bit recovery of $v \in \mathcal{V}$, and \texttt{encode\_unrooted\_to\_v\_c} achieves $\mathbf{500 / 500 \; (100.0\%)}$ exact recovery of all $N-3$ canonical 64-bit unrooted split bipartitions and BME lengths (max diff $\mathbf{1.421 \times 10^{-14}}$).
+    \item \textbf{Test 4 (Large-$N$ Buffer Boundary Verification at $N \in \{1024, 1025, 1026\}$):} Validates dynamic workspace allocation, cherry-first relabeling, rooted/unrooted inverse encoding, and full $(N-1) \times (2N-3)$ discrete gradient evaluation past legacy 1024-leaf fixed buffer boundaries with zero sanitizer traps and max spot-checked error $\le \mathbf{3.638 \times 10^{-12}}$.
 \end{enumerate}
+
+Furthermore, running the barrier-accurate SIMT verifier \texttt{./phylo2vec\_cuda\_verify} (compiled from \texttt{phylo2vec\_cuda\_8xh100.cu}) under both forward ($0 \dots 127$) and reverse ($127 \dots 0$) thread scheduling orders confirms zero race conditions on the $N=6$ counterexamples ($\text{err} = 0.000$) and verifies that all three GPU kernel paths (\texttt{smem}, \texttt{gmem}, and \texttt{tiled}) plus the fused top-1 reduction (\texttt{k\_spr\_rows\_top1}) match the FP64 CPU reference across $N \in \{50, 100, 250, 500\}$ to within single-precision machine epsilon ($\le \mathbf{6.4 \times 10^{-7}}$).
 
 \subsection{End-to-End Topological Optimization vs.\ FastME (\texttt{bench\_optimizers.c})}
 We evaluated end-to-end tree reconstruction from identical random starting trees across $N \in \{20, 50, 100, 150, 200\}$ under two regimes:
@@ -322,7 +327,7 @@ We evaluated end-to-end tree reconstruction from identical random starting trees
     \item \textbf{Benchmark 2 (Noisy Phylogenetic Distance Matrices, $\sigma = 0.15$):} Symmetric log-normal estimation noise $\tilde{D}_{xy} = D_{xy} \exp(\sigma Z_{xy})$, $Z_{xy} \sim \mathcal{N}(0, 1)$, was applied to create rugged BME landscapes.
 \end{enumerate}
 
-Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} report the mean final BME tree length $L(T)$, the fraction of trials in which Phylo2Vec achieved a BME length less than or equal to FastME ($\text{P2V} \le \text{FME}$), the normalized Robinson-Foulds topological error ($\text{RF} \in [0, 1]$) against $T^*$, the number of $O(N^2)$ SPR iterations/gradient evaluations, and the single-core wall-clock runtime in milliseconds.
+Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} report the mean final BME tree length $L(T)$, strict wins / exact ties / losses ($\text{Win/Tie/Loss}$ at tolerance $10^{-9}$) of Phylo2Vec vs.\ FastME, normalized Robinson-Foulds topological error ($\text{RF} \in [0, 1]$) against $T^*$, mean number of $O(N^2)$ SPR iterations/gradient evaluations, single-core wall-clock runtime ($\text{mean} \pm \text{SD}$ and $\text{median}[\text{IQR}]$ in milliseconds), and mean wall-clock speedup.
 
 \begin{table}[h!]
 \centering
@@ -330,15 +335,15 @@ Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} report the mean final
 \label{tab:bench_noiseless}
 \vspace{4pt}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{@{}rrrrrrrrrrr@{}}
+\begin{tabular}{@{}rrrrrrrrrrrr@{}}
 \toprule
-\textbf{$N$} & \textbf{FastME $L$} & \textbf{P2V $L$} & \textbf{P2V $\le$ FME} & \textbf{FME RF} & \textbf{P2V RF} & \textbf{FME Iters} & \textbf{P2V Evals} & \textbf{FME (ms)} & \textbf{P2V (ms)} & \textbf{Speedup} \\
+\textbf{$N$} & \textbf{FastME $L$} & \textbf{P2V $L$} & \textbf{Win/Tie/Loss} & \textbf{FME RF} & \textbf{P2V RF} & \textbf{FME Iters} & \textbf{P2V Evals} & \textbf{FME (ms)} & \textbf{P2V (ms)} & \textbf{P2V Med [IQR]} & \textbf{Speedup} \\
 \midrule
-$20$  & $5.45825$  & $5.45825$  & \textbf{20 / 20} & $0.0000$ & $0.0000$ & $13.7$  & $11.5$ & $0.117$  & $0.084$  & \textbf{1.40$\times$} \\
-$50$  & $14.83082$ & $14.83082$ & \textbf{20 / 20} & $0.0000$ & $0.0000$ & $42.4$  & $19.1$ & $1.125$  & $0.546$  & \textbf{2.06$\times$} \\
-$100$ & $29.56817$ & $29.56817$ & \textbf{10 / 10} & $0.0000$ & $0.0000$ & $97.7$  & $33.7$ & $8.131$  & $3.337$  & \textbf{2.44$\times$} \\
-$150$ & $44.92155$ & $44.92155$ & \textbf{5 / 5}   & $0.0000$ & $0.0000$ & $152.6$ & $50.0$ & $27.159$ & $9.194$  & \textbf{2.95$\times$} \\
-$200$ & $58.90105$ & $58.90105$ & \textbf{5 / 5}   & $0.0000$ & $0.0000$ & $211.2$ & $66.8$ & $63.285$ & $21.314$ & \textbf{2.97$\times$} \\
+$20$  & $11.12739$ & $11.12739$ & \textbf{0 / 20 / 0} & $0.0000$ & $0.0000$ & $13.4$  & $11.2$ & $0.11 \pm 0.02$  & $0.08 \pm 0.02$  & $0.08\,[0.03]$ & \textbf{1.35$\times$} \\
+$50$  & $29.42572$ & $29.42572$ & \textbf{0 / 20 / 0} & $0.0000$ & $0.0000$ & $42.4$  & $19.4$ & $1.38 \pm 0.39$  & $0.62 \pm 0.16$  & $0.57\,[0.22]$ & \textbf{2.22$\times$} \\
+$100$ & $59.52693$ & $59.52693$ & \textbf{0 / 10 / 0} & $0.0000$ & $0.0000$ & $97.9$  & $34.3$ & $8.33 \pm 0.99$  & $3.09 \pm 0.37$  & $3.10\,[0.64]$ & \textbf{2.70$\times$} \\
+$150$ & $89.04365$ & $89.04365$ & \textbf{0 / 5 / 0}  & $0.0000$ & $0.0000$ & $155.4$ & $48.4$ & $26.74 \pm 0.60$ & $8.61 \pm 1.14$  & $8.27\,[1.28]$ & \textbf{3.11$\times$} \\
+$200$ & $116.32398$ & $116.32398$ & \textbf{0 / 5 / 0} & $0.0000$ & $0.0000$ & $212.0$ & $65.6$ & $65.35 \pm 6.18$ & $20.36 \pm 2.27$ & $19.30\,[2.51]$ & \textbf{3.21$\times$} \\
 \bottomrule
 \end{tabular}%
 }
@@ -346,78 +351,79 @@ $200$ & $58.90105$ & $58.90105$ & \textbf{5 / 5}   & $0.0000$ & $0.0000$ & $211.
 
 \begin{table}[h!]
 \centering
-\caption{Benchmark 2: Noisy Phylogenetic Distances ($\sigma = 0.15$, Log-Normal Estimation Noise).}
+\caption{Benchmark 2: Noisy Phylogenetic Distances ($\sigma = 0.15$, Log-Normal Multiplicative Noise).}
 \label{tab:bench_noisy}
 \vspace{4pt}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{@{}rrrrrrrrrrr@{}}
+\begin{tabular}{@{}rrrrrrrrrrrr@{}}
 \toprule
-\textbf{$N$} & \textbf{FastME $L$} & \textbf{P2V $L$} & \textbf{P2V $\le$ FME} & \textbf{FME RF} & \textbf{P2V RF} & \textbf{FME Iters} & \textbf{P2V Evals} & \textbf{FME (ms)} & \textbf{P2V (ms)} & \textbf{Speedup} \\
+\textbf{$N$} & \textbf{FastME $L$} & \textbf{P2V $L$} & \textbf{Win/Tie/Loss} & \textbf{FME RF} & \textbf{P2V RF} & \textbf{FME Iters} & \textbf{P2V Evals} & \textbf{FME (ms)} & \textbf{P2V (ms)} & \textbf{P2V Med [IQR]} & \textbf{Speedup} \\
 \midrule
-$20$  & $5.48180$  & $5.48180$  & \textbf{20 / 20} & $0.0147$ & $0.0147$ & $13.9$  & $11.7$ & $0.066$  & $0.052$  & \textbf{1.26$\times$} \\
-$50$  & $14.55934$ & $14.55934$ & \textbf{20 / 20} & $0.0149$ & $0.0149$ & $44.2$  & $22.4$ & $1.282$  & $0.787$  & \textbf{1.63$\times$} \\
-$100$ & $29.52291$ & $29.52291$ & \textbf{10 / 10} & $0.0124$ & $0.0124$ & $100.4$ & $38.0$ & $7.747$  & $3.259$  & \textbf{2.38$\times$} \\
-$150$ & $43.87382$ & $43.87382$ & \textbf{5 / 5}   & $0.0068$ & $0.0068$ & $157.2$ & $58.4$ & $26.948$ & $10.833$ & \textbf{2.49$\times$} \\
-$200$ & $59.13711$ & $59.13711$ & \textbf{5 / 5}   & $0.0051$ & $0.0051$ & $228.6$ & $78.6$ & $68.383$ & $25.124$ & \textbf{2.72$\times$} \\
+$20$  & $11.19777$ & $11.19777$ & \textbf{0 / 20 / 0} & $0.0500$ & $0.0500$ & $14.3$  & $12.3$ & $0.07 \pm 0.01$  & $0.06 \pm 0.01$  & $0.05\,[0.02]$ & \textbf{1.31$\times$} \\
+$50$  & $29.25507$ & $29.25607$ & \textbf{1 / 18 / 1} & $0.0660$ & $0.0649$ & $46.1$  & $25.9$ & $1.02 \pm 0.06$  & $0.63 \pm 0.13$  & $0.61\,[0.11]$ & \textbf{1.63$\times$} \\
+$100$ & $59.25471$ & $59.25471$ & \textbf{0 / 10 / 0} & $0.0526$ & $0.0526$ & $102.6$ & $41.0$ & $8.16 \pm 0.53$  & $3.50 \pm 0.38$  & $3.43\,[0.59]$ & \textbf{2.33$\times$} \\
+$150$ & $92.14846$ & $92.14846$ & \textbf{0 / 5 / 0}  & $0.0395$ & $0.0395$ & $166.0$ & $61.0$ & $28.28 \pm 0.97$ & $10.60 \pm 1.41$ & $10.64\,[1.51]$ & \textbf{2.67$\times$} \\
+$200$ & $120.94220$ & $120.94220$ & \textbf{1 / 4 / 0} & $0.0467$ & $0.0487$ & $235.8$ & $84.4$ & $68.50 \pm 1.49$ & $25.17 \pm 2.88$ & $24.80\,[4.28]$ & \textbf{2.72$\times$} \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-Across all $120 / 120$ trials, the Phylo2Vec BME Optimizer matches FastME's optimal BME length and Robinson-Foulds accuracy ($\text{RF} = 0.0000$ on all noiseless instances) while requiring up to $\mathbf{3.16\times}$ fewer $O(N^2)$ evaluations ($66.8$ vs.\ $211.2$ at $N=200$) and achieving up to a $\mathbf{2.97\times}$ single-core wall-clock speedup.
+Across all $60 / 60$ noiseless trials ($\sigma = 0.00$), the Phylo2Vec BME Optimizer recovers the exact ground-truth topology ($\text{RF} = 0.0000$, $100\%$ ties with FastME) while requiring up to $\mathbf{3.23\times}$ fewer $O(N^2)$ evaluations ($65.6$ vs.\ $212.0$ at $N=200$) and achieving up to a $\mathbf{3.21\times}$ single-core wall-clock speedup. Across all $60$ noisy trials ($\sigma = 0.15$), Phylo2Vec achieves $2$ strict wins, $57$ exact ties, and $1$ loss ($98.3\%$ win/tie rate; $119 / 120 = 99.2\%$ overall across both benchmarks) with a $\mathbf{2.72\times}$ speedup at $N=200$.
 
 \subsection{Multi-Core CPU, Column-Tiled, and Metal GPU Scaling (\texttt{bench\_parallel\_gpu.m})}
-Table~\ref{tab:bench_gpu} reports empirical scaling from $N = 100$ to $N = 4{,}000$ on an Apple M5 (10-core CPU + 8-core Metal GPU with Unified Memory), comparing: (1) 1-Core CPU FP64, (2) 10-Core Untiled CPU FP64 ($4N^2$ memory), (3) 10-Core Column-Tiled CPU FP64 ($1N^2$ memory, Theorem~\ref{thm:column_tiling}), (4) Metal GPU \texttt{subdist} DP vs.\ 1-Core \texttt{subdist}, and (5) Zero-Copy Hybrid GPU+CPU Unified Memory execution.
+Table~\ref{tab:bench_gpu} reports empirical scaling from $N = 100$ to $N = 4{,}000$ on an Apple M5 (10-core CPU + Metal GPU with Unified Memory), comparing: (1) 1-Core CPU FP64, (2) 10-Core Untiled CPU FP64 ($4N^2$ \texttt{subdist} footprint), (3) 10-Core Column-Tiled CPU FP64 ($1N^2$ \texttt{subdist\_int\_leaf} footprint, Theorem~\ref{thm:column_tiling}), (4) Complete 1-Core \texttt{subdist} DP (in both FP64 and FP32, including the 3-way root row and diagonal zeroing) vs.\ Metal GPU FP32 \texttt{subdist} DP (including $16 \times 16$ threadgroup tiled transpose), and (5) Zero-Copy Hybrid GPU+CPU Unified Memory execution, along with maximum absolute errors against the 1-Core FP64 reference for both FP64 and FP32 paths.
 
 \begin{table}[h!]
 \centering
-\caption{Large-$N$ Discrete Gradient Scaling on Apple M5 ($N = 100 \dots 4{,}000$, Verified to $\le 8.33 \times 10^{-16}$).}
+\caption{Large-$N$ Discrete Gradient Scaling on Apple M5 ($N = 100 \dots 4{,}000$).}
 \label{tab:bench_gpu}
 \vspace{4pt}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{@{}rrrrrrrrrrr@{}}
+\begin{tabular}{@{}rrrrrrrrrrrrr@{}}
 \toprule
-\textbf{$N$} & \textbf{1-Core CPU} & \textbf{10-Core CPU} & \textbf{CPU Spd} & \textbf{Tiled ($\frac{1}{4}$ RAM)} & \textbf{1-Core \texttt{subdist}} & \textbf{GPU \texttt{subdist}} & \textbf{GPU Spd} & \textbf{Hybrid Total} & \textbf{Hyb Spd} & \textbf{Max Diff} \\
+\textbf{$N$} & \textbf{1C F64} & \textbf{10C F64} & \textbf{10C Spd} & \textbf{Tiled F64} & \textbf{1C \texttt{sub}(F64)} & \textbf{1C \texttt{sub}(F32)} & \textbf{GPU \texttt{sub}(F32)} & \textbf{GPU Spd} & \textbf{Hybrid F32} & \textbf{Hyb Spd} & \textbf{F64 Diff} & \textbf{F32 Diff} \\
 \midrule
-$100$   & $0.048\text{ ms}$   & $0.056\text{ ms}$  & $0.84\times$          & $0.121\text{ ms}$  & $0.012\text{ ms}$  & $0.724\text{ ms}$ & $0.02\times$          & $0.743\text{ ms}$  & $0.06\times$          & $0.00\text{e+}00$ \\
-$250$   & $0.309\text{ ms}$   & $0.216\text{ ms}$  & $1.43\times$          & $0.255\text{ ms}$  & $0.079\text{ ms}$  & $0.994\text{ ms}$ & $0.08\times$          & $1.166\text{ ms}$  & $0.27\times$          & $0.00\text{e+}00$ \\
-$500$   & $1.236\text{ ms}$   & $0.580\text{ ms}$  & \textbf{2.13$\times$} & $0.560\text{ ms}$  & $0.322\text{ ms}$  & $1.545\text{ ms}$ & $0.21\times$          & $1.765\text{ ms}$  & $0.70\times$          & $5.55\text{e-}17$ \\
-$1{,}000$ & $5.441\text{ ms}$ & $1.862\text{ ms}$  & \textbf{2.92$\times$} & $2.127\text{ ms}$  & $1.655\text{ ms}$  & $2.615\text{ ms}$ & $0.63\times$          & $2.000\text{ ms}$  & \textbf{2.72$\times$} & $4.44\text{e-}16$ \\
-$2{,}000$ & $29.079\text{ ms}$ & $9.751\text{ ms}$ & \textbf{2.98$\times$} & $9.939\text{ ms}$  & $8.876\text{ ms}$  & $4.089\text{ ms}$ & \textbf{2.17$\times$} & $6.063\text{ ms}$  & \textbf{4.80$\times$} & $4.44\text{e-}16$ \\
-$3{,}000$ & $71.084\text{ ms}$ & $24.445\text{ ms}$ & \textbf{2.91$\times$} & \textbf{23.130 ms} & $22.899\text{ ms}$ & $5.601\text{ ms}$ & \textbf{4.09$\times$} & $13.773\text{ ms}$ & \textbf{5.16$\times$} & $8.33\text{e-}16$ \\
-$4{,}000$ & $135.325\text{ ms}$ & $50.101\text{ ms}$ & \textbf{2.70$\times$} & \textbf{42.811 ms} & $39.568\text{ ms}$ & $5.826\text{ ms}$ & \textbf{6.79$\times$} & $23.791\text{ ms}$ & \textbf{5.69$\times$} & $6.73\text{e-}16$ \\
+$100$     & $0.038\text{ ms}$   & $0.055\text{ ms}$  & $0.69\times$          & $0.071\text{ ms}$  & $0.009\text{ ms}$  & $0.009\text{ ms}$  & $0.470\text{ ms}$ & $0.02\times$          & $0.489\text{ ms}$  & $0.08\times$          & $0.00\text{e+}00$ & $4.35\text{e-}07$ \\
+$250$     & $0.224\text{ ms}$   & $0.224\text{ ms}$  & $1.00\times$          & $0.218\text{ ms}$  & $0.060\text{ ms}$  & $0.051\text{ ms}$  & $0.860\text{ ms}$ & $0.07\times$          & $0.938\text{ ms}$  & $0.24\times$          & $0.00\text{e+}00$ & $5.24\text{e-}07$ \\
+$500$     & $1.032\text{ ms}$   & $0.537\text{ ms}$  & \textbf{1.92$\times$} & $0.557\text{ ms}$  & $0.307\text{ ms}$  & $0.224\text{ ms}$  & $1.387\text{ ms}$ & $0.22\times$          & $1.608\text{ ms}$  & $0.64\times$          & $5.55\text{e-}17$ & $6.63\text{e-}07$ \\
+$1{,}000$ & $5.323\text{ ms}$   & $1.968\text{ ms}$  & \textbf{2.71$\times$} & $2.102\text{ ms}$  & $1.525\text{ ms}$  & $1.392\text{ ms}$  & $2.795\text{ ms}$ & $0.55\times$          & $2.377\text{ ms}$  & \textbf{2.24$\times$} & $4.44\text{e-}16$ & $8.11\text{e-}07$ \\
+$2{,}000$ & $26.914\text{ ms}$  & $10.894\text{ ms}$ & \textbf{2.47$\times$} & \textbf{10.566 ms} & $9.156\text{ ms}$  & $9.157\text{ ms}$  & $2.848\text{ ms}$ & \textbf{3.21$\times$} & $6.704\text{ ms}$  & \textbf{4.01$\times$} & $4.44\text{e-}16$ & $8.93\text{e-}07$ \\
+$3{,}000$ & $70.959\text{ ms}$  & $25.311\text{ ms}$ & \textbf{2.80$\times$} & \textbf{23.252 ms} & $22.072\text{ ms}$ & $28.623\text{ ms}$ & $6.356\text{ ms}$ & \textbf{3.47$\times$} & $14.181\text{ ms}$ & \textbf{5.00$\times$} & $5.27\text{e-}16$ & $9.84\text{e-}07$ \\
+$4{,}000$ & $133.400\text{ ms}$ & $53.256\text{ ms}$ & \textbf{2.50$\times$} & \textbf{43.682 ms} & $40.771\text{ ms}$ & $59.141\text{ ms}$ & $5.632\text{ ms}$ & \textbf{7.24$\times$} & $24.767\text{ ms}$ & \textbf{5.39$\times$} & $5.00\text{e-}16$ & $1.13\text{e-}06$ \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-Notably, at $N = 3{,}000$ and $N = 4{,}000$, the Column-Tiled implementation (\texttt{Tiled}, Theorem~\ref{thm:column_tiling}) is both $\mathbf{4\times}$ \textbf{smaller in memory} ($128\text{ MB}$ vs.\ $512\text{ MB}$) and $\mathbf{17\%}$ \textbf{faster} ($42.8\text{ ms}$ vs.\ $50.1\text{ ms}$) than the untiled 10-core CPU kernel because reconstructing the three active rows per SPR scan inside L1/L2 cache avoids $512\text{ MB}$ DRAM cache misses.
+Notably, at $N = 3{,}000$ and $N = 4{,}000$, the Column-Tiled FP64 implementation (\texttt{Tiled F64}, Theorem~\ref{thm:column_tiling}) is both $\mathbf{4\times}$ \textbf{smaller in \texttt{subdist} memory} ($128\text{ MB}$ vs.\ $512\text{ MB}$ at $N=4{,}000$) and $\mathbf{18\%}$ \textbf{faster} ($43.68\text{ ms}$ vs.\ $53.26\text{ ms}$) than the untiled 10-core CPU kernel because reconstructing the three active rows per SPR scan inside L1/L2 cache avoids $512\text{ MB}$ DRAM cache misses. On the Metal GPU, the lockstep column-parallel \texttt{subdist} kernel achieves a $\mathbf{7.24\times}$ speedup over 1-Core FP64 \texttt{subdist} ($\mathbf{10.50\times}$ over 1-Core FP32 \texttt{subdist}) and a $\mathbf{5.39\times}$ end-to-end hybrid speedup at $N = 4{,}000$.
 
-\subsection{Multi-GPU Scaling on 8x NVIDIA H100 and 8x RTX PRO 6000}
-Because our column-parallel and column-tiled kernels are memory-bandwidth bound at $N \ge 2{,}000$ ($\sim 60 N^2\text{ bytes}$ of memory traffic per full gradient sweep in FP32) and eliminate inter-column dependencies, they map directly onto multi-GPU data-center nodes:
+\subsection{Analytical Multi-GPU Scaling Projections for 8x NVIDIA H100 and 8x RTX PRO 6000}
+Because our column-parallel and column-tiled kernels in \texttt{phylo2vec\_cuda\_8xh100.cu} are memory-bandwidth bound at $N \ge 2{,}000$ ($\sim 60 N^2\text{ bytes}$ of memory traffic per full gradient sweep in FP32) and eliminate inter-column dependencies, we can derive analytical roofline and memory-capacity projections for multi-GPU data-center nodes:
 \begin{itemize}
-    \item \textbf{8$\times$ NVIDIA H100 SXM5 ($640\text{ GB}$ HBM3, $26.8\text{ TB/s}$ aggregate bandwidth, $1{,}056\text{ SMs}$ with $228\text{ KB}$ Shared SRAM/SM, $900\text{ GB/s}$ NVLink 4.0):} Provides $175\times$ the memory bandwidth of the Apple M5 and $272\text{ TFLOPS}$ of native FP64 compute.
-    \item \textbf{8$\times$ NVIDIA RTX PRO 6000 Blackwell ($768\text{ GB}$ GDDR7, $14.3\text{ TB/s}$ aggregate bandwidth, $1{,}504\text{ SMs}$, $128\text{ MB}$ L2 cache/GPU = $1\text{ GB}$ total L2, $1{,}000\text{ TFLOPS}$ FP32):} With Column Tiling (Theorem~\ref{thm:column_tiling}), both $D$ and $\text{subdist\_int\_leaf}$ fit inside each $96\text{ GB}$ GPU up to $N = 80{,}000$ with zero PCIe communication during Stage~3, while the $128\text{ MB}$ L2 cache per GPU keeps active autonomous rows cache-resident across all 188 SMs.
+    \item \textbf{Memory Footprint Accounting (Full Gradient vs.\ Fused Top-1 Reduction):} In single precision (FP32), the input distance matrix $D$ occupies $4N^2$ bytes and the column-tiled table $\text{subdist\_int\_leaf}$ occupies $4N(N-1) \approx 4N^2$ bytes ($8N^2$ bytes combined, compared to $4N^2 + 16N^2 = 20N^2$ bytes for untiled $D + \text{subdist}$). Materializing the dense $(N-1) \times (2N-3)$ output gradient matrix $\Delta_{\text{full}}$ adds $8N^2$ bytes ($16N^2$ bytes total in tiled mode). However, when executing topological optimization via \texttt{k\_spr\_rows\_top1}, each GPU threadblock reduces $\min_{0 \le j \le 2i} \Delta_{i, j}$ directly in shared memory and writes only the per-row argmin pair $(\Delta_{i, j^*}, j^*)$ ($8N$ bytes total), keeping the total workspace strictly at $8N^2$ bytes ($4N^2$ for $D$ + $4N^2$ for $\text{subdist\_int\_leaf}$, or $4N^2 + O(N \cdot B_{\text{tile}})$ when streaming tiles).
+    \item \textbf{8$\times$ NVIDIA H100 SXM5 ($640\text{ GB}$ HBM3, $26.8\text{ TB/s}$ aggregate bandwidth, $1{,}056\text{ SMs}$ with up to $228\text{ KB}$ opt-in dynamic shared memory/SM via \texttt{cudaFuncAttributeMaxDynamicSharedMemorySize}, $900\text{ GB/s}$ NVLink 4.0):} Provides $272\text{ TFLOPS}$ of native FP64 compute and $228\text{ KB}$ shared memory per SM (supporting \texttt{k\_spr\_rows\_smem} up to $N \approx 28{,}000$ before automatic fallback to \texttt{k\_spr\_rows\_gmem} or \texttt{k\_spr\_rows\_tiled}).
+    \item \textbf{8$\times$ NVIDIA RTX PRO 6000 Blackwell ($768\text{ GB}$ GDDR7, $14.3\text{ TB/s}$ aggregate bandwidth, $1{,}504\text{ SMs}$, $128\text{ MB}$ L2 cache/GPU = $1\text{ GB}$ total L2):} With Column Tiling (Theorem~\ref{thm:column_tiling}) and fused top-1 reduction (\texttt{k\_spr\_rows\_top1}), both $D$ and $\text{subdist\_int\_leaf}$ ($8N^2$ bytes) fit inside each $96\text{ GB}$ GPU up to $N = 80{,}000$ ($51.2\text{ GB}$) with zero PCIe communication during Stage~3, while the $128\text{ MB}$ L2 cache per GPU keeps active autonomous rows cache-resident across all 188 SMs.
 \end{itemize}
 
 \begin{table}[h!]
 \centering
-\caption{Projected Multi-GPU Performance on 8$\times$ H100 SXM5 and 8$\times$ RTX PRO 6000 vs.\ FastME (\texttt{-s} SPR).}
+\caption{Analytical Multi-GPU Roofline \& Memory-Capacity Projections on 8$\times$ H100 SXM5 and 8$\times$ RTX PRO 6000 vs.\ FastME (\texttt{-s} SPR).}
 \label{tab:h100_scaling}
 \vspace{4pt}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{@{}rrrrrrr@{}}
+\begin{tabular}{@{}rrrrrrrr@{}}
 \toprule
-\textbf{Tree Size ($N$)} & \textbf{Moves / Sweep ($2N^2$)} & \textbf{Tiled Footprint (FP32)} & \textbf{8$\times$ RTX PRO 6000 (1 Grad)} & \textbf{8$\times$ H100 (1 Grad)} & \textbf{8$\times$ GPU Full Optimization} & \textbf{FastME CPU (\texttt{-s} SPR)} \\
+\textbf{Tree Size ($N$)} & \textbf{Moves / Sweep ($2N^2$)} & \textbf{$D + \text{subdist\_int\_leaf}$ ($8N^2$)} & \textbf{+ Dense $\Delta_{\text{full}}$ ($16N^2$)} & \textbf{8$\times$ PRO 6000 (1 Grad)} & \textbf{8$\times$ H100 (1 Grad)} & \textbf{8$\times$ GPU Full Opt (Est.)} & \textbf{FastME CPU (\texttt{-s} SPR)} \\
 \midrule
-$1{,}000$   & $2.0 \times 10^6$    & $8\text{ MB}$    & $0.05\text{ ms}$  & $0.05\text{ ms}$  & $\sim 12\text{ ms}$    & $\sim 8.5\text{ s}$ \\
-$4{,}000$   & $3.2 \times 10^7$    & $128\text{ MB}$  & $0.16\text{ ms}$  & $0.18\text{ ms}$  & $\sim 90\text{ ms}$    & $\sim 9\text{ min}$ \\
-$10{,}000$  & $2.0 \times 10^8$    & $0.8\text{ GB}$  & $0.70\text{ ms}$  & $0.75\text{ ms}$  & $\sim 0.65\text{ s}$   & $\sim 2.3\text{ hours}$ \\
-$25{,}000$  & $1.25 \times 10^9$   & $5.0\text{ GB}$  & $4.2\text{ ms}$   & $3.8\text{ ms}$   & $\sim 6.5\text{ s}$    & $\sim 1.5\text{ days}$ \\
-$50{,}000$  & $5.0 \times 10^9$    & $20.0\text{ GB}$ & $16.5\text{ ms}$  & $14.2\text{ ms}$  & $\sim 42\text{ s}$     & \emph{Infeasible ($\text{int32}$ limit)} \\
-$80{,}000$  & $1.28 \times 10^{10}$ & $51.2\text{ GB}$ & $42.0\text{ ms}$  & $36.0\text{ ms}$  & $\sim 2.8\text{ min}$  & \emph{Infeasible} \\
-$180{,}000$ & $6.5 \times 10^{10}$ & $259\text{ GB}$ \emph{(sharded)} & $260\text{ ms}$ & $190\text{ ms}$ & $\sim 24\text{ min}$ & \emph{Infeasible} \\
-$350{,}000$ & $2.45 \times 10^{11}$ & $490\text{ GB}$ $D$ + $16\text{ GB}$ tile & $0.95\text{ s}$ & $0.75\text{ s}$ & $\sim 2.2\text{ hours}$ & \emph{Infeasible} \\
+$1{,}000$   & $2.0 \times 10^6$    & $8\text{ MB}$    & $16\text{ MB}$   & $0.05\text{ ms}$  & $0.05\text{ ms}$  & $\sim 12\text{ ms}$    & $\sim 8.5\text{ s}$ \\
+$4{,}000$   & $3.2 \times 10^7$    & $128\text{ MB}$  & $256\text{ MB}$  & $0.16\text{ ms}$  & $0.18\text{ ms}$  & $\sim 90\text{ ms}$    & $\sim 9\text{ min}$ \\
+$10{,}000$  & $2.0 \times 10^8$    & $0.8\text{ GB}$  & $1.6\text{ GB}$  & $0.70\text{ ms}$  & $0.75\text{ ms}$  & $\sim 0.65\text{ s}$   & $\sim 2.3\text{ hours}$ \\
+$25{,}000$  & $1.25 \times 10^9$   & $5.0\text{ GB}$  & $10.0\text{ GB}$ & $4.2\text{ ms}$   & $3.8\text{ ms}$   & $\sim 6.5\text{ s}$    & $\sim 1.5\text{ days}$ \\
+$50{,}000$  & $5.0 \times 10^9$    & $20.0\text{ GB}$ & $40.0\text{ GB}$ & $16.5\text{ ms}$  & $14.2\text{ ms}$  & $\sim 42\text{ s}$     & \emph{Infeasible ($\text{int32}$ limit)} \\
+$80{,}000$  & $1.28 \times 10^{10}$ & $51.2\text{ GB}$ & $102.4\text{ GB}$ & $42.0\text{ ms}$  & $36.0\text{ ms}$  & $\sim 2.8\text{ min}$  & \emph{Infeasible} \\
+$180{,}000$ & $6.5 \times 10^{10}$ & $259\text{ GB}$ \emph{(sharded)} & \emph{Top-1 ($O(N)$)} & $260\text{ ms}$ & $190\text{ ms}$ & $\sim 24\text{ min}$ & \emph{Infeasible} \\
+$350{,}000$ & $2.45 \times 10^{11}$ & $490\text{ GB}$ $D$ + $16\text{ GB}$ tile & \emph{Top-1 ($O(N)$)} & $0.95\text{ s}$ & $0.75\text{ s}$ & $\sim 2.2\text{ hours}$ & \emph{Infeasible} \\
 \bottomrule
 \end{tabular}%
 }
@@ -427,7 +433,7 @@ $350{,}000$ & $2.45 \times 10^{11}$ & $490\text{ GB}$ $D$ + $16\text{ GB}$ tile 
 \section{Conclusion}
 % ============================================================================
 
-By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and inverse bijections (Theorem~\ref{thm:inverse}), and exploiting node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $2.97\times$ on a single core while recovering identical or superior BME topologies across $100\%$ of tested datasets. Furthermore, our Column-Independence (Theorem~\ref{thm:col_indep}), $O(N \log N)$ Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack (Theorem~\ref{thm:heavy_stack}), and Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations—enabling GPU acceleration from laptop unified memory up to $350{,}000\text{--}400{,}000$-taxon phylogenies on 8$\times$ H100 and 8$\times$ RTX PRO 6000 nodes.
+By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ tree-based cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and exact inverse bijections (Theorem~\ref{thm:inverse}), and exploiting node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $3.21\times$ on a single core while recovering identical or superior BME topologies across $99.2\%$ ($119/120$) of tested datasets. Furthermore, our Column-Independence (Theorem~\ref{thm:col_indep}), Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack with race-free SIMT destination indexing (Theorem~\ref{thm:heavy_stack}), and Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations—delivering up to a $7.24\times$ \texttt{subdist} speedup ($5.39\times$ end-to-end hybrid speedup) on Apple Silicon unified memory and providing a verified CUDA C++ architecture capable of scaling to $350{,}000\text{--}400{,}000$-taxon phylogenies on 8$\times$ H100 and 8$\times$ RTX PRO 6000 nodes.
 
 \begin{thebibliography}{9}
 \bibitem{pauplin2000direct}
