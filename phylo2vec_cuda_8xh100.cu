@@ -1386,13 +1386,19 @@ int main(void) {
         printf("\n");
     }
 
-    /* 2. Benchmark & Validate across N = 50, 100, 250, 500 */
-    printf("----------------------------------------------------------------------------------------------------\n");
-    printf("   N   | subdist (ms) | SPR smem (ms) | Tiled (ms) |  smem Diff  |  gmem Diff  |  Tiled Diff | Status\n");
-    printf("----------------------------------------------------------------------------------------------------\n");
-    int32_t sizes[4] = {50, 100, 250, 500};
+    /* 2. Benchmark & Validate across N */
+    printf("----------------------------------------------------------------------------------------------------------------\n");
+    printf("   N   | CPU Ref (ms) | GPU sub (ms) | SPR smem (ms) | Tiled (ms) |  smem Diff  |  gmem Diff  |  Tiled Diff | Status\n");
+    printf("----------------------------------------------------------------------------------------------------------------\n");
+#ifdef __CUDACC__
+    int32_t sizes[] = {100, 250, 500, 1000, 2000, 4000};
+    int n_sizes = 6;
+#else
+    int32_t sizes[] = {50, 100, 250, 500};
+    int n_sizes = 4;
+#endif
     uint32_t rng = 1337U;
-    for (int s = 0; s < 4; ++s) {
+    for (int s = 0; s < n_sizes; ++s) {
         int32_t N = sizes[s];
         int64_t *v = (int64_t *)malloc((size_t)(N - 1) * sizeof(int64_t));
         double *D = (double *)malloc((size_t)N * N * sizeof(double));
@@ -1410,16 +1416,22 @@ int main(void) {
                 D[(size_t)j * N + i] = d;
             }
         }
+        double t0_cpu = now_ms_host();
+        double *tmp_ref = (double *)calloc((size_t)(N - 1) * (2 * (N - 1) - 1), sizeof(double));
+        calculate_discrete_gradient_full_c(v, D, N, tmp_ref);
+        double ms_cpu = now_ms_host() - t0_cpu;
+        free(tmp_ref);
+
         double ms_sub = 0, ms_smem = 0, ms_tiled = 0;
         double es = 0, eg = 0, et = 0;
         int ok = run_and_validate_cuda_pipeline(v, D, N, &ms_sub, &ms_smem, &ms_tiled, &es, &eg, &et, 0);
         if (!ok || es > 5e-5 || eg > 5e-5 || et > 5e-5) all_ok = 0;
-        printf(" %5d |  %9.3f   |   %9.3f   | %9.3f  |  %.3e  |  %.3e  |  %.3e  | %s\n",
-               N, ms_sub, ms_smem, ms_tiled, es, eg, et, ok ? "PASS" : "FAIL");
+        printf(" %5d |  %10.3f  |  %10.3f  |   %9.3f   | %9.3f  |  %.3e  |  %.3e  |  %.3e  | %s\n",
+               N, ms_cpu, ms_sub, ms_smem, ms_tiled, es, eg, et, ok ? "PASS" : "FAIL");
         free(v);
         free(D);
     }
-    printf("----------------------------------------------------------------------------------------------------\n");
+    printf("----------------------------------------------------------------------------------------------------------------\n");
 
     if (!all_ok) {
         fprintf(stderr, "CUDA pipeline validation FAILED.\n");
