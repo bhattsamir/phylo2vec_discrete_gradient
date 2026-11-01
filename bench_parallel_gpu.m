@@ -253,35 +253,23 @@ static void build_tree_structures(
     int32_t *dfs_order = tin + n_nodes_u;
     int32_t *adj_u = dfs_order + n_nodes_u;
 
+    for (int32_t x = 0; x < n_leaves; ++x) {
+        parents_uf[x] = x;
+        min_leaf[x] = x;
+    }
     for (int32_t k = 0; k < n_pairs; ++k) {
         int32_t i = n_pairs - 1 - k;
-        pairs[2 * k] = (int32_t)v[i];
-        pairs[2 * k + 1] = i + 1;
-    }
-    for (int32_t i = 0; i < n_nodes_r; ++i) {
-        parents_uf[i] = i;
-        min_leaf[i] = i;
-    }
-    int32_t next_parent = n_leaves;
-    for (int32_t i = 0; i < n_pairs; ++i) {
-        int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-        while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-        while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-        child1_r[next_parent] = p2;
-        child2_r[next_parent] = p1;
-        parents_uf[p1] = next_parent;
-        parents_uf[p2] = next_parent;
-        next_parent++;
-    }
-
-    for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
-        int32_t c1 = child1_r[m], c2 = child2_r[m];
-        int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
-        int32_t l_min = (ml1 < ml2) ? ml1 : ml2;
-        int32_t l_max = (ml1 < ml2) ? ml2 : ml1;
-        v_map[l_max] = (ml1 < ml2) ? c2 : c1;
-        min_leaf[m] = l_min;
-        m_lmin[m - n_leaves] = l_min;
+        int32_t m = n_leaves + k;
+        int32_t x = (int32_t)v[i];
+        int32_t y = i + 1;
+        int32_t c1 = parents_uf[y];
+        int32_t c2 = parents_uf[x];
+        child1_r[m] = c1;
+        child2_r[m] = c2;
+        min_leaf[m] = x;
+        m_lmin[k] = x;
+        v_map[y] = c1;
+        parents_uf[x] = m;
     }
 
     int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
@@ -493,7 +481,9 @@ static void calculate_discrete_gradient_multicore_f64(
                 }
             }
             if (other0 != -1) {
-                for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+                edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+                edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+                edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
 
                 run_half_tree_dfs_f64(
                     other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
@@ -733,7 +723,9 @@ static void calculate_discrete_gradient_tiled_f64(
                 compute_autonomous_row_f64(other1, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
                                            child1_r, child2_r, tin, D, subdist_int_leaf, row_other1);
 
-                for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+                edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+                edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+                edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
 
                 run_half_tree_dfs_f64(
                     other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
@@ -1256,7 +1248,9 @@ int main(void) {
                                 }
                             }
                             if (other0 != -1) {
-                                for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0f;
+                                edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0f;
+                                edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0f;
+                                edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0f;
 
                                 run_half_tree_dfs_f32(
                                     other0, other1, parent, N, n_nodes_u, adj_u, parent_u, sub_size, nd_u_f32,

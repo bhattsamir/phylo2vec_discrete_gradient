@@ -35,6 +35,10 @@ extern double optimize_phylo2vec_bme_c(
     const int64_t *v_init, const double *D, int32_t n_leaves,
     int64_t *v_out, int32_t *n_grad_evals_out, double *elapsed_ms_out
 );
+extern double optimize_fastme_bme_c(
+    const int64_t *v_init, const double *D, int32_t n_leaves,
+    int64_t *v_out, int32_t *n_spr_passes_out, double *elapsed_ms_out
+);
 
 static uint32_t rng_state = 20261101U;
 static inline uint32_t xorshift32(void) {
@@ -65,7 +69,9 @@ static void decode_v_to_trees(
     int32_t n_nodes_u = 2 * n_leaves - 2;
     int32_t root_u = n_nodes_u - 1;
 
-    int32_t *buf = (int32_t *)malloc((size_t)(2 * n_pairs + 4 * n_nodes_r + 3 * n_nodes_u) * sizeof(int32_t));
+    int32_t stack_buf[2048];
+    int32_t *buf = (n_leaves <= 128) ? stack_buf :
+        (int32_t *)malloc((size_t)(2 * n_pairs + 4 * n_nodes_r + 3 * n_nodes_u) * sizeof(int32_t));
     int32_t *pairs = buf;
     int32_t *child1_r = pairs + 2 * n_pairs;
     int32_t *child2_r = child1_r + n_nodes_r;
@@ -131,15 +137,13 @@ static void decode_v_to_trees(
     if (child1_r_out) memcpy(child1_r_out, child1_r, (size_t)n_nodes_r * sizeof(int32_t));
     if (child2_r_out) memcpy(child2_r_out, child2_r, (size_t)n_nodes_r * sizeof(int32_t));
     if (adj_u_out) memcpy(adj_u_out, adj_u, (size_t)(3 * n_nodes_u) * sizeof(int32_t));
-    free(buf);
+    if (buf != stack_buf) free(buf);
 }
 
 /* Brute-force Pauplin BME Tree Length L(T(v)) = sum_{x < y} 2^{-(d_T(x,y)-1)} D[x,y] */
 static double brute_force_pauplin_bme_length(const int64_t *v, const double *D, int32_t n_leaves, int32_t *adj_u_out) {
     int32_t n_nodes_u = 2 * n_leaves - 2;
-    int32_t *adj_u = (int32_t *)malloc((size_t)(3 * n_nodes_u) * sizeof(int32_t));
-    int32_t *dist = (int32_t *)malloc((size_t)n_nodes_u * sizeof(int32_t));
-    int32_t *q = (int32_t *)malloc((size_t)n_nodes_u * sizeof(int32_t));
+    int32_t adj_u[768], dist[256], q[256];
 
     decode_v_to_trees(v, n_leaves, NULL, NULL, adj_u);
     if (adj_u_out) memcpy(adj_u_out, adj_u, (size_t)(3 * n_nodes_u) * sizeof(int32_t));
@@ -164,9 +168,6 @@ static double brute_force_pauplin_bme_length(const int64_t *v, const double *D, 
             total_L += ldexp(D[(size_t)src * n_leaves + dst], -(dist[dst] - 1));
         }
     }
-    free(adj_u);
-    free(dist);
-    free(q);
     return total_L;
 }
 
@@ -558,6 +559,200 @@ int main(void) {
                test5_ok ? "PASS" : "FAIL");
         printf("       Relabel, rooted/unrooted inverse bijections, and N=1025 optimizer passed.\n\n");
         if (!test5_ok) all_passed = 0;
+    }
+
+    /* TEST 6: Exhaustive (2N-3)!! Tree Enumeration for N = 4, 5, 6, 7 (11,460 Trees Total) */
+    {
+        int32_t total_trees = 0;
+        int32_t total_cf_trees = 0;
+        int32_t total_cf_grad_entries = 0;
+        double max_exhaustive_grad_err = 0.0;
+        double max_exhaustive_relabel_err = 0.0;
+        int test6_ok = 1;
+
+        for (int32_t N = 4; N <= 7; ++N) {
+            int32_t n_pairs = N - 1;
+            int32_t max_cols = 2 * n_pairs - 1;
+            int32_t n_int_splits = N - 3;
+            double D[64], D_perm[64], delta_full[128], delta_lt[128];
+            int64_t v[8], v_mut[8], v_cf[8], v_rec_r[8], v_rec_u[8];
+            int32_t perm[8], c1_r[16], c2_r[16], adj_u[64], adj_u_rec[64];
+            uint64_t splits_orig[8], splits_rec[8];
+
+            for (int32_t a = 0; a < N; ++a) {
+                D[a * N + a] = 0.0;
+                for (int32_t b = a + 1; b < N; ++b) {
+                    double d = 0.15 + 1.75 * rand_uniform();
+                    D[a * N + b] = D[b * N + a] = d;
+                }
+            }
+
+            memset(v, 0, sizeof(v));
+            while (1) {
+                total_trees++;
+
+                /* 1. Rooted & unrooted inverse bijection on every tree */
+                decode_v_to_trees(v, N, c1_r, c2_r, adj_u);
+                encode_rooted_to_v_c(c1_r, c2_r, N, v_rec_r);
+                if (memcmp(v, v_rec_r, (size_t)n_pairs * sizeof(int64_t)) != 0) test6_ok = 0;
+
+                double L_base = brute_force_pauplin_bme_length(v, D, N, adj_u);
+                encode_unrooted_to_v_c(adj_u, N, v_rec_u);
+                double L_u = brute_force_pauplin_bme_length(v_rec_u, D, N, adj_u_rec);
+                if (fabs(L_base - L_u) > 1e-12) test6_ok = 0;
+                extract_canonical_splits_u64(adj_u, N, splits_orig);
+                extract_canonical_splits_u64(adj_u_rec, N, splits_rec);
+                if (memcmp(splits_orig, splits_rec, (size_t)n_int_splits * sizeof(uint64_t)) != 0) test6_ok = 0;
+
+                /* 2. Cherry-first gauge relabeling (flip_mode = 0 and 1) on every tree */
+                for (int32_t mode = 0; mode <= 1; ++mode) {
+                    relabel_cherry_first_c(v, N, mode, v_cf, perm);
+                    for (int32_t i = 0; i < n_pairs; ++i) {
+                        if (v_cf[i] < 0 || v_cf[i] > i) test6_ok = 0;
+                    }
+                    for (int32_t a = 0; a < N; ++a) {
+                        for (int32_t b = 0; b < N; ++b) {
+                            D_perm[a * N + b] = D[perm[a] * N + perm[b]];
+                        }
+                    }
+                    double L_cf = brute_force_pauplin_bme_length(v_cf, D_perm, N, NULL);
+                    double r_err = fabs(L_cf - L_base);
+                    if (r_err > max_exhaustive_relabel_err) max_exhaustive_relabel_err = r_err;
+                }
+
+                /* 3. If v is cherry-first (v_i <= i), verify full 0 <= j <= 2i and 0 <= j < i gradients */
+                int is_cf = 1;
+                for (int32_t i = 0; i < n_pairs; ++i) {
+                    if (v[i] > i) { is_cf = 0; break; }
+                }
+                if (is_cf) {
+                    total_cf_trees++;
+                    calculate_discrete_gradient_full_c(v, D, N, delta_full);
+                    calculate_discrete_gradient_c(v, D, N, delta_lt);
+                    for (int32_t i = 1; i < n_pairs; ++i) {
+                        if (fabs(delta_full[i * max_cols + v[i]]) > 1e-13) test6_ok = 0;
+                        for (int32_t j = 0; j <= 2 * i; ++j) {
+                            memcpy(v_mut, v, (size_t)n_pairs * sizeof(int64_t));
+                            v_mut[i] = j;
+                            double L_mut = brute_force_pauplin_bme_length(v_mut, D, N, NULL);
+                            double exact_diff = L_mut - L_base;
+                            double err_f = fabs(delta_full[i * max_cols + j] - exact_diff);
+                            if (err_f > max_exhaustive_grad_err) max_exhaustive_grad_err = err_f;
+                            if (j < i) {
+                                double err_l = fabs(delta_lt[i * (n_pairs - 1) + j] - exact_diff);
+                                if (err_l > max_exhaustive_grad_err) max_exhaustive_grad_err = err_l;
+                            }
+                            total_cf_grad_entries++;
+                        }
+                    }
+                }
+
+                /* Advance odometer over 0 <= v[i] <= 2*i */
+                int32_t pos = n_pairs - 1;
+                while (pos >= 1 && v[pos] == 2 * pos) {
+                    v[pos] = 0;
+                    pos--;
+                }
+                if (pos == 0) break;
+                v[pos]++;
+            }
+        }
+        if (total_trees != 11460 || total_cf_trees != 870) test6_ok = 0;
+        if (max_exhaustive_grad_err > 1e-11 || max_exhaustive_relabel_err > 1e-11) test6_ok = 0;
+
+        printf("[%s] Test 6: Exhaustive (2N-3)!! Tree Enumeration for N = 4, 5, 6, 7\n",
+               test6_ok ? "PASS" : "FAIL");
+        printf("       Total rooted trees verified (bijection + relabeling):  %d / 11460\n", total_trees);
+        printf("       Total cherry-first trees verified (full 0<=j<=2i):     %d / 870 (%d entries, max err: %.3e)\n\n",
+               total_cf_trees, total_cf_grad_entries, max_exhaustive_grad_err);
+        if (!test6_ok) all_passed = 0;
+    }
+
+    /* TEST 7: Adversarial Topologies (Caterpillars, Balanced) & Degenerate Distance Matrices */
+    {
+        const int32_t N = 32;
+        const int32_t n_pairs = N - 1;
+        const int32_t max_cols = 2 * n_pairs - 1;
+        double D[1024], delta_full[4096];
+        int64_t v_topos[4][31], v_mut[31], v_out[31];
+        int test7_ok = 1;
+        double max_adv_err = 0.0;
+
+        /* 4 extremal topologies:
+         *   0: Left caterpillar (v_i = 0)
+         *   1: Right cherry-first caterpillar (v_i = i)
+         *   2: Alternating cherry-first tree (v_i = i / 2)
+         *   3: Balanced binary tree relabeled to cherry-first */
+        for (int32_t i = 0; i < n_pairs; ++i) {
+            v_topos[0][i] = 0;
+            v_topos[1][i] = i;
+            v_topos[2][i] = i / 2;
+            v_topos[3][i] = (i * 7) % (i + 1);
+        }
+
+        /* 4 degenerate/adversarial distance matrix regimes:
+         *   0: All-zero matrix (D_xy = 0)
+         *   1: Constant off-diagonal matrix (D_xy = 1 for x != y -> all Delta_ij must be 0)
+         *   2: Ultrametric clock matrix
+         *   3: Extreme dynamic range [1e-12, 1e6] */
+        for (int32_t mat_type = 0; mat_type < 4; ++mat_type) {
+            double h_node[64];
+            if (mat_type == 2) {
+                for (int32_t u = 0; u < N; ++u) h_node[u] = 0.0;
+                for (int32_t u = N; u < 2 * N - 1; ++u) h_node[u] = (double)(u - N + 1) * 0.5;
+            }
+            for (int32_t a = 0; a < N; ++a) {
+                D[a * N + a] = 0.0;
+                for (int32_t b = a + 1; b < N; ++b) {
+                    double d = 0.0;
+                    if (mat_type == 0) d = 0.0;
+                    else if (mat_type == 1) d = 1.0;
+                    else if (mat_type == 2) {
+                        /* Ultrametric distance determined by highest index max(a, b) */
+                        d = 2.0 * h_node[N + (b - 1)];
+                    } else {
+                        d = ((a + b) % 2 == 0) ? (1e-12 * (double)(a + b + 1)) : (1e3 * (double)(a + b + 1));
+                    }
+                    D[a * N + b] = D[b * N + a] = d;
+                }
+            }
+
+            for (int32_t t = 0; t < 4; ++t) {
+                const int64_t *v = v_topos[t];
+                calculate_discrete_gradient_full_c(v, D, N, delta_full);
+                double L_base = brute_force_pauplin_bme_length(v, D, N, NULL);
+
+                for (int32_t i = 1; i < n_pairs; ++i) {
+                    for (int32_t j = 0; j <= 2 * i; ++j) {
+                        double val = delta_full[i * max_cols + j];
+                        if (!is_finite_double(val)) test7_ok = 0;
+                        if (mat_type <= 1 && fabs(val) > 1e-13) test7_ok = 0;
+                        memcpy(v_mut, v, sizeof(v_mut));
+                        v_mut[i] = j;
+                        double L_mut = brute_force_pauplin_bme_length(v_mut, D, N, NULL);
+                        double exact_diff = L_mut - L_base;
+                        double err = fabs(val - exact_diff);
+                        /* Relative-scaled tolerance for 1e3 dynamic range */
+                        double scale = (mat_type == 3) ? 1e3 : 1.0;
+                        if (err / scale > max_adv_err) max_adv_err = err / scale;
+                    }
+                }
+
+                /* Also verify both optimizers terminate cleanly without increasing BME length */
+                int32_t n_evals = 0;
+                double ms = 0.0;
+                double L_opt_p2v = optimize_phylo2vec_bme_c(v, D, N, v_out, &n_evals, &ms);
+                if (!is_finite_double(L_opt_p2v) || L_opt_p2v > L_base + 1e-9 * (fabs(L_base) + 1.0)) test7_ok = 0;
+                double L_opt_fme = optimize_fastme_bme_c(v, D, N, v_out, &n_evals, &ms);
+                if (!is_finite_double(L_opt_fme) || L_opt_fme > L_base + 1e-9 * (fabs(L_base) + 1.0)) test7_ok = 0;
+            }
+        }
+        if (max_adv_err > 1e-9) test7_ok = 0;
+        printf("[%s] Test 7: Adversarial Topologies & Degenerate Distance Matrices (N=%d)\n",
+               test7_ok ? "PASS" : "FAIL", N);
+        printf("       Caterpillars, zero/constant/ultrametric/extreme-range matrices max rel err: %.3e\n\n",
+               max_adv_err);
+        if (!test7_ok) all_passed = 0;
     }
 
     if (!all_passed) {

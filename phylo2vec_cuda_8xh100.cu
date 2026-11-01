@@ -51,6 +51,12 @@ void calculate_discrete_gradient_full_c(
 );
 }
 
+static inline double now_ms_host(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec * 1e-6;
+}
+
 #ifdef __CUDACC__
 #include <cuda_runtime.h>
 #ifdef _OPENMP
@@ -443,13 +449,6 @@ __global__ void k_spr_rows_smem(
     int32_t root_u = n_nodes_u - 1;
     int32_t max_cols = 2 * (n_leaves - 1) - 1;
 
-    if (SIMT_PHASE_ACTIVE) {
-        for (int32_t u = threadIdx.x; u < root_u; u += blockDim.x) {
-            s_edge_delta[u] = 0.0f;
-        }
-    }
-    __syncthreads();
-
     int32_t tree_root = v_map[v_index];
     int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
     int32_t other0 = -1, other1 = -1;
@@ -465,6 +464,9 @@ __global__ void k_spr_rows_smem(
     if (SIMT_PHASE_ACTIVE) {
         const float *row_root = &subdist[(size_t)tree_root * n_nodes_u];
         if (threadIdx.x == 0) {
+            s_edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0f;
+            s_edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0f;
+            s_edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0f;
             dev_run_half_tree_dfs(
                 other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size,
                 nd_u, row_root, &subdist[(size_t)other1 * n_nodes_u], s_edge_delta
@@ -507,13 +509,6 @@ __global__ void k_spr_rows_gmem(
     int32_t max_cols = 2 * (n_leaves - 1) - 1;
     float *g_edge_delta = &edge_delta_pool[(size_t)blockIdx.x * n_nodes_u];
 
-    if (SIMT_PHASE_ACTIVE) {
-        for (int32_t u = threadIdx.x; u < root_u; u += blockDim.x) {
-            g_edge_delta[u] = 0.0f;
-        }
-    }
-    __syncthreads();
-
     int32_t tree_root = v_map[v_index];
     int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
     int32_t other0 = -1, other1 = -1;
@@ -529,6 +524,9 @@ __global__ void k_spr_rows_gmem(
     if (SIMT_PHASE_ACTIVE) {
         const float *row_root = &subdist[(size_t)tree_root * n_nodes_u];
         if (threadIdx.x == 0) {
+            g_edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0f;
+            g_edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0f;
+            g_edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0f;
             dev_run_half_tree_dfs(
                 other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size,
                 nd_u, row_root, &subdist[(size_t)other1 * n_nodes_u], g_edge_delta
@@ -549,8 +547,8 @@ __global__ void k_spr_rows_gmem(
 
 /* ============================================================================
  * STAGE 3 KERNEL C: Fused Top-1 Candidate Reduction (`k_spr_rows_top1`)
- *   - Reduces each row `i` on the fly to `(row_best_delta[i], row_best_j[i])`
- *     using O(N) total output memory instead of O(N^2) `delta_full` memory!
+ *   - Reduces each row `i` on the fly across all 128 threads in shared memory
+ *     to `(row_best_delta[i], row_best_j[i])` using O(N) total output memory!
  * ============================================================================ */
 __global__ void k_spr_rows_top1(
     int32_t r_start,
@@ -571,18 +569,18 @@ __global__ void k_spr_rows_top1(
     float * __restrict__ best_delta_out,
     int32_t * __restrict__ best_j_out
 ) {
+#ifdef __CUDACC__
+    __shared__ float s_best_val[128];
+    __shared__ int32_t s_best_j[128];
+#else
+    static float s_best_val[128];
+    static int32_t s_best_j[128];
+#endif
     int32_t v_index = r_start + blockIdx.x;
     int32_t i = v_index - 1;
     int32_t root_u = n_nodes_u - 1;
     float *g_edge_delta = &edge_delta_pool[(size_t)blockIdx.x * n_nodes_u];
     float *row_tmp = &row_tmp_pool[(size_t)blockIdx.x * (2 * n_leaves)];
-
-    if (SIMT_PHASE_ACTIVE) {
-        for (int32_t u = threadIdx.x; u < root_u; u += blockDim.x) {
-            g_edge_delta[u] = 0.0f;
-        }
-    }
-    __syncthreads();
 
     int32_t tree_root = v_map[v_index];
     int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
@@ -599,6 +597,9 @@ __global__ void k_spr_rows_top1(
     if (SIMT_PHASE_ACTIVE) {
         const float *row_root = &subdist[(size_t)tree_root * n_nodes_u];
         if (threadIdx.x == 0) {
+            g_edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0f;
+            g_edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0f;
+            g_edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0f;
             dev_run_half_tree_dfs(
                 other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size,
                 nd_u, row_root, &subdist[(size_t)other1 * n_nodes_u], g_edge_delta
@@ -615,20 +616,40 @@ __global__ void k_spr_rows_top1(
     dev_map_edge_delta_to_row(i, n_leaves, other_root_child, m_lmin, next_k_same_lmin, g_edge_delta, row_tmp);
     __syncthreads();
 
-    if (SIMT_PHASE_ACTIVE && threadIdx.x == 0) {
+    if (SIMT_PHASE_ACTIVE) {
         int32_t vi = (int32_t)v_curr[i];
         float b_val = 0.0f;
         int32_t b_j = vi;
-        for (int32_t j = 0; j <= 2 * i; ++j) {
+        for (int32_t j = threadIdx.x; j <= 2 * i; j += blockDim.x) {
             if (j == vi) continue;
             float val = row_tmp[j];
-            if (val < b_val) {
+            if (val < b_val || (val == b_val && j < b_j)) {
                 b_val = val;
                 b_j = j;
             }
         }
-        best_delta_out[i] = b_val;
-        best_j_out[i] = b_j;
+        s_best_val[threadIdx.x] = b_val;
+        s_best_j[threadIdx.x]   = b_j;
+    }
+    __syncthreads();
+
+    for (int32_t stride = 64; stride > 0; stride >>= 1) {
+        if (SIMT_PHASE_ACTIVE && threadIdx.x < stride) {
+            float v_other = s_best_val[threadIdx.x + stride];
+            int32_t j_other = s_best_j[threadIdx.x + stride];
+            float v_self = s_best_val[threadIdx.x];
+            int32_t j_self = s_best_j[threadIdx.x];
+            if (v_other < v_self || (v_other == v_self && j_other < j_self)) {
+                s_best_val[threadIdx.x] = v_other;
+                s_best_j[threadIdx.x]   = j_other;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (SIMT_PHASE_ACTIVE && threadIdx.x == 0) {
+        best_delta_out[i] = s_best_val[0];
+        best_j_out[i]     = s_best_j[0];
     }
 }
 
@@ -782,13 +803,6 @@ __global__ void k_spr_rows_tiled(
     float *row_o1     = &auto_row_pool[(size_t)blockIdx.x * 4 * n_nodes_u + 2 * n_nodes_u];
     float *edge_delta = &auto_row_pool[(size_t)blockIdx.x * 4 * n_nodes_u + 3 * n_nodes_u];
 
-    if (SIMT_PHASE_ACTIVE) {
-        for (int32_t u = threadIdx.x; u < root_u; u += blockDim.x) {
-            edge_delta[u] = 0.0f;
-        }
-    }
-    __syncthreads();
-
     int32_t tree_root = v_map[v_index];
     int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
     int32_t other0 = -1, other1 = -1;
@@ -810,6 +824,9 @@ __global__ void k_spr_rows_tiled(
 
     if (SIMT_PHASE_ACTIVE) {
         if (threadIdx.x == 0) {
+            edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0f;
+            edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0f;
+            edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0f;
             dev_run_half_tree_dfs(
                 other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size,
                 nd_u, row_root, row_o1, edge_delta
@@ -872,35 +889,23 @@ static void build_host_tree_topology(const int64_t *v, int32_t n_leaves, HostTre
     T->tin      = (int32_t *)malloc((size_t)n_nodes_u * sizeof(int32_t));
     T->adj_u    = (int32_t *)malloc((size_t)(3 * n_nodes_u) * sizeof(int32_t));
 
-    int32_t *pairs = (int32_t *)malloc((size_t)(2 * n_pairs) * sizeof(int32_t));
-    int32_t *parents_uf = (int32_t *)malloc((size_t)n_nodes_r * sizeof(int32_t));
-    int32_t *min_leaf = (int32_t *)malloc((size_t)n_nodes_r * sizeof(int32_t));
+    int32_t *parents_uf = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
     int32_t *last_seen = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
 
+    /* Branchless O(N) cherry-first component-root tree builder */
+    for (int32_t i = 0; i < n_leaves; ++i) parents_uf[i] = i;
     for (int32_t k = 0; k < n_pairs; ++k) {
         int32_t i = n_pairs - 1 - k;
-        pairs[2 * k]     = (int32_t)v[i];
-        pairs[2 * k + 1] = i + 1;
-    }
-    for (int32_t i = 0; i < n_nodes_r; ++i) {
-        parents_uf[i] = i;
-        min_leaf[i] = i;
-    }
-    for (int32_t i = 0; i < n_pairs; ++i) {
-        int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-        while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-        while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-        int32_t m = n_leaves + i;
-        T->child1_r[m] = p2;
-        T->child2_r[m] = p1;
-        parents_uf[p1] = m;
-        parents_uf[p2] = m;
-        int32_t ml1 = min_leaf[p2], ml2 = min_leaf[p1];
-        if (ml1 < ml2) {
-            min_leaf[m] = ml1; T->v_map[ml2] = p1; T->m_lmin[i] = ml1;
-        } else {
-            min_leaf[m] = ml2; T->v_map[ml1] = p2; T->m_lmin[i] = ml2;
-        }
+        int32_t x = (int32_t)v[i];
+        int32_t y = i + 1;
+        int32_t c1 = parents_uf[y];
+        int32_t c2 = parents_uf[x];
+        int32_t m = n_leaves + k;
+        T->child1_r[m] = c1;
+        T->child2_r[m] = c2;
+        T->v_map[y] = c1;
+        T->m_lmin[k] = x;
+        parents_uf[x] = m;
     }
 
     for (int32_t j = 0; j < n_leaves; ++j) last_seen[j] = n_leaves;
@@ -948,9 +953,7 @@ static void build_host_tree_topology(const int64_t *v, int32_t n_leaves, HostTre
         T->tin[c2] = T->tin[u] + 1 + T->sub_size[c1];
     }
 
-    free(pairs);
     free(parents_uf);
-    free(min_leaf);
     free(last_seen);
 }
 
@@ -1203,13 +1206,29 @@ static int run_and_validate_cuda_pipeline(
     float *edge_pool = (float *)calloc((size_t)n_rows_spr * n_nodes_u, sizeof(float));
     float *row_tmp   = (float *)calloc((size_t)n_rows_spr * (2 * N), sizeof(float));
 
+    uint32_t fuzz_rng = 0xCAFEBABEU ^ (uint32_t)N ^ (uint32_t)(reverse_thread_order * 7919);
+    int perm[128];
+    auto build_thread_perm = [&](int mode) {
+        for (int s = 0; s < 128; ++s) {
+            perm[s] = (mode == 1) ? (127 - s) : s;
+        }
+        if (mode >= 2) {
+            for (int s = 127; s > 0; --s) {
+                fuzz_rng ^= fuzz_rng << 13; fuzz_rng ^= fuzz_rng >> 17; fuzz_rng ^= fuzz_rng << 5;
+                int r = (int)(fuzz_rng % (uint32_t)(s + 1));
+                int tmp = perm[s]; perm[s] = perm[r]; perm[r] = tmp;
+            }
+        }
+    };
+
     blockDim = {128, 1, 1};
     for (int bx = 0; bx < n_rows_spr; ++bx) {
         blockIdx = {bx, 0, 0};
-        for (int phase = 0; phase < 4; ++phase) {
+        for (int phase = 0; phase < 3; ++phase) {
             g_simt_target_phase = phase;
+            build_thread_perm(reverse_thread_order);
             for (int step = 0; step < 128; ++step) {
-                int tx = reverse_thread_order ? (127 - step) : step;
+                int tx = perm[step];
                 threadIdx = {tx, 0, 0};
                 g_simt_curr_phase = 0;
                 k_spr_rows_smem(
@@ -1219,10 +1238,11 @@ static int run_and_validate_cuda_pipeline(
                 );
             }
         }
-        for (int phase = 0; phase < 4; ++phase) {
+        for (int phase = 0; phase < 3; ++phase) {
             g_simt_target_phase = phase;
+            build_thread_perm(reverse_thread_order);
             for (int step = 0; step < 128; ++step) {
-                int tx = reverse_thread_order ? (127 - step) : step;
+                int tx = perm[step];
                 threadIdx = {tx, 0, 0};
                 g_simt_curr_phase = 0;
                 k_spr_rows_gmem(
@@ -1232,9 +1252,11 @@ static int run_and_validate_cuda_pipeline(
                 );
             }
         }
-        for (int phase = 0; phase < 5; ++phase) {
+        for (int phase = 0; phase < 12; ++phase) {
             g_simt_target_phase = phase;
-            for (int tx = 0; tx < 128; ++tx) {
+            build_thread_perm(reverse_thread_order);
+            for (int step = 0; step < 128; ++step) {
+                int tx = perm[step];
                 threadIdx = {tx, 0, 0};
                 g_simt_curr_phase = 0;
                 k_spr_rows_top1(
@@ -1271,10 +1293,11 @@ static int run_and_validate_cuda_pipeline(
     }
     for (int bx = 0; bx < n_rows_spr; ++bx) {
         blockIdx = {bx, 0, 0};
-        for (int phase = 0; phase < 10; ++phase) {
+        for (int phase = 0; phase < 9; ++phase) {
             g_simt_target_phase = phase;
+            build_thread_perm(reverse_thread_order);
             for (int step = 0; step < 128; ++step) {
-                int tx = reverse_thread_order ? (127 - step) : step;
+                int tx = perm[step];
                 threadIdx = {tx, 0, 0};
                 g_simt_curr_phase = 0;
                 k_spr_rows_tiled(
@@ -1350,13 +1373,13 @@ int main(void) {
                prop.multiProcessorCount, prop.sharedMemPerMultiprocessor / 1024);
     }
 #else
-    printf("PHYLO2VEC CUDA KERNEL VERIFICATION SUITE (Host SIMT Forward & Reverse Thread-Order Verifier)\n");
+    printf("PHYLO2VEC CUDA KERNEL VERIFICATION SUITE (Host SIMT Forward, Reverse & Randomized Thread-Order Verifier)\n");
 #endif
     printf("====================================================================================================\n\n");
 
     int all_ok = 1;
 
-    /* 1. Verify both N=6 repeated-minimum-leaf and root-overlap counterexamples under forward AND reverse thread order */
+    /* 1. Verify both N=6 repeated-minimum-leaf and root-overlap counterexamples under forward, reverse, AND randomized thread order */
     {
         const int32_t N = 6;
         int64_t v1[5] = {0, 0, 0, 0, 0};
@@ -1371,7 +1394,8 @@ int main(void) {
         D1[0 * N + 2] = D1[2 * N + 0] = 10.0;
         D2[1 * N + 2] = D2[2 * N + 1] = 10.0;
 
-        for (int rev = 0; rev <= 1; ++rev) {
+        const char *mode_names[3] = {"FORWARD", "REVERSE", "RANDOMIZED FUZZ"};
+        for (int rev = 0; rev <= 2; ++rev) {
             double es1 = 0, eg1 = 0, et1 = 0, es2 = 0, eg2 = 0, et2 = 0;
             int ok1 = run_and_validate_cuda_pipeline(v1, D1, N, NULL, NULL, NULL, &es1, &eg1, &et1, rev);
             int ok2 = run_and_validate_cuda_pipeline(v2, D2, N, NULL, NULL, NULL, &es2, &eg2, &et2, rev);
@@ -1379,11 +1403,47 @@ int main(void) {
                 all_ok = 0;
             }
             printf("[%s] Counterexample Verification (%s thread scheduling):\n",
-                   (ok1 && ok2) ? "PASS" : "FAIL", rev ? "REVERSE" : "FORWARD");
+                   (ok1 && ok2) ? "PASS" : "FAIL", mode_names[rev]);
             printf("       Case 1 (v=[0,0,0,0,0], D[0,2]=10): smem_err=%.3e, gmem_err=%.3e, tiled_err=%.3e\n", es1, eg1, et1);
             printf("       Case 2 (v=[0,1,1,1,1], D[1,2]=10): smem_err=%.3e, gmem_err=%.3e, tiled_err=%.3e\n", es2, eg2, et2);
         }
-        printf("\n");
+
+        /* Randomized SIMT thread-order fuzzing across 10 random trees + extremal caterpillars at N=16 and N=32 */
+        uint32_t f_rng = 0x9E3779B9U;
+        int fuzz_ok = 1;
+        double max_fuzz_err = 0.0;
+        for (int trial = 0; trial < 10; ++trial) {
+            int32_t Nf = (trial < 5) ? 16 : 32;
+            int64_t vf[31];
+            double *Df = (double *)malloc((size_t)Nf * Nf * sizeof(double));
+            vf[0] = 0;
+            for (int32_t i = 1; i < Nf - 1; ++i) {
+                if (trial % 5 == 0) vf[i] = 0;
+                else if (trial % 5 == 1) vf[i] = i;
+                else {
+                    f_rng ^= f_rng << 13; f_rng ^= f_rng >> 17; f_rng ^= f_rng << 5;
+                    vf[i] = (int64_t)(f_rng % (uint32_t)(i + 1));
+                }
+            }
+            for (int32_t i = 0; i < Nf; ++i) {
+                Df[i * Nf + i] = 0.0;
+                for (int32_t j = i + 1; j < Nf; ++j) {
+                    f_rng ^= f_rng << 13; f_rng ^= f_rng >> 17; f_rng ^= f_rng << 5;
+                    double d = 0.05 + 5.0 * ((double)(f_rng & 0xFFFF) / 65536.0);
+                    Df[i * Nf + j] = Df[j * Nf + i] = d;
+                }
+            }
+            double es = 0, eg = 0, et = 0;
+            int ok_t = run_and_validate_cuda_pipeline(vf, Df, Nf, NULL, NULL, NULL, &es, &eg, &et, 2 + trial);
+            if (!ok_t || es > 2e-5 || eg > 2e-5 || et > 2e-5) fuzz_ok = 0;
+            if (es > max_fuzz_err) max_fuzz_err = es;
+            if (eg > max_fuzz_err) max_fuzz_err = eg;
+            if (et > max_fuzz_err) max_fuzz_err = et;
+            free(Df);
+        }
+        if (!fuzz_ok) all_ok = 0;
+        printf("[%s] Randomized SIMT Thread-Order Fuzzing (10 trials, N=16,32, Fisher-Yates per barrier): max_err=%.3e\n\n",
+               fuzz_ok ? "PASS" : "FAIL", max_fuzz_err);
     }
 
     /* 2. Benchmark & Validate across N */

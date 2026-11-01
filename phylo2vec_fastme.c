@@ -3,6 +3,11 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef __cplusplus
+#define restrict __restrict__
+extern "C" {
+#endif
+
 /*
  * Ultra-optimized Matrix-Based O(N^2) Phylo2Vec BME Discrete Gradient & Tree Optimizer in C99 (v3).
  *
@@ -74,8 +79,127 @@ static inline double now_ms(void) {
 }
 
 /* ============================================================================
- * Half-Tree Non-Recursive BFS for O(N^2) Pauplin / FastME SPR Edge Deltas
+ * Half-Tree Non-Recursive BFS & Heavy-First Register-Stack DFS
+ * for O(N^2) Pauplin / FastME SPR Edge Deltas
  * ============================================================================ */
+typedef struct {
+    int32_t u;
+    int32_t C;
+    double pow_neg_len;
+    double d_kc;
+    double curr_dist;
+} HeavyStackFrame;
+
+static inline void run_half_tree_dfs(
+    int32_t start_node,
+    int32_t orig_node,
+    int32_t parent_node,
+    int32_t n_leaves,
+    int32_t n_nodes_u,
+    const int32_t * restrict adj_u,
+    const int32_t * restrict parent_u,
+    const int32_t * restrict sub_size,
+    const double * restrict nd_u,
+    const double * restrict row_root,
+    const double * restrict row_orig,
+    double * restrict edge_delta
+) {
+    if (start_node < n_leaves) return;
+
+    int32_t n0 = adj_u[3 * start_node + 0];
+    int32_t n1 = adj_u[3 * start_node + 1];
+    int32_t n2 = adj_u[3 * start_node + 2];
+
+    int32_t k_in = (n0 == parent_node) ? 0 : ((n1 == parent_node) ? 1 : 2);
+    int32_t k0 = (k_in == 0) ? 1 : 0;
+    int32_t k1 = (k_in == 2) ? 1 : 2;
+
+    int32_t B0 = adj_u[3 * start_node + k0];
+    int32_t B1 = adj_u[3 * start_node + k1];
+    double D_AB = nd_u[3 * start_node + k_in];
+    double d_kc_init = row_root[orig_node];
+
+    HeavyStackFrame stack[32];
+    int32_t sp = 0;
+
+    double new_dist0 = 0.25 * (row_orig[B1] + row_root[B0] - D_AB - d_kc_init);
+    int32_t c_end0 = (parent_u[start_node] == B0) ? start_node : B0;
+    edge_delta[c_end0] = new_dist0;
+
+    double new_dist1 = 0.25 * (row_orig[B0] + row_root[B1] - D_AB - d_kc_init);
+    int32_t c_end1 = (parent_u[start_node] == B1) ? start_node : B1;
+    edge_delta[c_end1] = new_dist1;
+
+    int32_t push0 = (B0 >= n_leaves);
+    int32_t push1 = (B1 >= n_leaves);
+    if (push0 && push1) {
+        int32_t s0 = (parent_u[B0] == start_node) ? sub_size[B0] : (n_nodes_u - sub_size[start_node]);
+        int32_t s1 = (parent_u[B1] == start_node) ? sub_size[B1] : (n_nodes_u - sub_size[start_node]);
+        if (s0 >= s1) {
+            stack[sp++] = (HeavyStackFrame){B0, start_node, 0.25, 0.5 * (d_kc_init + row_root[B1]), new_dist0};
+            stack[sp++] = (HeavyStackFrame){B1, start_node, 0.25, 0.5 * (d_kc_init + row_root[B0]), new_dist1};
+        } else {
+            stack[sp++] = (HeavyStackFrame){B1, start_node, 0.25, 0.5 * (d_kc_init + row_root[B0]), new_dist1};
+            stack[sp++] = (HeavyStackFrame){B0, start_node, 0.25, 0.5 * (d_kc_init + row_root[B1]), new_dist0};
+        }
+    } else if (push0) {
+        stack[sp++] = (HeavyStackFrame){B0, start_node, 0.25, 0.5 * (d_kc_init + row_root[B1]), new_dist0};
+    } else if (push1) {
+        stack[sp++] = (HeavyStackFrame){B1, start_node, 0.25, 0.5 * (d_kc_init + row_root[B0]), new_dist1};
+    }
+
+    while (sp > 0) {
+        HeavyStackFrame f = stack[--sp];
+        int32_t u = f.u;
+        int32_t C = f.C;
+        double pow_neg_len = f.pow_neg_len;
+        double d_kc = f.d_kc;
+        double curr_dist = f.curr_dist;
+
+        const int32_t *adj = &adj_u[3 * u];
+        const double *nd = &nd_u[3 * u];
+
+        int32_t ki = (adj[0] == C) ? 0 : ((adj[1] == C) ? 1 : 2);
+        int32_t idx0 = (ki == 0) ? 1 : 0;
+        int32_t idx1 = (ki == 2) ? 1 : 2;
+
+        int32_t b0 = adj[idx0];
+        int32_t b1 = adj[idx1];
+        double d_ab = nd[ki];
+
+        double r_b0 = row_root[b0];
+        double r_b1 = row_root[b1];
+
+        double d_ac0 = nd[idx0] + (row_orig[b1] - r_b1) * pow_neg_len;
+        double ndist0 = curr_dist + 0.25 * (d_ac0 + r_b0 - d_ab - d_kc);
+        int32_t ce0 = (parent_u[u] == b0) ? u : b0;
+        edge_delta[ce0] = ndist0;
+
+        double d_ac1 = nd[idx1] + (row_orig[b0] - r_b0) * pow_neg_len;
+        double ndist1 = curr_dist + 0.25 * (d_ac1 + r_b1 - d_ab - d_kc);
+        int32_t ce1 = (parent_u[u] == b1) ? u : b1;
+        edge_delta[ce1] = ndist1;
+
+        int32_t p0 = (b0 >= n_leaves);
+        int32_t p1 = (b1 >= n_leaves);
+        if (p0 && p1) {
+            int32_t s0 = (parent_u[b0] == u) ? sub_size[b0] : (n_nodes_u - sub_size[u]);
+            int32_t s1 = (parent_u[b1] == u) ? sub_size[b1] : (n_nodes_u - sub_size[u]);
+            if (s0 >= s1) {
+                stack[sp++] = (HeavyStackFrame){b0, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b1), ndist0};
+                stack[sp++] = (HeavyStackFrame){b1, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b0), ndist1};
+            } else {
+                stack[sp++] = (HeavyStackFrame){b1, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b0), ndist1};
+                stack[sp++] = (HeavyStackFrame){b0, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b1), ndist0};
+            }
+        } else if (p0) {
+            stack[sp++] = (HeavyStackFrame){b0, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b1), ndist0};
+        } else if (p1) {
+            stack[sp++] = (HeavyStackFrame){b1, u, pow_neg_len * 0.5, 0.5 * (d_kc + r_b0), ndist1};
+        }
+    }
+}
+
 static inline void run_half_tree_bfs(
     int32_t start_node,
     int32_t orig_node,
@@ -196,6 +320,34 @@ static inline void run_half_tree_bfs(
     }
 }
 
+static inline void decode_v_to_pairs_fast(
+    const int64_t * restrict v,
+    int32_t n_pairs,
+    int32_t * restrict pairs
+) {
+    int32_t head = n_pairs - 1;
+    pairs[2 * head] = 0;
+    pairs[2 * head + 1] = 1;
+    int32_t curr_len = 1;
+    for (int32_t i = 1; i < n_pairs; ++i) {
+        int32_t next_leaf = i + 1;
+        int32_t vi = (int32_t)v[i];
+        if (vi <= i) {
+            --head;
+            pairs[2 * head] = vi;
+            pairs[2 * head + 1] = next_leaf;
+        } else {
+            int32_t idx = vi - curr_len;
+            int32_t c0 = pairs[2 * (head + idx - 1)];
+            memmove(&pairs[2 * (head - 1)], &pairs[2 * head], (size_t)(2 * idx) * sizeof(int32_t));
+            --head;
+            pairs[2 * (head + idx)] = c0;
+            pairs[2 * (head + idx) + 1] = next_leaf;
+        }
+        curr_len++;
+    }
+}
+
 /* ============================================================================
  * 1. Lower-Triangular (j < i) Discrete Gradient (backward-compatible)
  * ============================================================================ */
@@ -225,67 +377,71 @@ void calculate_discrete_gradient_c(
     int32_t *tin = ptr; ptr += n_nodes_u;
     int32_t *dfs_order = ptr; ptr += n_nodes_u;
     int32_t *adj_u = ptr; ptr += (size_t)n_nodes_u * 3;
-    int32_t *q_node = ptr; ptr += n_nodes_u;
-    int32_t *q_prev = ptr; ptr += n_nodes_u;
 
     double *dptr = g_dwork;
     double *subdist = dptr; dptr += (size_t)n_nodes_u * n_nodes_u;
     double *nd_u = dptr; dptr += (size_t)n_nodes_u * 3;
     double *edge_delta = dptr; dptr += n_nodes_u;
-    double *q_pow = dptr; dptr += n_nodes_u;
-    double *q_dkc = dptr; dptr += n_nodes_u;
-    double *q_dist = dptr; dptr += n_nodes_u;
 
-    pairs[0] = 0; pairs[1] = 1;
-    int32_t curr_len = 1;
+    int32_t is_cf = 1;
     for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t next_leaf = i + 1;
-        int32_t vi = (int32_t)v[i];
-        if (vi <= i) {
-            memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-            pairs[0] = vi; pairs[1] = next_leaf;
-        } else {
-            int32_t idx = vi - curr_len;
-            int32_t c0 = pairs[2 * (idx - 1)];
-            memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-            pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
+        if (v[i] > i) { is_cf = 0; break; }
+    }
+    if (is_cf) {
+        for (int32_t x = 0; x < n_leaves; ++x) {
+            parents_uf[x] = x;
+            min_leaf[x] = x;
         }
-        curr_len++;
-    }
-
-    for (int32_t i = 0; i < n_nodes_r; ++i) {
-        parents_uf[i] = i;
-        min_leaf[i] = i;
-    }
-    int32_t next_parent = n_leaves;
-    for (int32_t i = 0; i < n_pairs; ++i) {
-        int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-        while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-        while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-        child1_r[next_parent] = p2;
-        child2_r[next_parent] = p1;
-        parents_uf[p1] = next_parent;
-        parents_uf[p2] = next_parent;
-        next_parent++;
-    }
-
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t *row_d = &destinations[i * n_leaves];
-        for (int32_t j = 0; j < i; ++j) row_d[j] = j;
-    }
-    for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
-        int32_t c1 = child1_r[m], c2 = child2_r[m];
-        int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
-        int32_t l_min, l_max;
-        if (ml1 < ml2) {
-            l_min = ml1; l_max = ml2; v_map[l_max] = c2;
-        } else {
-            l_min = ml2; l_max = ml1; v_map[l_max] = c1;
+        for (int32_t k = 0; k < n_pairs; ++k) {
+            int32_t i = n_pairs - 1 - k;
+            int32_t m = n_leaves + k;
+            int32_t x = (int32_t)v[i];
+            int32_t y = i + 1;
+            int32_t c1 = parents_uf[y];
+            int32_t c2 = parents_uf[x];
+            child1_r[m] = c1;
+            child2_r[m] = c2;
+            min_leaf[m] = x;
+            v_map[y] = c1;
+            parents_uf[x] = m;
         }
-        min_leaf[m] = l_min;
-        if (m < n_nodes_r - 1) {
-            for (int32_t n_idx = l_min + 1; n_idx < l_max; ++n_idx) {
-                destinations[n_idx * n_leaves + l_min] = m;
+    } else {
+        decode_v_to_pairs_fast(v, n_pairs, pairs);
+
+        for (int32_t i = 0; i < n_nodes_r; ++i) {
+            parents_uf[i] = i;
+            min_leaf[i] = i;
+        }
+        int32_t next_parent = n_leaves;
+        for (int32_t i = 0; i < n_pairs; ++i) {
+            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
+            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
+            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
+            child1_r[next_parent] = p2;
+            child2_r[next_parent] = p1;
+            parents_uf[p1] = next_parent;
+            parents_uf[p2] = next_parent;
+            next_parent++;
+        }
+
+        for (int32_t i = 1; i < n_pairs; ++i) {
+            int32_t *row_d = &destinations[i * n_leaves];
+            for (int32_t j = 0; j < i; ++j) row_d[j] = j;
+        }
+        for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
+            int32_t c1 = child1_r[m], c2 = child2_r[m];
+            int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
+            int32_t l_min, l_max;
+            if (ml1 < ml2) {
+                l_min = ml1; l_max = ml2; v_map[l_max] = c2;
+            } else {
+                l_min = ml2; l_max = ml1; v_map[l_max] = c1;
+            }
+            min_leaf[m] = l_min;
+            if (m < n_nodes_r - 1) {
+                for (int32_t n_idx = l_min + 1; n_idx < l_max; ++n_idx) {
+                    destinations[n_idx * n_leaves + l_min] = m;
+                }
             }
         }
     }
@@ -408,39 +564,78 @@ void calculate_discrete_gradient_c(
     const int32_t max_cols = n_pairs - 1;
     memset(delta_out, 0, (size_t)(n_pairs * max_cols) * sizeof(double));
 
-    for (int32_t v_index = 2; v_index < n_leaves; ++v_index) {
-        int32_t tree_root = v_map[v_index];
-        int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
-        const double * restrict row_root = &subdist[tree_root * n_nodes_u];
+    if (is_cf) {
+        int32_t * restrict dest_row = destinations;
+        for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
+        for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
+            int32_t tree_root = v_map[v_index];
+            int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
+            const double * restrict row_root = &subdist[tree_root * n_nodes_u];
 
-        int32_t other0 = -1, other1 = -1;
-        for (int32_t k = 0; k < 3; ++k) {
-            int32_t nb_node = adj_u[3 * parent + k];
-            if (nb_node != -1 && nb_node != tree_root) {
-                if (other0 == -1) other0 = nb_node;
-                else other1 = nb_node;
+            int32_t other0 = -1, other1 = -1;
+            for (int32_t k = 0; k < 3; ++k) {
+                int32_t nb_node = adj_u[3 * parent + k];
+                if (nb_node != -1 && nb_node != tree_root) {
+                    if (other0 == -1) other0 = nb_node;
+                    else other1 = nb_node;
+                }
             }
+            if (other0 != -1) {
+                edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+                edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+                edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
+
+                run_half_tree_dfs(
+                    other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, &subdist[other1 * n_nodes_u], edge_delta
+                );
+                run_half_tree_dfs(
+                    other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, &subdist[other0 * n_nodes_u], edge_delta
+                );
+
+                int32_t row_idx = v_index - 1;
+                double * restrict out_row = &delta_out[(size_t)row_idx * max_cols];
+                for (int32_t j = 0; j < row_idx; ++j) {
+                    out_row[j] = edge_delta[dest_row[j]];
+                }
+            }
+            int32_t m_active = n_leaves + (n_leaves - 1 - v_index);
+            dest_row[min_leaf[m_active]] = m_active;
         }
-        if (other0 == -1) continue;
+    } else {
+        for (int32_t v_index = 2; v_index < n_leaves; ++v_index) {
+            int32_t tree_root = v_map[v_index];
+            int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
+            const double * restrict row_root = &subdist[tree_root * n_nodes_u];
 
-        for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+            int32_t other0 = -1, other1 = -1;
+            for (int32_t k = 0; k < 3; ++k) {
+                int32_t nb_node = adj_u[3 * parent + k];
+                if (nb_node != -1 && nb_node != tree_root) {
+                    if (other0 == -1) other0 = nb_node;
+                    else other1 = nb_node;
+                }
+            }
+            if (other0 == -1) continue;
 
-        run_half_tree_bfs(
-            other0, other1, parent, n_leaves, adj_u, parent_u, nd_u,
-            row_root, &subdist[other1 * n_nodes_u], edge_delta,
-            q_node, q_prev, q_pow, q_dkc, q_dist
-        );
-        run_half_tree_bfs(
-            other1, other0, parent, n_leaves, adj_u, parent_u, nd_u,
-            row_root, &subdist[other0 * n_nodes_u], edge_delta,
-            q_node, q_prev, q_pow, q_dkc, q_dist
-        );
+            for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
 
-        int32_t row_idx = v_index - 1;
-        double * restrict out_row = &delta_out[row_idx * max_cols];
-        const int32_t * restrict dest_row = &destinations[row_idx * n_leaves];
-        for (int32_t j = 0; j < row_idx; ++j) {
-            out_row[j] = edge_delta[dest_row[j]];
+            run_half_tree_dfs(
+                other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[other1 * n_nodes_u], edge_delta
+            );
+            run_half_tree_dfs(
+                other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[other0 * n_nodes_u], edge_delta
+            );
+
+            int32_t row_idx = v_index - 1;
+            double * restrict out_row = &delta_out[(size_t)row_idx * max_cols];
+            const int32_t * restrict dest_row = &destinations[row_idx * n_leaves];
+            for (int32_t j = 0; j < row_idx; ++j) {
+                out_row[j] = edge_delta[dest_row[j]];
+            }
         }
     }
 }
@@ -469,75 +664,62 @@ void calculate_discrete_gradient_full_c(
     int32_t *parents_uf = ptr; ptr += n_nodes_r;
     int32_t *min_leaf = ptr; ptr += n_nodes_r;
     int32_t *v_map = ptr; ptr += n_leaves;
-    int32_t *destinations = ptr; ptr += (size_t)n_pairs * n_leaves;
+    int32_t *dest_row = ptr; ptr += n_leaves;
     int32_t *parent_u = ptr; ptr += n_nodes_u;
     int32_t *sub_size = ptr; ptr += n_nodes_u;
     int32_t *tin = ptr; ptr += n_nodes_u;
     int32_t *dfs_order = ptr; ptr += n_nodes_u;
     int32_t *adj_u = ptr; ptr += (size_t)n_nodes_u * 3;
-    int32_t *q_node = ptr; ptr += n_nodes_u;
-    int32_t *q_prev = ptr; ptr += n_nodes_u;
 
     double *dptr = g_dwork;
     double *subdist = dptr; dptr += (size_t)n_nodes_u * n_nodes_u;
     double *nd_u = dptr; dptr += (size_t)n_nodes_u * 3;
     double *edge_delta = dptr; dptr += n_nodes_u;
-    double *q_pow = dptr; dptr += n_nodes_u;
-    double *q_dkc = dptr; dptr += n_nodes_u;
-    double *q_dist = dptr; dptr += n_nodes_u;
 
-    pairs[0] = 0; pairs[1] = 1;
-    int32_t curr_len = 1;
+    int32_t is_cf = 1;
     for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t next_leaf = i + 1;
-        int32_t vi = (int32_t)v[i];
-        if (vi <= i) {
-            memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-            pairs[0] = vi; pairs[1] = next_leaf;
-        } else {
-            int32_t idx = vi - curr_len;
-            int32_t c0 = pairs[2 * (idx - 1)];
-            memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-            pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
+        if (v[i] > i) { is_cf = 0; break; }
+    }
+    if (is_cf) {
+        for (int32_t x = 0; x < n_leaves; ++x) {
+            parents_uf[x] = x;
+            min_leaf[x] = x;
         }
-        curr_len++;
-    }
-
-    for (int32_t i = 0; i < n_nodes_r; ++i) {
-        parents_uf[i] = i;
-        min_leaf[i] = i;
-    }
-    int32_t next_parent = n_leaves;
-    for (int32_t i = 0; i < n_pairs; ++i) {
-        int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-        while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-        while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-        child1_r[next_parent] = p2;
-        child2_r[next_parent] = p1;
-        parents_uf[p1] = next_parent;
-        parents_uf[p2] = next_parent;
-        next_parent++;
-    }
-
-    // Include j == i and n_idx == l_min for full 0 <= j <= i coverage!
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t *row_d = &destinations[i * n_leaves];
-        for (int32_t j = 0; j <= i; ++j) row_d[j] = j;
-    }
-    for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
-        int32_t c1 = child1_r[m], c2 = child2_r[m];
-        int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
-        int32_t l_min, l_max;
-        if (ml1 < ml2) {
-            l_min = ml1; l_max = ml2; v_map[l_max] = c2;
-        } else {
-            l_min = ml2; l_max = ml1; v_map[l_max] = c1;
+        for (int32_t k = 0; k < n_pairs; ++k) {
+            int32_t i = n_pairs - 1 - k;
+            int32_t m = n_leaves + k;
+            int32_t x = (int32_t)v[i];
+            int32_t y = i + 1;
+            int32_t c1 = parents_uf[y];
+            int32_t c2 = parents_uf[x];
+            child1_r[m] = c1;
+            child2_r[m] = c2;
+            min_leaf[m] = x;
+            v_map[y] = c1;
+            parents_uf[x] = m;
         }
-        min_leaf[m] = l_min;
-        if (m < n_nodes_r - 1) {
-            for (int32_t n_idx = l_min; n_idx < l_max - 1; ++n_idx) {
-                destinations[n_idx * n_leaves + l_min] = m;
+    } else {
+        decode_v_to_pairs_fast(v, n_pairs, pairs);
+        for (int32_t i = 0; i < n_nodes_r; ++i) {
+            parents_uf[i] = i;
+            min_leaf[i] = i;
+        }
+        int32_t next_parent = n_leaves;
+        for (int32_t i = 0; i < n_pairs; ++i) {
+            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
+            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
+            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
+            child1_r[next_parent] = p2;
+            child2_r[next_parent] = p1;
+            int32_t ml1 = min_leaf[p2], ml2 = min_leaf[p1];
+            if (ml1 < ml2) {
+                min_leaf[next_parent] = ml1; v_map[ml2] = p1;
+            } else {
+                min_leaf[next_parent] = ml2; v_map[ml1] = p2;
             }
+            parents_uf[p1] = next_parent;
+            parents_uf[p2] = next_parent;
+            next_parent++;
         }
     }
 
@@ -657,8 +839,9 @@ void calculate_discrete_gradient_full_c(
     }
 
     memset(delta_full_out, 0, (size_t)(n_pairs * max_cols) * sizeof(double));
+    for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
 
-    for (int32_t v_index = 2; v_index < n_leaves; ++v_index) {
+    for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
         int32_t tree_root = v_map[v_index];
         int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
         const double * restrict row_root = &subdist[tree_root * n_nodes_u];
@@ -671,39 +854,41 @@ void calculate_discrete_gradient_full_c(
                 else other1 = nb_node;
             }
         }
-        if (other0 == -1) continue;
+        if (other0 != -1) {
+            edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+            edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+            edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
 
-        for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+            run_half_tree_dfs(
+                other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[other1 * n_nodes_u], edge_delta
+            );
+            run_half_tree_dfs(
+                other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[other0 * n_nodes_u], edge_delta
+            );
 
-        run_half_tree_bfs(
-            other0, other1, parent, n_leaves, adj_u, parent_u, nd_u,
-            row_root, &subdist[other1 * n_nodes_u], edge_delta,
-            q_node, q_prev, q_pow, q_dkc, q_dist
-        );
-        run_half_tree_bfs(
-            other1, other0, parent, n_leaves, adj_u, parent_u, nd_u,
-            row_root, &subdist[other0 * n_nodes_u], edge_delta,
-            q_node, q_prev, q_pow, q_dkc, q_dist
-        );
+            int32_t i = v_index - 1;
+            double * restrict out_row = &delta_full_out[(size_t)i * max_cols];
 
-        int32_t i = v_index - 1;
-        double * restrict out_row = &delta_full_out[i * max_cols];
-        const int32_t * restrict dest_row = &destinations[i * n_leaves];
-
-        // 1. Leaf-clade attachments: 0 <= j <= i
-        for (int32_t j = 0; j <= i; ++j) {
-            out_row[j] = edge_delta[dest_row[j]];
+            // 1. Leaf-clade attachments: 0 <= j <= i
+            for (int32_t j = 0; j <= i; ++j) {
+                out_row[j] = edge_delta[dest_row[j]];
+            }
+            // 2. Internal-branch attachments: i < j <= 2i - 2
+            for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
+                int32_t dest_u = (2 * n_leaves - 2) - 2 * i + j;
+                out_row[j] = edge_delta[dest_u];
+            }
+            // 3. Root-branch attachments: j in {2i - 1, 2i} (for i = 1, 2i - 1 == 1 is leaf 1)
+            if (2 * i - 1 > i) {
+                out_row[2 * i - 1] = edge_delta[other_root_child];
+            }
+            out_row[2 * i] = edge_delta[other_root_child];
         }
-        // 2. Internal-branch attachments: i < j <= 2i - 2
-        for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
-            int32_t dest_u = (2 * n_leaves - 2) - 2 * i + j;
-            out_row[j] = edge_delta[dest_u];
-        }
-        // 3. Root-branch attachments: j in {2i - 1, 2i} (for i = 1, 2i - 1 == 1 is leaf 1)
-        if (2 * i - 1 > i) {
-            out_row[2 * i - 1] = edge_delta[other_root_child];
-        }
-        out_row[2 * i] = edge_delta[other_root_child];
+
+        int32_t m_active = n_leaves + (n_leaves - 1 - v_index);
+        dest_row[min_leaf[m_active]] = m_active;
     }
 }
 
@@ -772,22 +957,7 @@ void relabel_cherry_first_c(
     int32_t *min_leaf = parents_uf + n_nodes_r;
     int32_t *scratch = min_leaf + n_nodes_r;
 
-    pairs[0] = 0; pairs[1] = 1;
-    int32_t curr_len = 1;
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t next_leaf = i + 1;
-        int32_t vi = (int32_t)v_in[i];
-        if (vi <= i) {
-            memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-            pairs[0] = vi; pairs[1] = next_leaf;
-        } else {
-            int32_t idx = vi - curr_len;
-            int32_t c0 = pairs[2 * (idx - 1)];
-            memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-            pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
-        }
-        curr_len++;
-    }
+    decode_v_to_pairs_fast(v_in, n_pairs, pairs);
 
     for (int32_t i = 0; i < n_nodes_r; ++i) {
         parents_uf[i] = i;
@@ -864,7 +1034,8 @@ void encode_rooted_to_v_c(
     }
 
     v_out[0] = 0;
-    pair_lmax_order[0] = 1;
+    int32_t head = n_pairs - 1;
+    pair_lmax_order[head] = 1;
     int32_t len_p = 1;
     for (int32_t i = 1; i < n_pairs; ++i) {
         int32_t next_leaf = i + 1;
@@ -875,20 +1046,20 @@ void encode_rooted_to_v_c(
         }
         if (w < n_leaves) {
             v_out[i] = w;
-            memmove(&pair_lmax_order[1], &pair_lmax_order[0], (size_t)len_p * sizeof(int32_t));
-            pair_lmax_order[0] = next_leaf;
+            pair_lmax_order[--head] = next_leaf;
         } else {
             int32_t target_lmax = l_max_node[w];
             int32_t idx = 1;
             for (int32_t k = 0; k < len_p; ++k) {
-                if (pair_lmax_order[k] == target_lmax) {
+                if (pair_lmax_order[head + k] == target_lmax) {
                     idx = k + 1;
                     break;
                 }
             }
             v_out[i] = i + idx;
-            memmove(&pair_lmax_order[idx + 1], &pair_lmax_order[idx], (size_t)(len_p - idx) * sizeof(int32_t));
-            pair_lmax_order[idx] = next_leaf;
+            memmove(&pair_lmax_order[head - 1], &pair_lmax_order[head], (size_t)idx * sizeof(int32_t));
+            --head;
+            pair_lmax_order[head + idx] = next_leaf;
         }
         len_p++;
     }
@@ -962,41 +1133,30 @@ static double evaluate_bme_length_fast(
         if (v[i] > i) { has_gt_i = 1; break; }
     }
     if (!has_gt_i) {
+        for (int32_t x = 0; x < n_leaves; ++x) parents_uf[x] = x;
         for (int32_t k = 0; k < n_pairs; ++k) {
             int32_t i = n_pairs - 1 - k;
-            pairs[2 * k] = (int32_t)v[i];
-            pairs[2 * k + 1] = i + 1;
+            int32_t m = n_leaves + k;
+            int32_t x = (int32_t)v[i];
+            int32_t y = i + 1;
+            child1_r[m] = parents_uf[y];
+            child2_r[m] = parents_uf[x];
+            parents_uf[x] = m;
         }
     } else {
-        pairs[0] = 0; pairs[1] = 1;
-        int32_t curr_len = 1;
-        for (int32_t i = 1; i < n_pairs; ++i) {
-            int32_t next_leaf = i + 1;
-            int32_t vi = (int32_t)v[i];
-            if (vi <= i) {
-                memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-                pairs[0] = vi; pairs[1] = next_leaf;
-            } else {
-                int32_t idx = vi - curr_len;
-                int32_t c0 = pairs[2 * (idx - 1)];
-                memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-                pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
-            }
-            curr_len++;
+        decode_v_to_pairs_fast(v, n_pairs, pairs);
+        for (int32_t i = 0; i < n_nodes_r; ++i) parents_uf[i] = i;
+        int32_t next_parent = n_leaves;
+        for (int32_t i = 0; i < n_pairs; ++i) {
+            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
+            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
+            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
+            child1_r[next_parent] = p2;
+            child2_r[next_parent] = p1;
+            parents_uf[p1] = next_parent;
+            parents_uf[p2] = next_parent;
+            next_parent++;
         }
-    }
-
-    for (int32_t i = 0; i < n_nodes_r; ++i) parents_uf[i] = i;
-    int32_t next_parent = n_leaves;
-    for (int32_t i = 0; i < n_pairs; ++i) {
-        int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-        while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-        while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-        child1_r[next_parent] = p2;
-        child2_r[next_parent] = p1;
-        parents_uf[p1] = next_parent;
-        parents_uf[p2] = next_parent;
-        next_parent++;
     }
 
     int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
@@ -1008,88 +1168,71 @@ static double evaluate_bme_length_fast(
     double *up = dwork;
     double *ldist = up + n_nodes_r;
 
+    int32_t *leaf_tin = parents_uf + n_nodes_r;
+    int32_t *leaf_count = leaf_tin + n_nodes_u;
+    int32_t *leaf_order = leaf_count + n_nodes_u;
+    for (int32_t u = 0; u < n_leaves; ++u) leaf_count[u] = 1;
+
     for (int32_t u = n_leaves; u < root_u; ++u) {
         int32_t c1 = child1_r[u], c2 = child2_r[u];
-        const double * restrict r1 = (c1 < n_leaves) ? &D[c1 * n_leaves] : &ldist[(c1 - n_leaves) * n_leaves];
-        const double * restrict r2 = (c2 < n_leaves) ? &D[c2 * n_leaves] : &ldist[(c2 - n_leaves) * n_leaves];
-        double * restrict ru = &ldist[(u - n_leaves) * n_leaves];
+        leaf_count[u] = leaf_count[c1] + leaf_count[c2];
+        const double * restrict r1 = (c1 < n_leaves) ? &D[(size_t)c1 * n_leaves] : &ldist[(size_t)(c1 - n_leaves) * n_leaves];
+        const double * restrict r2 = (c2 < n_leaves) ? &D[(size_t)c2 * n_leaves] : &ldist[(size_t)(c2 - n_leaves) * n_leaves];
+        double * restrict ru = &ldist[(size_t)(u - n_leaves) * n_leaves];
         for (int32_t x = 0; x < n_leaves; ++x) {
             ru[x] = 0.5 * (r1[x] + r2[x]);
         }
     }
 
-    const double * restrict rc0_row = (root_u_c0 < n_leaves) ? &D[root_u_c0 * n_leaves] : &ldist[(root_u_c0 - n_leaves) * n_leaves];
-    const double * restrict rc1_row = (root_u_c1 < n_leaves) ? &D[root_u_c1 * n_leaves] : &ldist[(root_u_c1 - n_leaves) * n_leaves];
-    const double * restrict rc2_row = (root_u_c2 < n_leaves) ? &D[root_u_c2 * n_leaves] : &ldist[(root_u_c2 - n_leaves) * n_leaves];
-
-    up[root_u_c0] = 0.5 * (
-        ((root_u_c0 < n_leaves) ? rc1_row[root_u_c0] : ((root_u_c1 < n_leaves) ? rc0_row[root_u_c1] : 0.5 * (((child1_r[root_u_c0] < n_leaves) ? &D[child1_r[root_u_c0] * n_leaves] : &ldist[(child1_r[root_u_c0] - n_leaves) * n_leaves])[0] + 0.0)))
-    );
-    // Use exact pairwise recursive 3-way root formula from child1_r/child2_r:
-    int32_t *tin = parents_uf + n_nodes_r;
-    int32_t *sub_size = tin + n_nodes_u;
-    int32_t *dfs_order = sub_size + n_nodes_u;
-    for (int32_t u = 0; u < n_leaves; ++u) sub_size[u] = 1;
-    for (int32_t u = n_leaves; u < root_u; ++u) {
-        sub_size[u] = 1 + sub_size[child1_r[u]] + sub_size[child2_r[u]];
-    }
-    tin[root_u] = 0;
-    tin[root_u_c0] = 1;
-    tin[root_u_c1] = 1 + sub_size[root_u_c0];
-    tin[root_u_c2] = 1 + sub_size[root_u_c0] + sub_size[root_u_c1];
+    leaf_tin[root_u_c0] = 0;
+    leaf_tin[root_u_c1] = leaf_count[root_u_c0];
+    leaf_tin[root_u_c2] = leaf_count[root_u_c0] + leaf_count[root_u_c1];
     for (int32_t u = root_u - 1; u >= n_leaves; --u) {
         int32_t c1 = child1_r[u], c2 = child2_r[u];
-        tin[c1] = tin[u] + 1;
-        tin[c2] = tin[u] + 1 + sub_size[c1];
+        leaf_tin[c1] = leaf_tin[u];
+        leaf_tin[c2] = leaf_tin[u] + leaf_count[c1];
     }
-    for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
+    for (int32_t x = 0; x < n_leaves; ++x) leaf_order[leaf_tin[x]] = x;
 
-    double * restrict rr = &ldist[(root_u - n_leaves) * n_leaves];
-    int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
-    for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
-        int32_t x = dfs_order[idx];
-        if (x < n_leaves) rr[x] = 0.5 * (rc1_row[x] + rc2_row[x]);
+    const double * restrict rc0_row = (root_u_c0 < n_leaves) ? &D[(size_t)root_u_c0 * n_leaves] : &ldist[(size_t)(root_u_c0 - n_leaves) * n_leaves];
+    const double * restrict rc1_row = (root_u_c1 < n_leaves) ? &D[(size_t)root_u_c1 * n_leaves] : &ldist[(size_t)(root_u_c1 - n_leaves) * n_leaves];
+    const double * restrict rc2_row = (root_u_c2 < n_leaves) ? &D[(size_t)root_u_c2 * n_leaves] : &ldist[(size_t)(root_u_c2 - n_leaves) * n_leaves];
+
+    int32_t end0 = leaf_tin[root_u_c1];
+    for (int32_t idx = 0; idx < end0; ++idx) {
+        int32_t x = leaf_order[idx];
+        up[x] = 0.5 * (rc1_row[x] + rc2_row[x]);
     }
-    int32_t end1 = tin[root_u_c1] + sub_size[root_u_c1];
-    for (int32_t idx = tin[root_u_c1]; idx < end1; ++idx) {
-        int32_t x = dfs_order[idx];
-        if (x < n_leaves) rr[x] = 0.5 * (rc0_row[x] + rc2_row[x]);
+    int32_t end1 = leaf_tin[root_u_c2];
+    for (int32_t idx = end0; idx < end1; ++idx) {
+        int32_t x = leaf_order[idx];
+        up[x] = 0.5 * (rc0_row[x] + rc2_row[x]);
     }
-    int32_t end2 = tin[root_u_c2] + sub_size[root_u_c2];
-    for (int32_t idx = tin[root_u_c2]; idx < end2; ++idx) {
-        int32_t x = dfs_order[idx];
-        if (x < n_leaves) rr[x] = 0.5 * (rc0_row[x] + rc1_row[x]);
+    for (int32_t idx = end1; idx < n_leaves; ++idx) {
+        int32_t x = leaf_order[idx];
+        up[x] = 0.5 * (rc0_row[x] + rc1_row[x]);
     }
 
     for (int32_t p = root_u - 1; p >= n_leaves; --p) {
         int32_t c1 = child1_r[p], c2 = child2_r[p];
-        int32_t g = (p == root_u_c0 || p == root_u_c1 || p == root_u_c2) ? root_u : parents_uf[p];
-        const double * restrict r_c1 = (c1 < n_leaves) ? &D[c1 * n_leaves] : &ldist[(c1 - n_leaves) * n_leaves];
-        const double * restrict r_c2 = (c2 < n_leaves) ? &D[c2 * n_leaves] : &ldist[(c2 - n_leaves) * n_leaves];
-        const double * restrict r_g  = &ldist[(g - n_leaves) * n_leaves];
-        double * restrict r_p = &ldist[(p - n_leaves) * n_leaves];
+        const double * restrict r_c1 = (c1 < n_leaves) ? &D[(size_t)c1 * n_leaves] : &ldist[(size_t)(c1 - n_leaves) * n_leaves];
+        const double * restrict r_c2 = (c2 < n_leaves) ? &D[(size_t)c2 * n_leaves] : &ldist[(size_t)(c2 - n_leaves) * n_leaves];
 
-        int32_t e1 = tin[c1] + sub_size[c1];
-        for (int32_t idx = tin[c1]; idx < e1; ++idx) {
-            int32_t x = dfs_order[idx];
-            if (x < n_leaves) r_p[x] = 0.5 * (r_c2[x] + r_g[x]);
+        int32_t s1 = leaf_tin[c1];
+        int32_t s2 = leaf_tin[c2];
+        int32_t e2 = s2 + leaf_count[c2];
+        for (int32_t idx = s1; idx < s2; ++idx) {
+            int32_t x = leaf_order[idx];
+            up[x] = 0.5 * (r_c2[x] + up[x]);
         }
-        int32_t e2 = tin[c2] + sub_size[c2];
-        for (int32_t idx = tin[c2]; idx < e2; ++idx) {
-            int32_t x = dfs_order[idx];
-            if (x < n_leaves) r_p[x] = 0.5 * (r_c1[x] + r_g[x]);
+        for (int32_t idx = s2; idx < e2; ++idx) {
+            int32_t x = leaf_order[idx];
+            up[x] = 0.5 * (r_c1[x] + up[x]);
         }
     }
 
     double total_L = 0.0;
-    for (int32_t u = n_leaves; u < root_u; ++u) {
-        int32_t c1 = child1_r[u], c2 = child2_r[u];
-        if (c1 < n_leaves) total_L += ldist[(u - n_leaves) * n_leaves + c1];
-        if (c2 < n_leaves) total_L += ldist[(u - n_leaves) * n_leaves + c2];
-    }
-    if (root_u_c0 < n_leaves) total_L += rr[root_u_c0];
-    if (root_u_c1 < n_leaves) total_L += rr[root_u_c1];
-    if (root_u_c2 < n_leaves) total_L += rr[root_u_c2];
+    for (int32_t x = 0; x < n_leaves; ++x) total_L += up[x];
     return 0.5 * total_L;
 }
 
@@ -1168,22 +1311,7 @@ double optimize_fastme_bme_c(
     double *q_dkc = q_pow + n_nodes_u;
     double *q_dist = q_dkc + n_nodes_u;
 
-    pairs[0] = 0; pairs[1] = 1;
-    int32_t curr_len = 1;
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        int32_t next_leaf = i + 1;
-        int32_t vi = (int32_t)v_init[i];
-        if (vi <= i) {
-            memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-            pairs[0] = vi; pairs[1] = next_leaf;
-        } else {
-            int32_t idx = vi - curr_len;
-            int32_t c0 = pairs[2 * (idx - 1)];
-            memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-            pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
-        }
-        curr_len++;
-    }
+    decode_v_to_pairs_fast(v_init, n_pairs, pairs);
     for (int32_t i = 0; i < n_nodes_r; ++i) parents_uf[i] = i;
     int32_t next_parent = n_leaves;
     for (int32_t i = 0; i < n_pairs; ++i) {
@@ -1289,9 +1417,10 @@ double optimize_fastme_bme_c(
             const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
             double * restrict row_u = &subdist[(size_t)u * n_nodes_u];
             for (int32_t leaf = 0; leaf < n_leaves; ++leaf) {
-                double val = 0.5 * (row_c1[leaf] + row_c2[leaf]);
-                row_u[leaf] = val;
-                subdist[(size_t)leaf * n_nodes_u + u] = val;
+                row_u[leaf] = 0.5 * (row_c1[leaf] + row_c2[leaf]);
+            }
+            for (int32_t leaf = 0; leaf < n_leaves; ++leaf) {
+                subdist[(size_t)leaf * n_nodes_u + u] = row_u[leaf];
             }
             for (int32_t j = ord_len - 1; j > idx; --j) {
                 int32_t v_node = q_prev[j];
@@ -1337,16 +1466,20 @@ double optimize_fastme_bme_c(
             int32_t end1 = tin[c1] + sub_size[c1];
             for (int32_t i = tin[c1]; i < end1; ++i) {
                 int32_t v_node = dfs_order[i];
-                double val = 0.5 * (row_c2[v_node] + row_g[v_node]);
-                row_p[v_node] = val;
-                subdist[v_node * n_nodes_u + p] = val;
+                row_p[v_node] = 0.5 * (row_c2[v_node] + row_g[v_node]);
+            }
+            for (int32_t i = tin[c1]; i < end1; ++i) {
+                int32_t v_node = dfs_order[i];
+                subdist[v_node * n_nodes_u + p] = row_p[v_node];
             }
             int32_t end2 = tin[c2] + sub_size[c2];
             for (int32_t i = tin[c2]; i < end2; ++i) {
                 int32_t v_node = dfs_order[i];
-                double val = 0.5 * (row_c1[v_node] + row_g[v_node]);
-                row_p[v_node] = val;
-                subdist[v_node * n_nodes_u + p] = val;
+                row_p[v_node] = 0.5 * (row_c1[v_node] + row_g[v_node]);
+            }
+            for (int32_t i = tin[c2]; i < end2; ++i) {
+                int32_t v_node = dfs_order[i];
+                subdist[v_node * n_nodes_u + p] = row_p[v_node];
             }
         }
         for (int32_t i = 0; i < n_nodes_u; ++i) subdist[i * n_nodes_u + i] = 0.0;
@@ -1365,8 +1498,9 @@ double optimize_fastme_bme_c(
             curr_L += subdist[x * n_nodes_u + parent_u[x]];
         }
         curr_L *= 0.5;
+        double eps_tol = 1e-12 * ((curr_L >= 0.0 ? curr_L : -curr_L) + 1.0);
 
-        double best_delta = -1e-12;
+        double best_delta = -eps_tol;
         int32_t best_prune = -1, best_anchor = -1, best_dest_u = -1;
 
         for (int32_t u_prune = 0; u_prune < root_u; ++u_prune) {
@@ -1380,8 +1514,8 @@ double optimize_fastme_bme_c(
                 }
             }
             for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
-            run_half_tree_bfs(other0, other1, anchor, n_leaves, adj_out, parent_u, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
-            run_half_tree_bfs(other1, other0, anchor, n_leaves, adj_out, parent_u, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta);
 
             for (int32_t dest_u = 0; dest_u < root_u; ++dest_u) {
                 if (edge_delta[dest_u] < best_delta) {
@@ -1397,8 +1531,8 @@ double optimize_fastme_bme_c(
             int32_t anchor = u;
             int32_t other0 = child1_r[u], other1 = child2_r[u];
             for (int32_t w = 0; w < root_u; ++w) edge_delta[w] = 0.0;
-            run_half_tree_bfs(other0, other1, anchor, n_leaves, adj_out, parent_u, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
-            run_half_tree_bfs(other1, other0, anchor, n_leaves, adj_out, parent_u, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta);
 
             int32_t end_u = tin[u] + sub_size[u];
             for (int32_t idx = tin[u] + 1; idx < end_u; ++idx) {
@@ -1493,23 +1627,18 @@ double optimize_phylo2vec_bme_c(
     int32_t *siblings_uf = parents_uf + n_nodes_r;
     int32_t *min_leaf = siblings_uf + n_nodes_r;
     int32_t *v_map = min_leaf + n_nodes_r;
-    int32_t *destinations = v_map + n_leaves;
-    int32_t *parent_u = destinations + (size_t)n_pairs * n_leaves;
+    int32_t *dest_row = v_map + n_leaves;
+    int32_t *parent_u = dest_row + n_leaves;
     int32_t *sub_size = parent_u + n_nodes_u;
     int32_t *tin = sub_size + n_nodes_u;
     int32_t *dfs_order = tin + n_nodes_u;
     int32_t *adj_u = dfs_order + n_nodes_u;
-    int32_t *q_node = adj_u + 3 * n_nodes_u;
-    int32_t *q_prev = q_node + n_nodes_u;
-    int32_t *eval_iwork = q_prev + n_nodes_u;
+    int32_t *eval_iwork = adj_u + 3 * n_nodes_u;
 
     double *subdist = g_dwork;
     double *nd_u = subdist + (size_t)n_nodes_u * n_nodes_u;
     double *edge_delta = nd_u + 3 * n_nodes_u;
-    double *q_pow = edge_delta + n_nodes_u;
-    double *q_dkc = q_pow + n_nodes_u;
-    double *q_dist = q_dkc + n_nodes_u;
-    double *D_perm = q_dist + n_nodes_u;
+    double *D_perm = edge_delta + n_nodes_u;
     double *eval_dwork = D_perm + (size_t)n_leaves * n_leaves;
 
     memcpy(D_perm, D, (size_t)n_leaves * (size_t)n_leaves * sizeof(double));
@@ -1527,62 +1656,13 @@ double optimize_phylo2vec_bme_c(
         for (int32_t i = 1; i < n_pairs; ++i) {
             if (v_pi[i] > i) { has_gt_i = 1; break; }
         }
-        if (!has_gt_i) {
-            for (int32_t k = 0; k < n_pairs; ++k) {
-                int32_t i = n_pairs - 1 - k;
-                pairs[2 * k] = (int32_t)v_pi[i];
-                pairs[2 * k + 1] = i + 1;
-            }
-        } else {
-            pairs[0] = 0; pairs[1] = 1;
-            int32_t curr_len = 1;
-            for (int32_t i = 1; i < n_pairs; ++i) {
-                int32_t next_leaf = i + 1;
-                int32_t vi = (int32_t)v_pi[i];
-                if (vi <= i) {
-                    memmove(&pairs[2], &pairs[0], (size_t)(2 * curr_len) * sizeof(int32_t));
-                    pairs[0] = vi; pairs[1] = next_leaf;
-                } else {
-                    int32_t idx = vi - curr_len;
-                    int32_t c0 = pairs[2 * (idx - 1)];
-                    memmove(&pairs[2 * (idx + 1)], &pairs[2 * idx], (size_t)(2 * (curr_len - idx)) * sizeof(int32_t));
-                    pairs[2 * idx] = c0; pairs[2 * idx + 1] = next_leaf;
-                }
-                curr_len++;
-            }
-        }
-
-        for (int32_t i = 0; i < n_nodes_r; ++i) {
-            parents_uf[i] = i;
-            min_leaf[i] = i;
-        }
-        int32_t next_parent = n_leaves;
-        for (int32_t i = 0; i < n_pairs; ++i) {
-            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-            child1_r[next_parent] = p2;
-            child2_r[next_parent] = p1;
-            int32_t ml1 = min_leaf[p2], ml2 = min_leaf[p1];
-            min_leaf[next_parent] = (ml1 < ml2) ? ml1 : ml2;
-            parents_uf[p1] = next_parent;
-            parents_uf[p2] = next_parent;
-            next_parent++;
-        }
-
         if (has_gt_i) {
-            relabel_from_rooted_tree(child1_r, child2_r, min_leaf, n_leaves, 0, v_pi, perm, relabel_scratch);
-            perm_dirty = 1;
-            for (int32_t k = 0; k < n_pairs; ++k) {
-                int32_t i = n_pairs - 1 - k;
-                pairs[2 * k] = (int32_t)v_pi[i];
-                pairs[2 * k + 1] = i + 1;
-            }
+            decode_v_to_pairs_fast(v_pi, n_pairs, pairs);
             for (int32_t i = 0; i < n_nodes_r; ++i) {
                 parents_uf[i] = i;
                 min_leaf[i] = i;
             }
-            next_parent = n_leaves;
+            int32_t next_parent = n_leaves;
             for (int32_t i = 0; i < n_pairs; ++i) {
                 int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
                 while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
@@ -1595,37 +1675,26 @@ double optimize_phylo2vec_bme_c(
                 parents_uf[p2] = next_parent;
                 next_parent++;
             }
-        }
-        if (perm_dirty) {
-            for (int32_t i = 0; i < n_leaves; ++i) {
-                const double * restrict d_row = &D[(size_t)perm[i] * n_leaves];
-                double * restrict dp_row = &D_perm[(size_t)i * n_leaves];
-                for (int32_t j = 0; j < n_leaves; ++j) {
-                    dp_row[j] = d_row[perm[j]];
-                }
-            }
-            perm_dirty = 0;
+            relabel_from_rooted_tree(child1_r, child2_r, min_leaf, n_leaves, 0, v_pi, perm, relabel_scratch);
+            perm_dirty = 1;
         }
 
-        for (int32_t i = 1; i < n_pairs; ++i) {
-            int32_t *row_d = &destinations[(size_t)i * n_leaves];
-            for (int32_t j = 0; j <= i; ++j) row_d[j] = j;
+        for (int32_t x = 0; x < n_leaves; ++x) {
+            parents_uf[x] = x;
+            min_leaf[x] = x;
         }
-        for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
-            int32_t c1 = child1_r[m], c2 = child2_r[m];
-            int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
-            int32_t l_min, l_max;
-            if (ml1 < ml2) {
-                l_min = ml1; l_max = ml2; v_map[l_max] = c2;
-            } else {
-                l_min = ml2; l_max = ml1; v_map[l_max] = c1;
-            }
-            min_leaf[m] = l_min;
-            if (m < n_nodes_r - 1) {
-                for (int32_t n_idx = l_min; n_idx < l_max - 1; ++n_idx) {
-                    destinations[(size_t)n_idx * n_leaves + l_min] = m;
-                }
-            }
+        for (int32_t k = 0; k < n_pairs; ++k) {
+            int32_t i = n_pairs - 1 - k;
+            int32_t m = n_leaves + k;
+            int32_t x = (int32_t)v_pi[i];
+            int32_t y = i + 1;
+            int32_t c1 = parents_uf[y];
+            int32_t c2 = parents_uf[x];
+            child1_r[m] = c1;
+            child2_r[m] = c2;
+            min_leaf[m] = x;
+            v_map[y] = c1;
+            parents_uf[x] = m;
         }
 
         int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
@@ -1667,8 +1736,20 @@ double optimize_phylo2vec_bme_c(
         }
         for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
 
-        for (int32_t i = 0; i < n_leaves; ++i) {
-            memcpy(&subdist[(size_t)i * n_nodes_u], &D_perm[(size_t)i * n_leaves], (size_t)n_leaves * sizeof(double));
+        if (perm_dirty) {
+            for (int32_t i = 0; i < n_leaves; ++i) {
+                const double * restrict d_row = &D[(size_t)perm[i] * n_leaves];
+                double * restrict dp_row = &D_perm[(size_t)i * n_leaves];
+                for (int32_t j = 0; j < n_leaves; ++j) {
+                    dp_row[j] = d_row[perm[j]];
+                }
+                memcpy(&subdist[(size_t)i * n_nodes_u], dp_row, (size_t)n_leaves * sizeof(double));
+            }
+            perm_dirty = 0;
+        } else {
+            for (int32_t i = 0; i < n_leaves; ++i) {
+                memcpy(&subdist[(size_t)i * n_nodes_u], &D_perm[(size_t)i * n_leaves], (size_t)n_leaves * sizeof(double));
+            }
         }
         for (int32_t u = n_leaves; u < root_u; ++u) {
             const double * restrict row_c1 = &subdist[(size_t)child1_r[u] * n_nodes_u];
@@ -1749,12 +1830,14 @@ double optimize_phylo2vec_bme_c(
         }
         curr_L *= 0.5;
         n_evals++;
+        double eps_tol = 1e-12 * ((curr_L >= 0.0 ? curr_L : -curr_L) + 1.0);
 
         int32_t n_imp = 0, n_near = 0;
-        double best_vmap_extra_delta = -1e-12;
+        double best_vmap_extra_delta = -eps_tol;
         int32_t best_vmap_prune = -1, best_vmap_anchor = -1, best_vmap_dest = -1;
+        for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
 
-        for (int32_t v_index = 2; v_index < n_leaves; ++v_index) {
+        for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
             int32_t tree_root = v_map[v_index];
             int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
             const double * restrict row_root = &subdist[(size_t)tree_root * n_nodes_u];
@@ -1767,96 +1850,107 @@ double optimize_phylo2vec_bme_c(
                     else other1 = nb_node;
                 }
             }
-            if (other0 == -1) continue;
-
-            for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
-
-            run_half_tree_bfs(
-                other0, other1, parent, n_leaves, adj_u, parent_u, nd_u,
-                row_root, &subdist[(size_t)other1 * n_nodes_u], edge_delta,
-                q_node, q_prev, q_pow, q_dkc, q_dist
-            );
-            run_half_tree_bfs(
-                other1, other0, parent, n_leaves, adj_u, parent_u, nd_u,
-                row_root, &subdist[(size_t)other0 * n_nodes_u], edge_delta,
-                q_node, q_prev, q_pow, q_dkc, q_dist
-            );
-
-            int32_t i = v_index - 1;
-            int32_t vi_val = (int32_t)v_pi[i];
-            const int32_t * restrict dest_row = &destinations[(size_t)i * n_leaves];
-
-            double best_r_val = -1e-12;
-            int32_t best_r_j = -1, best_r_dest = -1;
-            double best_pos_val = 1e9;
-            int32_t best_pos_j = -1;
-
-            for (int32_t j = 0; j <= i; ++j) {
-                if (j == vi_val) continue;
-                int32_t du = dest_row[j];
-                double val = edge_delta[du];
-                if (val < best_r_val) {
-                    best_r_val = val;
-                    best_r_j = j;
-                    best_r_dest = du;
-                } else if (val > 1e-12 && val < best_pos_val) {
-                    best_pos_val = val;
-                    best_pos_j = j;
+            if (other0 != -1) {
+                if (n_imp == 0) {
+                    for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+                } else {
+                    edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+                    edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+                    edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
                 }
-            }
-            for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
-                int32_t du = (2 * n_leaves - 2) - 2 * i + j;
-                double val = edge_delta[du];
-                if (val < best_r_val) {
-                    best_r_val = val;
-                    best_r_j = j;
-                    best_r_dest = du;
-                } else if (val > 1e-12 && val < best_pos_val) {
-                    best_pos_val = val;
-                    best_pos_j = j;
-                }
-            }
-            {
-                int32_t j = (2 * i - 1 > i) ? (2 * i - 1) : (2 * i);
-                int32_t du = other_root_child;
-                double val = edge_delta[du];
-                if (val < best_r_val) {
-                    best_r_val = val;
-                    best_r_j = j;
-                    best_r_dest = du;
-                } else if (val > 1e-12 && val < best_pos_val) {
-                    best_pos_val = val;
-                    best_pos_j = j;
-                }
-            }
 
-            if (best_r_j != -1) {
-                row_best_j[i] = best_r_j;
-                row_best_dest[i] = best_r_dest;
-                row_best_val[i] = best_r_val;
-                improving_rows[n_imp++] = i;
-            }
-            if (best_r_j == -1 && best_pos_j != -1 && best_pos_val < 0.05) {
-                near_rows[n_near] = i;
-                near_j[n_near] = best_pos_j;
-                near_val[n_near] = best_pos_val;
-                n_near++;
-            }
+                run_half_tree_dfs(
+                    other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, &subdist[(size_t)other1 * n_nodes_u], edge_delta
+                );
+                run_half_tree_dfs(
+                    other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, &subdist[(size_t)other0 * n_nodes_u], edge_delta
+                );
 
-            if (n_imp == 0) {
-                for (int32_t du = 0; du < root_u; ++du) {
-                    if (edge_delta[du] < best_vmap_extra_delta) {
-                        best_vmap_extra_delta = edge_delta[du];
-                        best_vmap_prune = tree_root;
-                        best_vmap_anchor = parent;
-                        best_vmap_dest = du;
+                int32_t i = v_index - 1;
+                int32_t vi_val = (int32_t)v_pi[i];
+
+                double best_r_val = -eps_tol;
+                int32_t best_r_j = -1, best_r_dest = -1;
+                double best_pos_val = 1e9;
+                int32_t best_pos_j = -1;
+
+                for (int32_t j = 0; j <= i; ++j) {
+                    if (j == vi_val) continue;
+                    int32_t du = dest_row[j];
+                    double val = edge_delta[du];
+                    if (val < best_r_val) {
+                        best_r_val = val;
+                        best_r_j = j;
+                        best_r_dest = du;
+                    } else if (val > eps_tol && val < best_pos_val) {
+                        best_pos_val = val;
+                        best_pos_j = j;
+                    }
+                }
+                for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
+                    int32_t du = (2 * n_leaves - 2) - 2 * i + j;
+                    double val = edge_delta[du];
+                    if (val < best_r_val) {
+                        best_r_val = val;
+                        best_r_j = j;
+                        best_r_dest = du;
+                    } else if (val > eps_tol && val < best_pos_val) {
+                        best_pos_val = val;
+                        best_pos_j = j;
+                    }
+                }
+                {
+                    int32_t j = (2 * i - 1 > i) ? (2 * i - 1) : (2 * i);
+                    int32_t du = other_root_child;
+                    double val = edge_delta[du];
+                    if (val < best_r_val) {
+                        best_r_val = val;
+                        best_r_j = j;
+                        best_r_dest = du;
+                    } else if (val > eps_tol && val < best_pos_val) {
+                        best_pos_val = val;
+                        best_pos_j = j;
+                    }
+                }
+
+                if (best_r_j != -1) {
+                    row_best_j[i] = best_r_j;
+                    row_best_dest[i] = best_r_dest;
+                    row_best_val[i] = best_r_val;
+                    improving_rows[n_imp++] = i;
+                }
+                if (best_r_j == -1 && best_pos_j != -1 && best_pos_val < 0.05) {
+                    near_rows[n_near] = i;
+                    near_j[n_near] = best_pos_j;
+                    near_val[n_near] = best_pos_val;
+                    n_near++;
+                }
+
+                if (n_imp == 0) {
+                    for (int32_t du = 0; du < root_u; ++du) {
+                        if (edge_delta[du] < best_vmap_extra_delta) {
+                            best_vmap_extra_delta = edge_delta[du];
+                            best_vmap_prune = tree_root;
+                            best_vmap_anchor = parent;
+                            best_vmap_dest = du;
+                        }
                     }
                 }
             }
+
+            int32_t m_active = n_leaves + (n_leaves - 1 - v_index);
+            dest_row[min_leaf[m_active]] = m_active;
         }
 
         if (n_imp > 0) {
             flipped_already = 0;
+            for (int32_t a = 0; a < n_imp / 2; ++a) {
+                int32_t tmp = improving_rows[a];
+                improving_rows[a] = improving_rows[n_imp - 1 - a];
+                improving_rows[n_imp - 1 - a] = tmp;
+            }
             for (int32_t a = 1; a < n_imp; ++a) {
                 int32_t key_r = improving_rows[a];
                 double key_v = row_best_val[key_r];
@@ -1916,7 +2010,7 @@ double optimize_phylo2vec_bme_c(
                         v_cand[r] = row_best_j[r];
                     }
                     double L_cand = evaluate_bme_length_fast(v_cand, D_perm, n_leaves, eval_iwork, eval_dwork);
-                    if (L_cand < curr_L + single_best_gain - 1e-12) {
+                    if (L_cand < curr_L + single_best_gain - eps_tol) {
                         memcpy(v_pi, v_cand, (size_t)n_pairs * sizeof(int64_t));
                         curr_L = L_cand;
                         accepted = 1;
@@ -1949,7 +2043,7 @@ double optimize_phylo2vec_bme_c(
         memset(is_vmap, 0, (size_t)n_nodes_u * sizeof(uint8_t));
         for (int32_t v_idx = 2; v_idx < n_leaves; ++v_idx) is_vmap[v_map[v_idx]] = 1;
 
-        double best_rem_delta = -1e-12;
+        double best_rem_delta = -eps_tol;
         int32_t best_prune = -1, best_anchor = -1, best_dest_u = -1;
 
         for (int32_t u_prune = 0; u_prune < root_u; ++u_prune) {
@@ -1964,8 +2058,8 @@ double optimize_phylo2vec_bme_c(
                 }
             }
             for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
-            run_half_tree_bfs(other0, other1, anchor, n_leaves, adj_u, parent_u, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
-            run_half_tree_bfs(other1, other0, anchor, n_leaves, adj_u, parent_u, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta);
             for (int32_t dest_u = 0; dest_u < root_u; ++dest_u) {
                 if (edge_delta[dest_u] < best_rem_delta) {
                     best_rem_delta = edge_delta[dest_u];
@@ -1980,8 +2074,8 @@ double optimize_phylo2vec_bme_c(
             int32_t anchor = u;
             int32_t other0 = child1_r[u], other1 = child2_r[u];
             for (int32_t w = 0; w < root_u; ++w) edge_delta[w] = 0.0;
-            run_half_tree_bfs(other0, other1, anchor, n_leaves, adj_u, parent_u, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
-            run_half_tree_bfs(other1, other0, anchor, n_leaves, adj_u, parent_u, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta, q_node, q_prev, q_pow, q_dkc, q_dist);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta);
             int32_t end_u = tin[u] + sub_size[u];
             for (int32_t idx = tin[u] + 1; idx < end_u; ++idx) {
                 int32_t dest_u = dfs_order[idx];
@@ -2010,6 +2104,11 @@ double optimize_phylo2vec_bme_c(
 
         if (n_near >= 2 && escape_attempts < 2) {
             escape_attempts++;
+            for (int32_t a = 0; a < n_near / 2; ++a) {
+                int32_t tr = near_rows[a]; near_rows[a] = near_rows[n_near - 1 - a]; near_rows[n_near - 1 - a] = tr;
+                int32_t tj = near_j[a]; near_j[a] = near_j[n_near - 1 - a]; near_j[n_near - 1 - a] = tj;
+                double tv = near_val[a]; near_val[a] = near_val[n_near - 1 - a]; near_val[n_near - 1 - a] = tv;
+            }
             for (int32_t a = 1; a < n_near; ++a) {
                 int32_t kr = near_rows[a], kj = near_j[a];
                 double kv = near_val[a];
@@ -2060,3 +2159,7 @@ double optimize_phylo2vec_bme_c(
     if (elapsed_ms_out) *elapsed_ms_out = now_ms() - t0;
     return curr_L;
 }
+
+#ifdef __cplusplus
+}
+#endif
