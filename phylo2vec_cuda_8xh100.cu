@@ -349,6 +349,129 @@ __global__ void k_spr_rows_smem(
     }
 }
 
+/* ============================================================================
+ * COLUMN-TILED LOW-MEMORY CUDA KERNELS (Complete Column-Autonomy Theorem):
+ *   - Eliminates the (2N-2) x (2N-2) `subdist` matrix completely!
+ *   - `k_tiled_leaf_cols` processes a tile of B_TILE leaf columns [c_start .. c_end)
+ *     in lockstep and writes `subdist_int_leaf[(N-1) x N]` (4x smaller than `subdist`,
+ *     or streamed in tiles without storing `subdist` at all).
+ *   - `dev_compute_autonomous_row` reconstructs any full row `row_w[0 .. 2N-3]`
+ *     on the fly inside Shared Memory / L2 cache in O(N) time with zero cross-column
+ *     dependencies (ideal for both 8x H100 and 8x RTX PRO 6000 over PCIe!).
+ * ============================================================================ */
+__global__ void k_tiled_leaf_cols(
+    const float * __restrict__ D_tile,       /* shape: N x c_len */
+    float * __restrict__ tile_buf,           /* shape: n_nodes_u x c_len */
+    float * __restrict__ subdist_int_leaf,   /* shape: (N - 1) x N */
+    const int32_t * __restrict__ child1_r,
+    const int32_t * __restrict__ child2_r,
+    const int32_t * __restrict__ tin,
+    int32_t c_start,
+    int32_t c_len,
+    int32_t n_leaves,
+    int32_t n_nodes_u,
+    int32_t root_u_c0,
+    int32_t root_u_c1,
+    int32_t root_u_c2
+) {
+    int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x >= c_len) return;
+    int32_t root_u = n_nodes_u - 1;
+    int32_t v_node = c_start + x;
+
+    for (int32_t i = 0; i < n_leaves; ++i) {
+        tile_buf[(size_t)i * c_len + x] = D_tile[(size_t)i * c_len + x];
+    }
+    for (int32_t u = n_leaves; u < root_u; ++u) {
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        tile_buf[(size_t)u * c_len + x] =
+            0.5f * (tile_buf[(size_t)c1 * c_len + x] + tile_buf[(size_t)c2 * c_len + x]);
+    }
+
+    int32_t tv = tin[v_node];
+    int32_t curr;
+    if (tv < tin[root_u_c1]) {
+        curr = root_u_c0;
+        tile_buf[(size_t)root_u * c_len + x] =
+            0.5f * (tile_buf[(size_t)root_u_c1 * c_len + x] + tile_buf[(size_t)root_u_c2 * c_len + x]);
+    } else if (tv < tin[root_u_c2]) {
+        curr = root_u_c1;
+        tile_buf[(size_t)root_u * c_len + x] =
+            0.5f * (tile_buf[(size_t)root_u_c0 * c_len + x] + tile_buf[(size_t)root_u_c2 * c_len + x]);
+    } else {
+        curr = root_u_c2;
+        tile_buf[(size_t)root_u * c_len + x] =
+            0.5f * (tile_buf[(size_t)root_u_c0 * c_len + x] + tile_buf[(size_t)root_u_c1 * c_len + x]);
+    }
+    int32_t g = root_u;
+    while (curr != v_node) {
+        int32_t c1 = child1_r[curr], c2 = child2_r[curr];
+        int32_t next_curr = (tv < tin[c2]) ? c1 : c2;
+        int32_t sib       = (tv < tin[c2]) ? c2 : c1;
+        tile_buf[(size_t)curr * c_len + x] =
+            0.5f * (tile_buf[(size_t)sib * c_len + x] + tile_buf[(size_t)g * c_len + x]);
+        g = curr;
+        curr = next_curr;
+    }
+
+    for (int32_t u = n_leaves; u <= root_u; ++u) {
+        subdist_int_leaf[(size_t)(u - n_leaves) * n_leaves + v_node] = tile_buf[(size_t)u * c_len + x];
+    }
+}
+
+__device__ __forceinline__ void dev_compute_autonomous_row(
+    int32_t w, int32_t n_leaves, int32_t n_nodes_u,
+    int32_t root_u_c0, int32_t root_u_c1, int32_t root_u_c2,
+    const int32_t * __restrict__ child1_r,
+    const int32_t * __restrict__ child2_r,
+    const int32_t * __restrict__ tin,
+    const float * __restrict__ D,
+    const float * __restrict__ subdist_int_leaf,
+    float * __restrict__ row_w
+) {
+    int32_t root_u = n_nodes_u - 1;
+    const float *src = (w < n_leaves)
+        ? &D[(size_t)w * n_leaves]
+        : &subdist_int_leaf[(size_t)(w - n_leaves) * n_leaves];
+    for (int32_t x = threadIdx.x; x < n_leaves; x += blockDim.x) {
+        row_w[x] = src[x];
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int32_t u = n_leaves; u < root_u; ++u) {
+            row_w[u] = 0.5f * (row_w[child1_r[u]] + row_w[child2_r[u]]);
+        }
+        if (w == root_u) {
+            row_w[root_u] = 0.0f;
+        } else {
+            int32_t tv = tin[w];
+            int32_t curr;
+            if (tv < tin[root_u_c1]) {
+                curr = root_u_c0;
+                row_w[root_u] = 0.5f * (row_w[root_u_c1] + row_w[root_u_c2]);
+            } else if (tv < tin[root_u_c2]) {
+                curr = root_u_c1;
+                row_w[root_u] = 0.5f * (row_w[root_u_c0] + row_w[root_u_c2]);
+            } else {
+                curr = root_u_c2;
+                row_w[root_u] = 0.5f * (row_w[root_u_c0] + row_w[root_u_c1]);
+            }
+            int32_t g = root_u;
+            while (curr != w) {
+                int32_t c1 = child1_r[curr], c2 = child2_r[curr];
+                int32_t next_curr = (tv < tin[c2]) ? c1 : c2;
+                int32_t sib       = (tv < tin[c2]) ? c2 : c1;
+                row_w[curr] = 0.5f * (row_w[sib] + row_w[g]);
+                g = curr;
+                curr = next_curr;
+            }
+            row_w[w] = 0.0f;
+        }
+    }
+    __syncthreads();
+}
+
 int main(void) {
     int num_gpus = 0;
     CUDA_CHECK(cudaGetDeviceCount(&num_gpus));

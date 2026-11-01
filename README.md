@@ -26,17 +26,18 @@ High-performance $O(N^2)$ Balanced Minimum Evolution (BME) discrete gradient com
   Python script comparing `optimize_phylo2vec_bme` and `optimize_fastme_bme` and, if the external `fastme` CLI binary is installed on `PATH`, invoking `fastme -i D.phy -u init.nwk -s` on exported PHYLIP/Newick files.
 
 - **[bench_parallel_gpu.m](bench_parallel_gpu.m)** (compiled to `bench_parallel_gpu`)  
-  Large-$N$ ($N = 100 \dots 4{,}000$) parallel CPU (10-Core Grand Central Dispatch) and Apple Silicon Metal GPU benchmark implementing:
+  Large-$N$ ($N = 100 \dots 4{,}000$) parallel CPU (10-Core Grand Central Dispatch), Column-Tiled Low-Memory CPU, and Apple Silicon Metal GPU benchmark implementing:
   - Lockstep Column-Parallel `subdist` matrix DP (100% coalesced SIMT loads/stores, zero per-level kernel launches).
   - $O(N \log N)$ Stackless Ancestor-Walk Top-Down + Symmetrization pass.
-  - Heavy-First 32-Slot Register-Stack SPR traversal + $O(1)$ incremental destination mapping.
+  - Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack SPR traversal + $O(1)$ incremental destination mapping.
+  - Column-Tiled Low-Memory `subdist` ($4\times$ memory reduction via `subdist_int_leaf`) + $O(N)$ Autonomous Row Reconstruction (`compute_autonomous_row_f64`).
   - Zero-copy Hybrid GPU (`subdist`) + 10-Core CPU (`SPR scan`) pipeline on Apple Silicon Unified Memory.
 
 - **[phylo2vec_cuda_8xh100.cu](phylo2vec_cuda_8xh100.cu)**  
-  Multi-GPU CUDA (`sm_90`) implementation for 1x to 8x NVIDIA Hopper H100 SXM5 nodes with 228 KB shared-memory `edge_delta` caching and OpenMP + CUDA stream sharding across GPUs.
+  Multi-GPU CUDA (`sm_90` / `sm_100`) implementation for 1x to 8x NVIDIA Hopper H100 SXM5 and RTX PRO 6000 Blackwell nodes featuring lockstep column-parallel kernels, 228 KB shared-memory `edge_delta` caching (`k_spr_rows_smem`), and column-tiled autonomous row kernels (`k_tiled_leaf_cols`, `dev_compute_autonomous_row`).
 
 - **[paper/phylo2vec_bme_paper.tex](paper/phylo2vec_bme_paper.tex)** & **[paper/phylo2vec_bme_paper.pdf](paper/phylo2vec_bme_paper.pdf)**  
-  11-page LaTeX technical paper with full mathematical proofs, notebook audit, algorithmic derivations, and benchmark tables.
+  13-page LaTeX manuscript presenting all mathematical theorems, proofs, algorithms, multi-core/GPU/column-tiling architectures, and empirical benchmarks.
 
 ---
 

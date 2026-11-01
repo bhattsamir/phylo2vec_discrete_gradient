@@ -347,6 +347,7 @@ static void calculate_discrete_gradient_multicore_f64(
     const int32_t n_nodes_u = 2 * n_leaves - 2;
     const int32_t root_u = n_nodes_u - 1;
     const int32_t max_cols = 2 * n_pairs - 1;
+    memset(delta_full_out, 0, (size_t)n_pairs * max_cols * sizeof(double));
 
     int32_t other_root_child, root_u_c0, root_u_c1, root_u_c2;
     build_tree_structures(v, n_leaves, iwork, &other_root_child, &root_u_c0, &root_u_c1, &root_u_c2);
@@ -522,6 +523,244 @@ static void calculate_discrete_gradient_multicore_f64(
 }
 
 /* ============================================================================
+ * Autonomous Row / Column Helper (Complete Column-Autonomy Theorem):
+ * Computes the ENTIRE row `row_w[0 .. 2N-3]` of `subdist` for any node `w`
+ * in O(N) time purely inside L1 cache using ONLY `D` (if w < N) or
+ * `subdist_int_leaf` (if w >= N) — ZERO full `subdist` matrix needed!
+ * ============================================================================ */
+static inline void compute_autonomous_row_f64(
+    int32_t w, int32_t n_leaves, int32_t n_nodes_u,
+    int32_t root_u_c0, int32_t root_u_c1, int32_t root_u_c2,
+    const int32_t * restrict child1_r, const int32_t * restrict child2_r,
+    const int32_t * restrict tin,
+    const double * restrict D, const double * restrict subdist_int_leaf,
+    double * restrict row_w
+) {
+    const int32_t root_u = n_nodes_u - 1;
+    if (w < n_leaves) {
+        memcpy(row_w, &D[(size_t)w * n_leaves], (size_t)n_leaves * sizeof(double));
+    } else {
+        memcpy(row_w, &subdist_int_leaf[(size_t)(w - n_leaves) * n_leaves], (size_t)n_leaves * sizeof(double));
+    }
+    for (int32_t u = n_leaves; u < root_u; ++u) {
+        row_w[u] = 0.5 * (row_w[child1_r[u]] + row_w[child2_r[u]]);
+    }
+    if (w == root_u) {
+        row_w[root_u] = 0.0;
+        return;
+    }
+    int32_t tv = tin[w];
+    int32_t curr;
+    if (tv < tin[root_u_c1]) {
+        curr = root_u_c0;
+        row_w[root_u] = 0.5 * (row_w[root_u_c1] + row_w[root_u_c2]);
+    } else if (tv < tin[root_u_c2]) {
+        curr = root_u_c1;
+        row_w[root_u] = 0.5 * (row_w[root_u_c0] + row_w[root_u_c2]);
+    } else {
+        curr = root_u_c2;
+        row_w[root_u] = 0.5 * (row_w[root_u_c0] + row_w[root_u_c1]);
+    }
+    int32_t g = root_u;
+    while (curr != w) {
+        int32_t c1 = child1_r[curr], c2 = child2_r[curr];
+        int32_t next_curr = (tv < tin[c2]) ? c1 : c2;
+        int32_t sib       = (tv < tin[c2]) ? c2 : c1;
+        row_w[curr] = 0.5 * (row_w[sib] + row_w[g]);
+        g = curr;
+        curr = next_curr;
+    }
+    row_w[w] = 0.0;
+}
+
+/* ============================================================================
+ * Column-Tiled Low-Memory 10-Core CPU Implementation:
+ *   - Tiles the leaf columns in L2-resident blocks of width B_TILE = 128.
+ *   - NEVER allocates the (2N-2) x (2N-2) `subdist` matrix!
+ *   - Generates `row_root`, `row_other0`, `row_other1` on the fly in L1 cache!
+ * ============================================================================ */
+#define B_TILE 128
+
+static void calculate_discrete_gradient_tiled_f64(
+    const int64_t * restrict v,
+    const double * restrict D,
+    int32_t n_leaves,
+    double * restrict delta_full_out,
+    int32_t * restrict iwork,
+    double * restrict subdist_int_leaf, /* shape: (N - 1) x N — 4x smaller than subdist! */
+    int32_t * restrict thr_iwork,
+    double * restrict thr_tile_work     /* per-thread L1/L2 tile scratch */
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    const int32_t n_nodes_u = 2 * n_leaves - 2;
+    const int32_t root_u = n_nodes_u - 1;
+    const int32_t max_cols = 2 * n_pairs - 1;
+    memset(delta_full_out, 0, (size_t)n_pairs * max_cols * sizeof(double));
+
+    int32_t other_root_child, root_u_c0, root_u_c1, root_u_c2;
+    build_tree_structures(v, n_leaves, iwork, &other_root_child, &root_u_c0, &root_u_c1, &root_u_c2);
+
+    int32_t *pairs = iwork;
+    int32_t *child1_r = pairs + 2 * n_pairs;
+    int32_t *child2_r = child1_r + n_nodes_r;
+    int32_t *parents_uf = child2_r + n_nodes_r;
+    int32_t *min_leaf = parents_uf + n_nodes_r;
+    int32_t *v_map = min_leaf + n_nodes_r;
+    int32_t *m_lmin = v_map + n_leaves;
+    int32_t *parent_u = m_lmin + n_leaves;
+    int32_t *sub_size = parent_u + n_nodes_u;
+    int32_t *tin = sub_size + n_nodes_u;
+    int32_t *dfs_order = tin + n_nodes_u;
+    int32_t *adj_u = dfs_order + n_nodes_u;
+
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
+    int32_t n_tiles = (n_leaves + B_TILE - 1) / B_TILE;
+    int32_t tin_c1_root = tin[root_u_c1];
+    int32_t tin_c2_root = tin[root_u_c2];
+
+    // Step 1: Process leaf columns in L2-resident tiles of width B_TILE = 128
+    dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
+        int32_t t_start = (int32_t)((tid * n_tiles) / N_CPU_THREADS);
+        int32_t t_end   = (int32_t)(((tid + 1) * n_tiles) / N_CPU_THREADS);
+        double *tile_buf = &thr_tile_work[tid * (size_t)n_nodes_u * B_TILE];
+
+        for (int32_t t = t_start; t < t_end; ++t) {
+            int32_t c_start = t * B_TILE;
+            int32_t c_end   = (c_start + B_TILE < n_leaves) ? (c_start + B_TILE) : n_leaves;
+            int32_t c_len   = c_end - c_start;
+
+            for (int32_t i = 0; i < n_leaves; ++i) {
+                memcpy(&tile_buf[(size_t)i * B_TILE], &D[(size_t)i * n_leaves + c_start], (size_t)c_len * sizeof(double));
+            }
+            for (int32_t u = n_leaves; u < root_u; ++u) {
+                const double * restrict r1 = &tile_buf[(size_t)child1_r[u] * B_TILE];
+                const double * restrict r2 = &tile_buf[(size_t)child2_r[u] * B_TILE];
+                double * restrict ru = &tile_buf[(size_t)u * B_TILE];
+                for (int32_t x = 0; x < c_len; ++x) ru[x] = 0.5 * (r1[x] + r2[x]);
+            }
+            // Top-down ancestor walk on the tile's leaf columns
+            for (int32_t x = 0; x < c_len; ++x) {
+                int32_t v_node = c_start + x;
+                int32_t tv = tin[v_node];
+                int32_t curr;
+                if (tv < tin_c1_root) {
+                    curr = root_u_c0;
+                    tile_buf[(size_t)root_u * B_TILE + x] = 0.5 * (tile_buf[(size_t)root_u_c1 * B_TILE + x] + tile_buf[(size_t)root_u_c2 * B_TILE + x]);
+                } else if (tv < tin_c2_root) {
+                    curr = root_u_c1;
+                    tile_buf[(size_t)root_u * B_TILE + x] = 0.5 * (tile_buf[(size_t)root_u_c0 * B_TILE + x] + tile_buf[(size_t)root_u_c2 * B_TILE + x]);
+                } else {
+                    curr = root_u_c2;
+                    tile_buf[(size_t)root_u * B_TILE + x] = 0.5 * (tile_buf[(size_t)root_u_c0 * B_TILE + x] + tile_buf[(size_t)root_u_c1 * B_TILE + x]);
+                }
+                int32_t g = root_u;
+                while (curr != v_node) {
+                    int32_t c1 = child1_r[curr], c2 = child2_r[curr];
+                    int32_t next_curr = (tv < tin[c2]) ? c1 : c2;
+                    int32_t sib       = (tv < tin[c2]) ? c2 : c1;
+                    tile_buf[(size_t)curr * B_TILE + x] = 0.5 * (tile_buf[(size_t)sib * B_TILE + x] + tile_buf[(size_t)g * B_TILE + x]);
+                    g = curr;
+                    curr = next_curr;
+                }
+            }
+            // Store internal rows [N .. root_u] into subdist_int_leaf
+            for (int32_t u = n_leaves; u <= root_u; ++u) {
+                memcpy(&subdist_int_leaf[(size_t)(u - n_leaves) * n_leaves + c_start],
+                       &tile_buf[(size_t)u * B_TILE], (size_t)c_len * sizeof(double));
+            }
+        }
+    });
+
+    // Step 2: Populate `nd_u` in parallel using autonomous L1 rows
+    double *nd_u = &subdist_int_leaf[(size_t)(n_nodes_u - n_leaves) * n_leaves];
+    int32_t n_int_all = root_u - n_leaves + 1;
+    dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
+        int32_t u_start = n_leaves + (int32_t)((tid * n_int_all) / N_CPU_THREADS);
+        int32_t u_end   = n_leaves + (int32_t)(((tid + 1) * n_int_all) / N_CPU_THREADS);
+        double *row_tmp = &thr_tile_work[tid * (size_t)n_nodes_u * B_TILE];
+        for (int32_t u = u_start; u < u_end; ++u) {
+            int32_t n0 = adj_u[3 * u + 0], n1 = adj_u[3 * u + 1], n2 = adj_u[3 * u + 2];
+            compute_autonomous_row_f64(n0, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
+                                       child1_r, child2_r, tin, D, subdist_int_leaf, row_tmp);
+            nd_u[3 * u + 2] = row_tmp[n1];
+            nd_u[3 * u + 1] = row_tmp[n2];
+            compute_autonomous_row_f64(n1, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
+                                       child1_r, child2_r, tin, D, subdist_int_leaf, row_tmp);
+            nd_u[3 * u + 0] = row_tmp[n2];
+        }
+    });
+
+    // Step 3: Stage 3 SPR Scan using 3 L1-resident autonomous rows (`row_root`, `row_other0`, `row_other1`)
+    int32_t n_rows = n_leaves - 2;
+    dispatch_apply(N_CPU_THREADS, q, ^(size_t tid) {
+        int32_t r_start = 2 + (int32_t)((tid * n_rows) / N_CPU_THREADS);
+        int32_t r_end   = 2 + (int32_t)(((tid + 1) * n_rows) / N_CPU_THREADS);
+        if (r_start >= r_end) return;
+
+        double *t_base     = &thr_tile_work[tid * (size_t)n_nodes_u * B_TILE];
+        double *edge_delta = t_base;
+        double *row_root   = t_base + n_nodes_u;
+        double *row_other0 = t_base + 2 * n_nodes_u;
+        double *row_other1 = t_base + 3 * n_nodes_u;
+        int32_t *dest_row  = &thr_iwork[tid * n_leaves];
+
+        int32_t i_init = r_end - 2;
+        for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
+        for (int32_t k = 0; k < (n_leaves - 2 - i_init); ++k) {
+            dest_row[m_lmin[k]] = n_leaves + k;
+        }
+
+        for (int32_t v_index = r_end - 1; v_index >= r_start; --v_index) {
+            int32_t tree_root = v_map[v_index];
+            int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
+
+            int32_t other0 = -1, other1 = -1;
+            for (int32_t k = 0; k < 3; ++k) {
+                int32_t nb_node = adj_u[3 * parent + k];
+                if (nb_node != -1 && nb_node != tree_root) {
+                    if (other0 == -1) other0 = nb_node;
+                    else other1 = nb_node;
+                }
+            }
+            if (other0 != -1) {
+                compute_autonomous_row_f64(tree_root, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
+                                           child1_r, child2_r, tin, D, subdist_int_leaf, row_root);
+                compute_autonomous_row_f64(other0, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
+                                           child1_r, child2_r, tin, D, subdist_int_leaf, row_other0);
+                compute_autonomous_row_f64(other1, n_leaves, n_nodes_u, root_u_c0, root_u_c1, root_u_c2,
+                                           child1_r, child2_r, tin, D, subdist_int_leaf, row_other1);
+
+                for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
+
+                run_half_tree_dfs_f64(
+                    other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, row_other1, edge_delta
+                );
+                run_half_tree_dfs_f64(
+                    other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                    row_root, row_other0, edge_delta
+                );
+
+                int32_t i = v_index - 1;
+                double * restrict out_row = &delta_full_out[(size_t)i * max_cols];
+                for (int32_t j = 0; j <= i; ++j) out_row[j] = edge_delta[dest_row[j]];
+                for (int32_t j = i + 1; j <= 2 * i - 2; ++j) {
+                    out_row[j] = edge_delta[(2 * n_leaves - 2) - 2 * i + j];
+                }
+                out_row[2 * i - 1] = edge_delta[other_root_child];
+                out_row[2 * i]     = edge_delta[other_root_child];
+            }
+
+            int32_t k_next = n_leaves - 1 - v_index;
+            if (k_next >= 0 && k_next < n_pairs - 1) {
+                dest_row[m_lmin[k_next]] = n_leaves + k_next;
+            }
+        }
+    });
+}
+
+/* ============================================================================
  * Metal GPU Shaders:
  *   - Stage 2: Lockstep Column-Parallel `subdist` + O(N log N) Ancestor Top-Down
  *   - Stage 3: Register-Stack Heavy-First DFS SPR Scan (16-32 slots, zero DRAM queue!)
@@ -639,12 +878,12 @@ int main(void) {
         id<MTLComputePipelineState> psoTopDown   = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"gpu_top_down_cols"] error:&error];
         id<MTLCommandQueue> queue = [device newCommandQueue];
 
-        printf("=============================================================================================================================\n");
-        printf("LARGE-N SCALING ON APPLE M5: 1-Core CPU vs. 10-Core CPU vs. Metal GPU `subdist` vs. Hybrid GPU+CPU (Zero-Copy Unified Memory)\n");
-        printf("=============================================================================================================================\n");
-        printf("%5s | %11s | %11s %8s | %12s %11s %8s | %12s %8s | %10s\n",
-               "N", "1-Core CPU", "10-Core CPU", "Speedup", "1-Core subdist", "GPU subdist", "GPU Spd", "Hybrid Total", "Hyb Spd", "Max Diff");
-        printf("-----------------------------------------------------------------------------------------------------------------------------\n");
+        printf("========================================================================================================================================\n");
+        printf("LARGE-N SCALING ON APPLE M5: 1-Core vs. 10-Core vs. Metal GPU `subdist` vs. Hybrid GPU+CPU vs. Column-Tiled Low-Memory (1/4th RAM)\n");
+        printf("========================================================================================================================================\n");
+        printf("%5s | %11s | %11s %8s | %12s %11s %8s | %12s %8s | %12s | %10s\n",
+               "N", "1-Core CPU", "10-Core CPU", "Speedup", "1-Core subdist", "GPU subdist", "GPU Spd", "Hybrid Total", "Hyb Spd", "Tiled (1/4M)", "Max Diff");
+        printf("----------------------------------------------------------------------------------------------------------------------------------------\n");
 
         const int32_t sizes[] = {100, 250, 500, 1000, 2000, 3000, 4000};
         for (int s = 0; s < 7; ++s) {
@@ -909,11 +1148,29 @@ int main(void) {
             for (int t = 0; t < n_trials; ++t) run_hybrid();
             double ms_hybrid = (now_ms() - t0) / n_trials;
 
-            printf("%5d | %8.3f ms | %8.3f ms %7.2fx | %9.3f ms %8.3f ms %7.2fx | %9.3f ms %7.2fx | %10.2e\n",
+            // 6. Verify & time Column-Tiled Low-Memory 10-Core CPU (4x smaller subdist_int_leaf + L1 autonomous rows)
+            double *delta_tiled = (double *)malloc((size_t)n_pairs * max_cols * sizeof(double));
+            double *subdist_int_leaf = (double *)malloc(((size_t)N * N + (size_t)3 * n_nodes_u) * sizeof(double));
+            double *thr_tile_work = (double *)malloc((size_t)N_CPU_THREADS * n_nodes_u * B_TILE * sizeof(double));
+            calculate_discrete_gradient_tiled_f64(v, D, N, delta_tiled, iwork, subdist_int_leaf, thr_iwork, thr_tile_work);
+            t0 = now_ms();
+            for (int t = 0; t < n_trials; ++t) {
+                calculate_discrete_gradient_tiled_f64(v, D, N, delta_tiled, iwork, subdist_int_leaf, thr_iwork, thr_tile_work);
+            }
+            double ms_tiled = (now_ms() - t0) / n_trials;
+            double max_diff_tiled = 0.0;
+            for (size_t idx = 0; idx < (size_t)n_pairs * max_cols; ++idx) {
+                double err = fabs(delta_tiled[idx] - delta_1core[idx]);
+                if (err > max_diff_tiled) max_diff_tiled = err;
+            }
+            if (max_diff_tiled > max_diff) max_diff = max_diff_tiled;
+
+            printf("%5d | %8.3f ms | %8.3f ms %7.2fx | %9.3f ms %8.3f ms %7.2fx | %9.3f ms %7.2fx | %9.3f ms | %10.2e\n",
                    N, ms_1core, ms_mcore, ms_1core / ms_mcore,
                    ms_1core_subdist, ms_gpu_subdist, ms_1core_subdist / ms_gpu_subdist,
-                   ms_hybrid, ms_1core / ms_hybrid, max_diff);
+                   ms_hybrid, ms_1core / ms_hybrid, ms_tiled, max_diff);
 
+            free(delta_tiled); free(subdist_int_leaf); free(thr_tile_work);
             free(nd_u_f32);
             free(v); free(D); free(D_f32); free(delta_1core); free(delta_mcore); free(delta_hyb);
             free(iwork); free(thr_iwork); free(dwork); free(thr_dwork); free(thr_fwork);
