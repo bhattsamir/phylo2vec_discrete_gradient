@@ -1,6 +1,7 @@
 import ctypes
 import os
 import subprocess
+import sys
 import numba as nb
 import numpy as np
 
@@ -417,13 +418,16 @@ class DiscreteGradient:
         self._c_lib = None
         here = os.path.dirname(os.path.abspath(__file__))
         c_src = os.path.join(here, "phylo2vec_fastme.c")
-        dylib_path = os.path.join(here, "libphylo2vec_fastme.dylib")
+        is_macos = sys.platform == "darwin"
+        lib_name = "libphylo2vec_fastme.dylib" if is_macos else "libphylo2vec_fastme.so"
+        dylib_path = os.path.join(here, lib_name)
 
         def _build_dylib() -> None:
-            subprocess.run(
-                [
+            if is_macos:
+                cmd = [
                     "/usr/bin/clang",
                     "-O3",
+                    "-ffast-math",
                     "-arch",
                     "arm64",
                     "-arch",
@@ -433,9 +437,22 @@ class DiscreteGradient:
                     c_src,
                     "-o",
                     dylib_path,
-                ],
-                check=True,
-            )
+                ]
+            else:
+                cc = os.environ.get("CC", "cc")
+                cmd = [
+                    cc,
+                    "-O3",
+                    "-march=native",
+                    "-ffast-math",
+                    "-shared",
+                    "-fPIC",
+                    c_src,
+                    "-lm",
+                    "-o",
+                    dylib_path,
+                ]
+            subprocess.run(cmd, check=True)
 
         if (
             not os.path.exists(dylib_path)
