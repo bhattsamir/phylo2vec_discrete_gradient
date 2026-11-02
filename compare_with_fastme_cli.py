@@ -219,11 +219,17 @@ def main():
                 nwk_path = os.path.join(tmpdir, "init.nwk")
                 out_path = os.path.join(tmpdir, "out.nwk")
                 write_phylip_matrix(D, phy_path)
+                # FastME (-u) initializes T0->weight from the sum of Newick branch lengths
+                # before running bmeSPR and reverts to T0 if T_spr->weight > T0->weight.
+                # Setting each of the (2N-3) unrooted edges to L_init / (2N-3) sets T0->weight = L_init.
+                L_init, _ = parse_newick_and_evaluate(v_to_newick(v_init), D)
+                edge_bl = L_init / max(1, 2 * N - 3)
+                init_nwk_bl = re.sub(r"(T\d+|\))(?=[^;]*;)", f"\\1:{edge_bl:.8f}", v_to_newick(v_init))
                 with open(nwk_path, "w") as f:
-                    f.write(v_to_newick(v_init) + "\n")
+                    f.write(init_nwk_bl + "\n")
                 t0 = time.perf_counter()
                 subprocess.run(
-                    [fastme_bin, "-i", phy_path, "-u", nwk_path, "-s", "-o", out_path],
+                    [fastme_bin, "-i", phy_path, "-u", nwk_path, "-s", "-T", "1", "-o", out_path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=True,
@@ -232,10 +238,12 @@ def main():
                 with open(out_path, "r") as f:
                     cli_nwk = f.read().strip()
                 L_cli, splits_cli = parse_newick_and_evaluate(cli_nwk, D)
+                rf_vs_fme = len(splits_cli.symmetric_difference(splits_fme)) / (2.0 * (N - 3))
                 rf_vs_p2v = len(splits_cli.symmetric_difference(splits_p2v)) / (2.0 * (N - 3))
                 print(
                     f"      | External `fastme -u init.nwk -s`: L={L_cli:9.5f}, "
-                    f"norm-RF(CLI, P2V)={rf_vs_p2v:.4f}, wall time (incl. I/O)={cli_ms:6.2f} ms"
+                    f"RF(CLI,FME)={rf_vs_fme:.4f}, RF(CLI,P2V)={rf_vs_p2v:.4f}, "
+                    f"wall time (incl. I/O)={cli_ms:6.2f} ms"
                 )
 
 

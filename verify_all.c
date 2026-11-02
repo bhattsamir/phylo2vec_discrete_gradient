@@ -39,6 +39,26 @@ extern double optimize_fastme_bme_c(
     const int64_t *v_init, const double *D, int32_t n_leaves,
     int64_t *v_out, int32_t *n_spr_passes_out, double *elapsed_ms_out
 );
+extern void condense_tree_bme_c(
+    const int64_t *v, const double *D, int32_t n_leaves,
+    const uint8_t *is_condensed_node, int32_t *n_eff_out,
+    int64_t *v_eff_out, int32_t *super_node_map_out,
+    int32_t *leaf_to_super_out, double *omega_leaf_out, double *D_eff_out
+);
+extern void expand_condensed_tree_to_v_c(
+    const int64_t *v_orig, int32_t n_leaves,
+    const int64_t *v_eff, int32_t n_eff,
+    const int32_t *super_node_map, int64_t *v_expanded_out
+);
+extern void select_minibatch_clades_c(
+    const int64_t *v, int32_t n_leaves,
+    int32_t target_n_eff, int32_t batch_idx,
+    uint8_t *is_condensed_node_out
+);
+extern double optimize_phylo2vec_bme_minibatch_c(
+    const int64_t *v_init, const double *D, int32_t n_leaves,
+    int32_t target_n_eff, int32_t n_batches, int64_t *v_out
+);
 
 static uint32_t rng_state = 20261101U;
 static inline uint32_t xorshift32(void) {
@@ -753,6 +773,76 @@ int main(void) {
         printf("       Caterpillars, zero/constant/ultrametric/extreme-range matrices max rel err: %.3e\n\n",
                max_adv_err);
         if (!test7_ok) all_passed = 0;
+    }
+
+    /* TEST 8: Exact Clade-Condensed Minibatch BME Theorem & Minibatch Optimizer (N = 40, N_eff ~ 16) */
+    {
+        const int32_t N = 40;
+        const int32_t n_pairs = N - 1;
+        const int32_t n_nodes_r = 2 * N - 1;
+        double D[1600], D_eff[1600], delta_eff[4096], omega[40];
+        int64_t v_orig[39], v_eff[39], v_eff_mut[39], v_expanded[39], v_mb_out[39];
+        int32_t super_map[40], leaf_to_super[40];
+        uint8_t is_cond[80];
+
+        int test8_ok = 1;
+        double max_mb_grad_err = 0.0;
+        int32_t total_mb_entries = 0;
+
+        for (int32_t trial = 0; trial < 20; ++trial) {
+            for (int32_t i = 0; i < N; ++i) {
+                D[i * N + i] = 0.0;
+                for (int32_t j = i + 1; j < N; ++j) {
+                    double d = 0.2 + 3.0 * rand_uniform();
+                    D[i * N + j] = D[j * N + i] = d;
+                }
+            }
+            for (int32_t i = 0; i < n_pairs; ++i) {
+                v_orig[i] = (int64_t)(xorshift32() % (uint32_t)(2 * i + 1));
+            }
+            double L_base = brute_force_pauplin_bme_length(v_orig, D, N, NULL);
+
+            for (int32_t b = 0; b < 3; ++b) {
+                select_minibatch_clades_c(v_orig, N, 16, b, is_cond);
+                int32_t n_eff = 0;
+                condense_tree_bme_c(v_orig, D, N, is_cond, &n_eff, v_eff, super_map, leaf_to_super, omega, D_eff);
+                if (n_eff < 4 || n_eff >= N) test8_ok = 0;
+
+                /* Check roundtrip identity before mutation */
+                expand_condensed_tree_to_v_c(v_orig, N, v_eff, n_eff, super_map, v_expanded);
+                double L_rt = brute_force_pauplin_bme_length(v_expanded, D, N, NULL);
+                if (fabs(L_rt - L_base) > 1e-11) test8_ok = 0;
+
+                /* Compute discrete gradient on condensed tree (n_eff x n_eff) and compare EVERY entry
+                 * against mutating v_eff[i] = j, re-expanding to N leaves, and evaluating full N x N Pauplin BME! */
+                calculate_discrete_gradient_full_c(v_eff, D_eff, n_eff, delta_eff);
+                int32_t max_cols_eff = 2 * (n_eff - 1) - 1;
+                for (int32_t i = 1; i < n_eff - 1; ++i) {
+                    for (int32_t j = 0; j <= 2 * i; ++j) {
+                        memcpy(v_eff_mut, v_eff, (size_t)(n_eff - 1) * sizeof(int64_t));
+                        v_eff_mut[i] = j;
+                        expand_condensed_tree_to_v_c(v_orig, N, v_eff_mut, n_eff, super_map, v_expanded);
+                        double L_mut_full = brute_force_pauplin_bme_length(v_expanded, D, N, NULL);
+                        double exact_full_diff = L_mut_full - L_base;
+                        double mb_grad_val = delta_eff[i * max_cols_eff + j];
+                        double err = fabs(mb_grad_val - exact_full_diff);
+                        if (err > max_mb_grad_err) max_mb_grad_err = err;
+                        total_mb_entries++;
+                    }
+                }
+            }
+
+            /* Also verify that multi-batch optimization strictly improves the global N-leaf BME length */
+            double L_mb_opt = optimize_phylo2vec_bme_minibatch_c(v_orig, D, N, 16, 6, v_mb_out);
+            double L_mb_check = brute_force_pauplin_bme_length(v_mb_out, D, N, NULL);
+            if (fabs(L_mb_opt - L_mb_check) > 1e-10 || L_mb_opt > L_base + 1e-10) test8_ok = 0;
+        }
+        if (max_mb_grad_err > 1e-10) test8_ok = 0;
+        printf("[%s] Test 8: Clade-Condensed Minibatch BME Theorem & Optimizer (N=%d, N_eff=16, %d SPR entries)\n",
+               test8_ok ? "PASS" : "FAIL", N, total_mb_entries);
+        printf("       Max error between condensed N_eff gradient and full N-leaf Pauplin BME: %.3e\n\n",
+               max_mb_grad_err);
+        if (!test8_ok) all_passed = 0;
     }
 
     if (!all_passed) {

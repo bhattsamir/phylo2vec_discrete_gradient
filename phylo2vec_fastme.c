@@ -2160,6 +2160,379 @@ double optimize_phylo2vec_bme_c(
     return curr_L;
 }
 
+/* ============================================================================
+ * 7. Exact Clade-Condensed Minibatch BME Gradient & Optimizer (Theorem 5.5)
+ * ============================================================================ */
+
+static void decode_v_to_rooted_children(
+    const int64_t * restrict v,
+    int32_t n_leaves,
+    int32_t * restrict child1_r,
+    int32_t * restrict child2_r,
+    int32_t * restrict scratch_i
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    int32_t *pairs = scratch_i;
+    int32_t *parents_uf = scratch_i + 2 * n_pairs;
+
+    int32_t is_cf = 1;
+    for (int32_t i = 1; i < n_pairs; ++i) {
+        if (v[i] > i) { is_cf = 0; break; }
+    }
+    if (is_cf) {
+        for (int32_t x = 0; x < n_leaves; ++x) parents_uf[x] = x;
+        for (int32_t k = 0; k < n_pairs; ++k) {
+            int32_t i = n_pairs - 1 - k;
+            int32_t m = n_leaves + k;
+            int32_t x = (int32_t)v[i];
+            int32_t y = i + 1;
+            child1_r[m] = parents_uf[y];
+            child2_r[m] = parents_uf[x];
+            parents_uf[x] = m;
+        }
+    } else {
+        decode_v_to_pairs_fast(v, n_pairs, pairs);
+        for (int32_t i = 0; i < n_nodes_r; ++i) parents_uf[i] = i;
+        int32_t next_parent = n_leaves;
+        for (int32_t i = 0; i < n_pairs; ++i) {
+            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
+            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
+            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
+            child1_r[next_parent] = p2;
+            child2_r[next_parent] = p1;
+            parents_uf[p1] = next_parent;
+            parents_uf[p2] = next_parent;
+            next_parent++;
+        }
+    }
+}
+
+void condense_tree_bme_c(
+    const int64_t * restrict v,
+    const double * restrict D,
+    int32_t n_leaves,
+    const uint8_t * restrict is_condensed_node,
+    int32_t * restrict n_eff_out,
+    int64_t * restrict v_eff_out,
+    int32_t * restrict super_node_map_out,
+    int32_t * restrict leaf_to_super_out,
+    double * restrict omega_leaf_out,
+    double * restrict D_eff_out
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    const int32_t root_r = n_nodes_r - 1;
+
+    int32_t *buf = (int32_t *)malloc((size_t)(7 * n_nodes_r + 2 * n_pairs) * sizeof(int32_t));
+    double *w_node = (double *)malloc((size_t)n_nodes_r * sizeof(double));
+    if (!buf || !w_node) { free(buf); free(w_node); return; }
+
+    int32_t *child1_r = buf;
+    int32_t *child2_r = child1_r + n_nodes_r;
+    int32_t *active_int = child2_r + n_nodes_r;
+    int32_t *min_node = active_int + n_nodes_r;
+    int32_t *rep_label = min_node + n_nodes_r;
+    int32_t *q_sub = rep_label + n_nodes_r;
+    int32_t *scratch = q_sub + n_nodes_r;
+
+    decode_v_to_rooted_children(v, n_leaves, child1_r, child2_r, scratch);
+
+    /* 1. Top-down BFS/preorder from root_r stopping at leaves < n_leaves or condensed roots */
+    int32_t n_act_int = 0;
+    active_int[n_act_int++] = root_r;
+    for (int32_t idx = 0; idx < n_act_int; ++idx) {
+        int32_t u = active_int[idx];
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        if (c1 >= n_leaves && !is_condensed_node[c1]) active_int[n_act_int++] = c1;
+        if (c2 >= n_leaves && !is_condensed_node[c2]) active_int[n_act_int++] = c2;
+    }
+    const int32_t n_eff = n_act_int + 1;
+    *n_eff_out = n_eff;
+
+    /* 2. Bottom-up min_node for deterministic cherry-first ordering on condensed tree */
+    for (int32_t u = 0; u < n_nodes_r; ++u) min_node[u] = u;
+    for (int32_t idx = n_act_int - 1; idx >= 0; --idx) {
+        int32_t u = active_int[idx];
+        int32_t m1 = min_node[child1_r[u]], m2 = min_node[child2_r[u]];
+        min_node[u] = (m1 < m2) ? m1 : m2;
+    }
+
+    /* 3. Top-down cherry-first label assignment on active_int (Theorem 2.1) */
+    rep_label[root_r] = 0;
+    int32_t next_label = 1;
+    for (int32_t idx = 0; idx < n_act_int; ++idx) {
+        int32_t u = active_int[idx];
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        int32_t c_stay = (min_node[c1] < min_node[c2]) ? c1 : c2;
+        int32_t c_move = (min_node[c1] < min_node[c2]) ? c2 : c1;
+        int32_t x = rep_label[u];
+        int32_t y = next_label++;
+        rep_label[c_stay] = x;
+        rep_label[c_move] = y;
+        v_eff_out[y - 1] = x;
+
+        if (c_stay < n_leaves || is_condensed_node[c_stay]) super_node_map_out[x] = c_stay;
+        if (c_move < n_leaves || is_condensed_node[c_move]) super_node_map_out[y] = c_move;
+    }
+
+    /* 4. Compute exact balanced weights omega_x = 2^{-d_{S_z}(r_z, x)} in O(N) time */
+    for (int32_t z = 0; z < n_eff; ++z) {
+        int32_t r_z = super_node_map_out[z];
+        if (r_z < n_leaves) {
+            leaf_to_super_out[r_z] = z;
+            omega_leaf_out[r_z] = 1.0;
+        } else {
+            int32_t head = 0, tail = 0;
+            q_sub[tail++] = r_z;
+            w_node[r_z] = 1.0;
+            while (head < tail) {
+                int32_t u = q_sub[head++];
+                double wu = 0.5 * w_node[u];
+                int32_t c1 = child1_r[u], c2 = child2_r[u];
+                w_node[c1] = wu;
+                w_node[c2] = wu;
+                if (c1 < n_leaves) {
+                    leaf_to_super_out[c1] = z;
+                    omega_leaf_out[c1] = wu;
+                } else {
+                    q_sub[tail++] = c1;
+                }
+                if (c2 < n_leaves) {
+                    leaf_to_super_out[c2] = z;
+                    omega_leaf_out[c2] = wu;
+                } else {
+                    q_sub[tail++] = c2;
+                }
+            }
+        }
+    }
+
+    /* 5. Materialize condensed distance matrix D_eff (N_eff x N_eff) if D is provided */
+    if (D && D_eff_out) {
+        memset(D_eff_out, 0, (size_t)n_eff * n_eff * sizeof(double));
+        for (int32_t x = 0; x < n_leaves; ++x) {
+            int32_t zx = leaf_to_super_out[x];
+            double wx = omega_leaf_out[x];
+            const double * restrict d_row = &D[(size_t)x * n_leaves];
+            double * restrict deff_row = &D_eff_out[(size_t)zx * n_eff];
+            for (int32_t y = 0; y < n_leaves; ++y) {
+                int32_t zy = leaf_to_super_out[y];
+                if (zx != zy) {
+                    deff_row[zy] += wx * omega_leaf_out[y] * d_row[y];
+                }
+            }
+        }
+    }
+
+    free(w_node);
+    free(buf);
+}
+
+void expand_condensed_tree_to_v_c(
+    const int64_t * restrict v_orig,
+    int32_t n_leaves,
+    const int64_t * restrict v_eff,
+    int32_t n_eff,
+    const int32_t * restrict super_node_map,
+    int64_t * restrict v_expanded_out
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    const int32_t n_nodes_eff = 2 * n_eff - 1;
+
+    int32_t *buf = (int32_t *)malloc((size_t)(7 * n_nodes_r + 2 * n_nodes_eff + 2 * n_pairs) * sizeof(int32_t));
+    uint8_t *in_condensed_sub = (uint8_t *)calloc((size_t)n_nodes_r, sizeof(uint8_t));
+    if (!buf || !in_condensed_sub) { free(buf); free(in_condensed_sub); return; }
+
+    int32_t *orig_c1 = buf;
+    int32_t *orig_c2 = orig_c1 + n_nodes_r;
+    int32_t *full_c1 = orig_c2 + n_nodes_r;
+    int32_t *full_c2 = full_c1 + n_nodes_r;
+    int32_t *q_sub = full_c2 + n_nodes_r;
+    int32_t *eff_c1 = q_sub + n_nodes_r;
+    int32_t *eff_c2 = eff_c1 + n_nodes_eff;
+    int32_t *scratch = eff_c2 + n_nodes_eff;
+
+    decode_v_to_rooted_children(v_orig, n_leaves, orig_c1, orig_c2, scratch);
+    decode_v_to_rooted_children(v_eff, n_eff, eff_c1, eff_c2, scratch);
+
+    memcpy(full_c1, orig_c1, (size_t)n_nodes_r * sizeof(int32_t));
+    memcpy(full_c2, orig_c2, (size_t)n_nodes_r * sizeof(int32_t));
+
+    /* Mark all internal nodes strictly inside or at the root of condensed subtrees */
+    for (int32_t z = 0; z < n_eff; ++z) {
+        int32_t r_z = super_node_map[z];
+        if (r_z >= n_leaves) {
+            int32_t head = 0, tail = 0;
+            q_sub[tail++] = r_z;
+            in_condensed_sub[r_z] = 1;
+            while (head < tail) {
+                int32_t u = q_sub[head++];
+                int32_t c1 = orig_c1[u], c2 = orig_c2[u];
+                if (c1 >= n_leaves) { in_condensed_sub[c1] = 1; q_sub[tail++] = c1; }
+                if (c2 >= n_leaves) { in_condensed_sub[c2] = 1; q_sub[tail++] = c2; }
+            }
+        }
+    }
+
+    /* Map the (n_eff - 1) internal nodes of eff_c1/eff_c2 to the available internal node slots of full_c1/full_c2 */
+    int32_t *eff_to_full = q_sub;
+    for (int32_t z = 0; z < n_eff; ++z) {
+        eff_to_full[z] = super_node_map[z];
+    }
+    int32_t next_free_u = n_leaves;
+    for (int32_t w_eff = n_eff; w_eff < n_nodes_eff - 1; ++w_eff) {
+        while (next_free_u < n_nodes_r - 1 && in_condensed_sub[next_free_u]) next_free_u++;
+        eff_to_full[w_eff] = next_free_u++;
+    }
+    eff_to_full[n_nodes_eff - 1] = n_nodes_r - 1;
+
+    for (int32_t w_eff = n_eff; w_eff < n_nodes_eff; ++w_eff) {
+        int32_t u_full = eff_to_full[w_eff];
+        full_c1[u_full] = eff_to_full[eff_c1[w_eff]];
+        full_c2[u_full] = eff_to_full[eff_c2[w_eff]];
+    }
+
+    encode_rooted_to_v_c(full_c1, full_c2, n_leaves, v_expanded_out);
+
+    free(in_condensed_sub);
+    free(buf);
+}
+
+void select_minibatch_clades_c(
+    const int64_t * restrict v,
+    int32_t n_leaves,
+    int32_t target_n_eff,
+    int32_t batch_idx,
+    uint8_t * restrict is_condensed_node_out
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    const int32_t root_r = n_nodes_r - 1;
+    memset(is_condensed_node_out, 0, (size_t)n_nodes_r * sizeof(uint8_t));
+    if (target_n_eff >= n_leaves) return;
+
+    int32_t *buf = (int32_t *)malloc((size_t)(8 * n_nodes_r + 2 * n_pairs) * sizeof(int32_t));
+    if (!buf) return;
+    int32_t *child1_r = buf;
+    int32_t *child2_r = child1_r + n_nodes_r;
+    int32_t *dfs_stack = child2_r + n_nodes_r;
+    int32_t *dfs_leaves = dfs_stack + n_nodes_r;
+    int32_t *has_active = dfs_leaves + n_leaves;
+    int32_t *sub_leaves = has_active + n_nodes_r;
+    int32_t *scratch = sub_leaves + n_nodes_r;
+
+    decode_v_to_rooted_children(v, n_leaves, child1_r, child2_r, scratch);
+
+    /* Collect leaves in Euler-tour DFS order and post-order internal nodes */
+    int32_t sp = 0, n_dfs_leaves = 0, n_pre = 0;
+    int32_t *preorder = scratch;
+    dfs_stack[sp++] = root_r;
+    while (sp > 0) {
+        int32_t u = dfs_stack[--sp];
+        if (u < n_leaves) {
+            dfs_leaves[n_dfs_leaves++] = u;
+        } else {
+            preorder[n_pre++] = u;
+            dfs_stack[sp++] = child2_r[u];
+            dfs_stack[sp++] = child1_r[u];
+        }
+    }
+
+    int32_t win_size = (target_n_eff * 2) / 3;
+    if (win_size < 4) win_size = 4;
+    if (win_size > target_n_eff - 2) win_size = target_n_eff - 2;
+    int32_t stride = (win_size > 2) ? (win_size / 2) : 1;
+    int32_t start_idx = (batch_idx * stride) % n_leaves;
+
+    memset(has_active, 0, (size_t)n_nodes_r * sizeof(int32_t));
+    for (int32_t k = 0; k < win_size; ++k) {
+        int32_t leaf = dfs_leaves[(start_idx + k) % n_leaves];
+        has_active[leaf] = 1;
+    }
+    for (int32_t u = 0; u < n_leaves; ++u) sub_leaves[u] = 1;
+    for (int32_t idx = n_pre - 1; idx >= 0; --idx) {
+        int32_t u = preorder[idx];
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        has_active[u] = has_active[c1] | has_active[c2];
+        sub_leaves[u] = sub_leaves[c1] + sub_leaves[c2];
+    }
+
+    /* Collect maximal inactive subtrees (where has_active[u] == 0 and has_active[parent] == 1) */
+    int32_t *inactive_roots = dfs_stack;
+    int32_t n_inactive = 0;
+    for (int32_t idx = 0; idx < n_pre; ++idx) {
+        int32_t u = preorder[idx];
+        if (has_active[u]) {
+            int32_t c1 = child1_r[u], c2 = child2_r[u];
+            if (!has_active[c1]) inactive_roots[n_inactive++] = c1;
+            if (!has_active[c2]) inactive_roots[n_inactive++] = c2;
+        }
+    }
+
+    /* Split largest inactive clade roots until win_size + n_inactive reaches target_n_eff */
+    while (win_size + n_inactive < target_n_eff) {
+        int32_t best_k = -1, best_sz = 1;
+        for (int32_t k = 0; k < n_inactive; ++k) {
+            int32_t u = inactive_roots[k];
+            if (u >= n_leaves && sub_leaves[u] > best_sz) {
+                best_sz = sub_leaves[u];
+                best_k = k;
+            }
+        }
+        if (best_k == -1) break;
+        int32_t u = inactive_roots[best_k];
+        inactive_roots[best_k] = child1_r[u];
+        inactive_roots[n_inactive++] = child2_r[u];
+    }
+
+    for (int32_t k = 0; k < n_inactive; ++k) {
+        int32_t u = inactive_roots[k];
+        if (u >= n_leaves) is_condensed_node_out[u] = 1;
+    }
+
+    free(buf);
+}
+
+double optimize_phylo2vec_bme_minibatch_c(
+    const int64_t * restrict v_init,
+    const double * restrict D,
+    int32_t n_leaves,
+    int32_t target_n_eff,
+    int32_t n_batches,
+    int64_t * restrict v_out
+) {
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    memcpy(v_out, v_init, (size_t)n_pairs * sizeof(int64_t));
+
+    uint8_t *is_cond = (uint8_t *)malloc((size_t)n_nodes_r * sizeof(uint8_t));
+    int64_t *v_eff = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
+    int64_t *v_eff_opt = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
+    int32_t *super_map = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
+    int32_t *leaf_to_super = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
+    double *omega = (double *)malloc((size_t)n_leaves * sizeof(double));
+    double *D_eff = (double *)malloc((size_t)n_leaves * n_leaves * sizeof(double));
+
+    for (int32_t b = 0; b < n_batches; ++b) {
+        select_minibatch_clades_c(v_out, n_leaves, target_n_eff, b, is_cond);
+        int32_t n_eff = 0;
+        condense_tree_bme_c(v_out, D, n_leaves, is_cond, &n_eff, v_eff, super_map, leaf_to_super, omega, D_eff);
+        int32_t evals = 0;
+        double ms = 0.0;
+        optimize_phylo2vec_bme_c(v_eff, D_eff, n_eff, v_eff_opt, &evals, &ms);
+        expand_condensed_tree_to_v_c(v_out, n_leaves, v_eff_opt, n_eff, super_map, v_out);
+    }
+
+    if (ensure_workspace(n_leaves) != 0) return -1.0;
+    double final_L = evaluate_bme_length_fast(v_out, D, n_leaves, g_iwork, g_dwork);
+
+    free(D_eff); free(omega); free(leaf_to_super); free(super_map);
+    free(v_eff_opt); free(v_eff); free(is_cond);
+    return final_L;
+}
+
 #ifdef __cplusplus
 }
 #endif

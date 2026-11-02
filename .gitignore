@@ -22,3 +22,15 @@ venv/
 *.synctex.gz
 *.fls
 *.fdb_latexmk
+
+# Local datasets and third-party tool checkouts (only the scripts are tracked)
+rnasim_data/*
+!rnasim_data/*.py
+
+# Build outputs from this repo's sources
+*.so
+phylo2vec_cuda_bench
+phylo2vec_cuda_verify
+bench_minibatch_recovery
+bench_rnasim_gpu
+verify_eigen_dist

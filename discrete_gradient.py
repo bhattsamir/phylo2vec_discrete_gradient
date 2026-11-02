@@ -2,8 +2,19 @@ import ctypes
 import os
 import subprocess
 import sys
-import numba as nb
 import numpy as np
+
+try:
+    import numba as nb
+except ImportError:
+    class _DummyNumba:
+        def njit(self, *args, **kwargs):
+            if len(args) == 1 and callable(args[0]) and not kwargs:
+                return args[0]
+            def decorator(fn):
+                return fn
+            return decorator
+    nb = _DummyNumba()
 
 
 # ==============================================================================
