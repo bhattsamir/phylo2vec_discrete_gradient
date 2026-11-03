@@ -1,0 +1,487 @@
+{
+  "checks": 60,
+  "max_error": 3.552713678800501e-15,
+  "cases": [
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 0,
+      "emulated": 0.5280477404594421,
+      "reference": 0.5280477404594421,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 1,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 2,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 1,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 0,
+      "emulated": 0.5016826838756403,
+      "reference": 0.5016826838756403,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 1,
+      "emulated": 1.5000000447034836,
+      "reference": 1.5000000447034836,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 2,
+      "emulated": 1.5000000447034836,
+      "reference": 1.5000000447034836,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 3,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 0,
+      "emulated": 0.5011521131143599,
+      "reference": 0.5011521131143599,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 1,
+      "emulated": 1.5000000447034836,
+      "reference": 1.5000000447034836,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 2,
+      "emulated": 1.5000000447034836,
+      "reference": 1.5000000447034836,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 3,
+      "emulated": 0.16855842377419528,
+      "reference": 0.16855842377419528,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 3,
+      "nb": 1,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 0,
+      "emulated": 0.5501802772166449,
+      "reference": 0.5501802772166449,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 1,
+      "emulated": 1.5000000887084752,
+      "reference": 1.5000000887084752,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 2,
+      "emulated": 1.5000000887084752,
+      "reference": 1.5000000887084752,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 255,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 0,
+      "emulated": 0.5438146537635475,
+      "reference": 0.5438146537635475,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 1,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 2,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 256,
+      "nb": 1,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 0,
+      "emulated": 0.5419853442039697,
+      "reference": 0.5419853442039702,
+      "error": 4.440892098500626e-16
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 1,
+      "emulated": 1.499999999650754,
+      "reference": 1.499999999650754,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 2,
+      "emulated": 1.499999999650754,
+      "reference": 1.499999999650754,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 257,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 0,
+      "emulated": 0.5395429306372534,
+      "reference": 0.5395429306372534,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 1,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 2,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 3,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 1,
+      "nb": 2048,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 0,
+      "emulated": 0.546112438224024,
+      "reference": 0.5461124382240241,
+      "error": 1.1102230246251565e-16
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 1,
+      "emulated": 1.500000033527613,
+      "reference": 1.5000000335276094,
+      "error": 3.552713678800501e-15
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 2,
+      "emulated": 1.500000033527613,
+      "reference": 1.5000000335276094,
+      "error": 3.552713678800501e-15
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 3,
+      "emulated": 0.10718937504832457,
+      "reference": 0.10718937504832458,
+      "error": 1.3877787807814457e-17
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 5,
+      "nb": 19,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 0,
+      "emulated": 0.5312037436109676,
+      "reference": 0.5312037436109672,
+      "error": 3.3306690738754696e-16
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 1,
+      "emulated": 1.500000033527613,
+      "reference": 1.5000000335276094,
+      "error": 3.552713678800501e-15
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 2,
+      "emulated": 1.500000033527613,
+      "reference": 1.5000000335276094,
+      "error": 3.552713678800501e-15
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 3,
+      "emulated": 0.14871574439374918,
+      "reference": 0.14871574439374916,
+      "error": 2.7755575615628914e-17
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 19,
+      "nb": 5,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 0,
+      "emulated": 0.5324223752541002,
+      "reference": 0.5324223752541002,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 1,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 2,
+      "emulated": 1.5,
+      "reference": 1.5,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 3,
+      "emulated": 0.13349460436438676,
+      "reference": 0.13349460436438676,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 4,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    },
+    {
+      "na": 32,
+      "nb": 64,
+      "mode": 5,
+      "emulated": 0.0,
+      "reference": 0.0,
+      "error": 0.0
+    }
+  ],
+  "scope": "Serial CPU barrier-phase emulation using current kernel body and source scalar distance function. Not native CUDA."
+}

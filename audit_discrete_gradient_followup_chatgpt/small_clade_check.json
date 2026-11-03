@@ -1,0 +1,38 @@
+[
+  {
+    "n": 4,
+    "representatives": 4,
+    "truth_weights": [
+      0.125,
+      0.125,
+      0.25,
+      0.5
+    ],
+    "representative_weights": [
+      0.25,
+      0.0,
+      0.25,
+      0.5
+    ],
+    "max_error": 0.125
+  },
+  {
+    "n": 5,
+    "representatives": 8,
+    "truth_weights": [
+      0.0625,
+      0.0625,
+      0.125,
+      0.25,
+      0.5
+    ],
+    "representative_weights": [
+      0.125,
+      0.0,
+      0.125,
+      0.25,
+      0.5
+    ],
+    "max_error": 0.0625
+  }
+]

@@ -1,0 +1,308 @@
+{
+  "cases": 50,
+  "batched_outputs": 610,
+  "max_error": 1.687538997430238e-14,
+  "all": [
+    {
+      "pairs": 1,
+      "mode": 0,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 1,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 1,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 1,
+      "mode": 3,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 1,
+      "mode": 4,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 2,
+      "mode": 0,
+      "batched_outputs": 2,
+      "error": 1.2878587085651816e-14
+    },
+    {
+      "pairs": 2,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 2,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 2,
+      "mode": 3,
+      "batched_outputs": 2,
+      "error": 0.0
+    },
+    {
+      "pairs": 2,
+      "mode": 4,
+      "batched_outputs": 2,
+      "error": 0.0
+    },
+    {
+      "pairs": 3,
+      "mode": 0,
+      "batched_outputs": 3,
+      "error": 1.2878587085651816e-14
+    },
+    {
+      "pairs": 3,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 3,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 3,
+      "mode": 3,
+      "batched_outputs": 3,
+      "error": 0.0
+    },
+    {
+      "pairs": 3,
+      "mode": 4,
+      "batched_outputs": 3,
+      "error": 0.0
+    },
+    {
+      "pairs": 15,
+      "mode": 0,
+      "batched_outputs": 15,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 15,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 15,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 15,
+      "mode": 3,
+      "batched_outputs": 15,
+      "error": 0.0
+    },
+    {
+      "pairs": 15,
+      "mode": 4,
+      "batched_outputs": 15,
+      "error": 0.0
+    },
+    {
+      "pairs": 16,
+      "mode": 0,
+      "batched_outputs": 16,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 16,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 16,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 16,
+      "mode": 3,
+      "batched_outputs": 16,
+      "error": 0.0
+    },
+    {
+      "pairs": 16,
+      "mode": 4,
+      "batched_outputs": 15,
+      "error": 0.0
+    },
+    {
+      "pairs": 17,
+      "mode": 0,
+      "batched_outputs": 16,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 17,
+      "mode": 1,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 17,
+      "mode": 2,
+      "batched_outputs": 0,
+      "error": 0.0
+    },
+    {
+      "pairs": 17,
+      "mode": 3,
+      "batched_outputs": 16,
+      "error": 0.0
+    },
+    {
+      "pairs": 17,
+      "mode": 4,
+      "batched_outputs": 15,
+      "error": 0.0
+    },
+    {
+      "pairs": 31,
+      "mode": 0,
+      "batched_outputs": 31,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 31,
+      "mode": 1,
+      "batched_outputs": 5,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 31,
+      "mode": 2,
+      "batched_outputs": 2,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 31,
+      "mode": 3,
+      "batched_outputs": 31,
+      "error": 0.0
+    },
+    {
+      "pairs": 31,
+      "mode": 4,
+      "batched_outputs": 30,
+      "error": 0.0
+    },
+    {
+      "pairs": 32,
+      "mode": 0,
+      "batched_outputs": 32,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 32,
+      "mode": 1,
+      "batched_outputs": 5,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 32,
+      "mode": 2,
+      "batched_outputs": 2,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 32,
+      "mode": 3,
+      "batched_outputs": 32,
+      "error": 0.0
+    },
+    {
+      "pairs": 32,
+      "mode": 4,
+      "batched_outputs": 30,
+      "error": 0.0
+    },
+    {
+      "pairs": 33,
+      "mode": 0,
+      "batched_outputs": 32,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 33,
+      "mode": 1,
+      "batched_outputs": 5,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 33,
+      "mode": 2,
+      "batched_outputs": 2,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 33,
+      "mode": 3,
+      "batched_outputs": 32,
+      "error": 0.0
+    },
+    {
+      "pairs": 33,
+      "mode": 4,
+      "batched_outputs": 30,
+      "error": 0.0
+    },
+    {
+      "pairs": 48,
+      "mode": 0,
+      "batched_outputs": 48,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 48,
+      "mode": 1,
+      "batched_outputs": 8,
+      "error": 1.687538997430238e-14
+    },
+    {
+      "pairs": 48,
+      "mode": 2,
+      "batched_outputs": 6,
+      "error": 1.509903313490213e-14
+    },
+    {
+      "pairs": 48,
+      "mode": 3,
+      "batched_outputs": 48,
+      "error": 0.0
+    },
+    {
+      "pairs": 48,
+      "mode": 4,
+      "batched_outputs": 45,
+      "error": 0.0
+    }
+  ],
+  "scope": "CPU phase emulation of new batching branch, scalar fallback omitted, native CUDA not executed."
+}

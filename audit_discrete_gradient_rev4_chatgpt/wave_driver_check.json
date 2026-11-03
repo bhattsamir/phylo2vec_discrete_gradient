@@ -1,0 +1,10 @@
+{
+  "N": 1540,
+  "threads": 1,
+  "initial_full_graph_BME": 3.3833344113081694,
+  "controller_reported_delta": -0.02874351479113102,
+  "final_full_graph_BME": 3.433860246092081,
+  "actual_delta": 0.050525834783911705,
+  "applied_proposals": 2,
+  "scope": "Unmodified source wave controller with controlled exact-local-acceptance proposal callback replacing GPU optimizer. Independent full expanded-tree graph score."
+}

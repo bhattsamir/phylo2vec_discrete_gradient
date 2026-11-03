@@ -1,0 +1,35 @@
+{
+  "captured_utc": "2026-11-02T20:10:03.542280+00:00",
+  "commit": "838d97da5b3035b0612320b1849093438c795e17",
+  "sha256": {
+    "Makefile": "6dcf7c61985136f1c4f20f5df252c3772a035d81a068f6d6f9b46abe639afe72",
+    "README.md": "9d0f135c85d71f1384f39e241b92e6970b3be1ca7594336c5568d47c2d412c79",
+    "bench_minibatch_recovery.cu": "8bd38cd6b5b514a9ad8bf658c6467ea736fb2785f18272cad771cdf784867821",
+    "bench_optimizers.c": "c8bef1c2f6179841009414ca3dcd3683a8b5e709bae39584f73449a6afaf46ae",
+    "bench_parallel_gpu.m": "67bf9f7ab81317146f5fbcf0d7e03e28780e43278dad5b008fd9dd7e06f09591",
+    "bench_rnasim_gpu.cu": "d7c47a6513c94e631ad75d5da2906db68630daae42c6d831d01647eda4c75756",
+    "compare_with_fastme_cli.py": "2a42c5d2d12074197abafac7e41f7df37ca481693d7061fd962066b958261cc8",
+    "discrete_gradient.py": "400894ef5fe58e29a543ee0e981a82fc5140b1a120c4b2df882823ca48b8c1ff",
+    "eigen_distance.py": "be8b7e78d08d065c649ce0327c1230c6ba4928171d2c2916aa9dfda1981a27b5",
+    "phylo2vec_cuda_8xh100.cu": "1be4b15a9c4a952d4cad82469bcc444fc7ba055aaeb1c51c56d6cde927f6e5b7",
+    "phylo2vec_eigen_dist.c": "8b3ce5106c8a2bd86d291be4d778ad0498a5424658db01c7cad4ea2b9f031a7a",
+    "phylo2vec_eigen_dist.h": "bcd485dd0b0009ea911217c8c64edaec9a528c787fee3bae27c83e2210e36b13",
+    "phylo2vec_eigen_dist_cuda.cu": "d9861c92528765c6be099c911d48233833e86999581f9fe5e70862b60c92c363",
+    "phylo2vec_fastme.c": "0a9b07d735012eeb539bb439e8885f693d53a8bbaf531c892ab644db36f5b397",
+    "verify_all.c": "6bcece43e32e41b990e9d1732d42204d777da2c78d2f99d29b832baeab93ab37",
+    "verify_eigen_dist.cu": "6b5cb10b5a4c2ed4179fbd35e32fdb0ed3a33a83dc82eef94a82dd40b1a48c0b",
+    "verify_spr_coverage.py": "d520d7b430b6008d8cfac3ff98f761e92b3acf9e2eb306714e834c04c2891117",
+    "paper/phylo2vec_bme_paper.tex": "bb94b0e3d261563589fb8a114b471fe18d83485eda7939f009cdb9e958619579",
+    "phylo2vec_bme_paper.tex": "bb94b0e3d261563589fb8a114b471fe18d83485eda7939f009cdb9e958619579"
+  },
+  "changed_since_first_review": [
+    "bench_minibatch_recovery.cu",
+    "bench_rnasim_gpu.cu",
+    "discrete_gradient.py",
+    "phylo2vec_cuda_8xh100.cu",
+    "phylo2vec_fastme.c",
+    "verify_all.c",
+    "paper/phylo2vec_bme_paper.tex",
+    "phylo2vec_bme_paper.tex"
+  ]
+}

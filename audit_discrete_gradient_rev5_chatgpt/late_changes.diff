@@ -1,0 +1,101 @@
+--- initial/bench_rnasim_gpu.cu
++++ late/bench_rnasim_gpu.cu
+@@ -267,6 +267,98 @@
+ ) {
+     int32_t pid = blockIdx.x;
+     if (pid >= n_pairs) return;
++
++    const int32_t base_pid = pid & ~15;
++    const int32_t b0 = d_pair_b[base_pid];
++    const int32_t off_b0 = d_exact_offsets[b0], end_b0 = d_exact_offsets[b0 + 1];
++    const int32_t len_b0 = end_b0 - off_b0;
++    int32_t batch_sz = 0;
++    if (5 * W == 125 && len_b0 > 1) {
++        int32_t max_k = n_pairs - base_pid;
++        if (max_k > 16) max_k = 16;
++        for (int32_t k = 0; k < max_k; ++k) {
++            int32_t ak = d_pair_a[base_pid + k];
++            int32_t bk = d_pair_b[base_pid + k];
++            int32_t lak = d_exact_offsets[ak + 1] - d_exact_offsets[ak];
++            if (bk == b0 && lak == 1) batch_sz++;
++            else break;
++        }
++    }
++    if (batch_sz >= 2 && pid < base_pid + batch_sz) {
++        if (pid != base_pid) return;
++        __shared__ uint64_t s_batch_seq_a[16][125];
++        __shared__ double s_wa[16];
++        for (int32_t idx = threadIdx.x; idx < batch_sz * 125; idx += blockDim.x) {
++            int32_t k = idx / 125;
++            int32_t w = idx % 125;
++            int32_t ak = d_pair_a[base_pid + k];
++            int32_t la = d_exact_leaves[d_exact_offsets[ak]];
++            s_batch_seq_a[k][w] = d_packed_seqs[(size_t)la * 125 + w];
++        }
++        if (threadIdx.x < (uint32_t)batch_sz) {
++            int32_t ak = d_pair_a[base_pid + threadIdx.x];
++            s_wa[threadIdx.x] = (double)d_exact_weights[d_exact_offsets[ak]];
++        }
++        __syncthreads();
++
++        double my_sums[16];
++        #pragma unroll
++        for (int32_t k = 0; k < 16; ++k) my_sums[k] = 0.0;
++
++        for (int32_t q = off_b0 + threadIdx.x; q < end_b0; q += blockDim.x) {
++            float wq = d_exact_weights[q];
++            if (wq == 0.0f) continue;
++            int32_t lb = d_exact_leaves[q];
++            const uint64_t *sy = d_packed_seqs + (size_t)lb * 125;
++            int32_t n_valid[16], n_match[16];
++            #pragma unroll
++            for (int32_t k = 0; k < 16; ++k) { n_valid[k] = 0; n_match[k] = 0; }
++            for (int32_t w = 0; w < 25; ++w) {
++                uint64_t sy0 = sy[0 * 25 + w];
++                uint64_t sy1 = sy[1 * 25 + w];
++                uint64_t sy2 = sy[2 * 25 + w];
++                uint64_t sy3 = sy[3 * 25 + w];
++                uint64_t sy4 = sy[4 * 25 + w];
++                for (int32_t k = 0; k < batch_sz; ++k) {
++                    n_valid[k] += __popcll(s_batch_seq_a[k][4 * 25 + w] & sy4);
++                    uint64_t m = (s_batch_seq_a[k][0 * 25 + w] & sy0)
++                               | (s_batch_seq_a[k][1 * 25 + w] & sy1)
++                               | (s_batch_seq_a[k][2 * 25 + w] & sy2)
++                               | (s_batch_seq_a[k][3 * 25 + w] & sy3);
++                    n_match[k] += __popcll(m);
++                }
++            }
++            for (int32_t k = 0; k < batch_sz; ++k) {
++                float d_jc = 1.5f;
++                if (n_valid[k] > 0) {
++                    float p = (float)(n_valid[k] - n_match[k]) / (float)n_valid[k];
++                    if (p >= 0.74f) p = 0.74f;
++                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
++                    if (d_jc < 0.0f) d_jc = 0.0f;
++                }
++                my_sums[k] += (s_wa[k] * (double)wq) * (double)d_jc;
++            }
++        }
++        __shared__ double s_red[256];
++        for (int32_t k = 0; k < batch_sz; ++k) {
++            s_red[threadIdx.x] = my_sums[k];
++            __syncthreads();
++            for (int32_t s = 128; s > 0; s >>= 1) {
++                if (threadIdx.x < s) s_red[threadIdx.x] += s_red[threadIdx.x + s];
++                __syncthreads();
++            }
++            if (threadIdx.x == 0) {
++                double exact_val = s_red[0];
++                int32_t ak = d_pair_a[base_pid + k];
++                d_pair_exact_D[base_pid + k] = exact_val;
++                d_D_cond[(size_t)ak * K + b0] = (float)exact_val;
++                d_D_cond[(size_t)b0 * K + ak] = (float)exact_val;
++            }
++            __syncthreads();
++        }
++        return;
++    }
++
+     int32_t a = d_pair_a[pid];
+     int32_t b = d_pair_b[pid];
+     int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];

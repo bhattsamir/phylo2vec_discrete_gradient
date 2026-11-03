@@ -1,0 +1,116 @@
+[
+  {
+    "reverse_window_order": false,
+    "configured_gpus": 1,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.025448983535170555,
+    "final_BME": 3.357885427772999,
+    "actual_delta": -0.025448983535170555,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "B",
+        "delta": -0.025448983535170555
+      },
+      {
+        "target": "A",
+        "delta": 0.07597481831908226
+      }
+    ]
+  },
+  {
+    "reverse_window_order": false,
+    "configured_gpus": 2,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.025448983535170555,
+    "final_BME": 3.357885427772999,
+    "actual_delta": -0.025448983535170555,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "B",
+        "delta": -0.025448983535170555
+      },
+      {
+        "target": "A",
+        "delta": 0.07597481831908226
+      }
+    ]
+  },
+  {
+    "reverse_window_order": false,
+    "configured_gpus": 8,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.025448983535170555,
+    "final_BME": 3.357885427772999,
+    "actual_delta": -0.025448983535170555,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "B",
+        "delta": -0.025448983535170555
+      },
+      {
+        "target": "A",
+        "delta": 0.07597481831908226
+      }
+    ]
+  },
+  {
+    "reverse_window_order": true,
+    "configured_gpus": 1,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.0032945312559604645,
+    "final_BME": 3.380039880052209,
+    "actual_delta": -0.0032945312559604645,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "A",
+        "delta": -0.0032945312559604645
+      },
+      {
+        "target": "B",
+        "delta": 0.05382036603987217
+      }
+    ]
+  },
+  {
+    "reverse_window_order": true,
+    "configured_gpus": 2,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.0032945312559604645,
+    "final_BME": 3.380039880052209,
+    "actual_delta": -0.0032945312559604645,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "A",
+        "delta": -0.0032945312559604645
+      },
+      {
+        "target": "B",
+        "delta": 0.05382036603987217
+      }
+    ]
+  },
+  {
+    "reverse_window_order": true,
+    "configured_gpus": 8,
+    "initial_BME": 3.3833344113081694,
+    "reported_delta": -0.0032945312559604645,
+    "final_BME": 3.380039880052209,
+    "actual_delta": -0.0032945312559604645,
+    "applied_proposals": 1,
+    "attempts": [
+      {
+        "target": "A",
+        "delta": -0.0032945312559604645
+      },
+      {
+        "target": "B",
+        "delta": 0.05382036603987217
+      }
+    ]
+  }
+]

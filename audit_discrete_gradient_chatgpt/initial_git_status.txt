@@ -1,0 +1,12 @@
+ M bench_optimizers
+ M bench_rnasim_gpu.cu
+ M paper/phylo2vec_bme_paper.pdf
+ M paper/phylo2vec_bme_paper.tex
+ M phylo2vec_bme_paper.pdf
+ M rnasim_data/export_rnasim_bin.py
+ M verify_all
+?? audit_discrete_gradient_chatgpt/
+?? bench_rnasim_gpu_sm90
+?? paper/phylo2vec_bme_paper.before-formatter.tex
+?? paper/phylo2vec_bme_paper.before-humanizer.tex
+?? run_rnasim_8xh100.slurm

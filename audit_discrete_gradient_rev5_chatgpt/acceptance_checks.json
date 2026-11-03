@@ -1,0 +1,53 @@
+{
+  "new_dfs_profiles": {
+    "clade_checks": 8208,
+    "clade_max_error": 0.0,
+    "outside_checks": 4048,
+    "outside_max_error": 0.0
+  },
+  "topological_distance_checks": 224,
+  "old_counterexample_acceptance": [
+    {
+      "return": 0.0,
+      "checked_delta": 0.2421875,
+      "refined_pairs": 2,
+      "restored_initial_vector_and_permutation": true,
+      "surrogate_delta": -0.25,
+      "true_delta": 0.2421875,
+      "backend": 0,
+      "cap": 64,
+      "reverse_control": {
+        "return": -0.2421875,
+        "checked_delta": -0.2421875,
+        "refined_pairs": 2,
+        "restored_initial_vector_and_permutation": false,
+        "surrogate_delta": -1.0,
+        "true_delta": -0.2421875
+      }
+    },
+    {
+      "return": 0.0,
+      "checked_delta": 0.234375,
+      "refined_pairs": 2,
+      "restored_initial_vector_and_permutation": true,
+      "surrogate_delta": -0.25,
+      "true_delta": 0.234375,
+      "backend": 1,
+      "cap": 128,
+      "reverse_control": {
+        "return": -0.234375,
+        "checked_delta": -0.234375,
+        "refined_pairs": 2,
+        "restored_initial_vector_and_permutation": false,
+        "surrogate_delta": -1.0,
+        "true_delta": -0.234375
+      }
+    }
+  ],
+  "guard_controls": {
+    "checks": 240,
+    "accepted": 98,
+    "rejected": 142,
+    "max_delta_error": 0.0
+  }
+}

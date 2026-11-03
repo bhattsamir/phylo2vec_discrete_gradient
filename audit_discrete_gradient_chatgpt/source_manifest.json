@@ -1,0 +1,24 @@
+{
+  "captured_utc": "2026-11-02T17:35:36.090118+00:00",
+  "commit": "838d97da5b3035b0612320b1849093438c795e17",
+  "sha256": {
+    "Makefile": "6dcf7c61985136f1c4f20f5df252c3772a035d81a068f6d6f9b46abe639afe72",
+    "README.md": "9d0f135c85d71f1384f39e241b92e6970b3be1ca7594336c5568d47c2d412c79",
+    "bench_minibatch_recovery.cu": "0e5c5f4c7a581003569bb2c90498fbfb1861195cb8600b5f45ef8470db9b3127",
+    "bench_optimizers.c": "c8bef1c2f6179841009414ca3dcd3683a8b5e709bae39584f73449a6afaf46ae",
+    "bench_parallel_gpu.m": "67bf9f7ab81317146f5fbcf0d7e03e28780e43278dad5b008fd9dd7e06f09591",
+    "bench_rnasim_gpu.cu": "139abc8fb8694ba37e18327a836f431400a79158d4d4832e7ec2ae816b2af612",
+    "compare_with_fastme_cli.py": "2a42c5d2d12074197abafac7e41f7df37ca481693d7061fd962066b958261cc8",
+    "discrete_gradient.py": "0e19c452bf98e1b978100d929c0b4b237fba0e2dbd8d9a9aec42677a17142c8e",
+    "eigen_distance.py": "be8b7e78d08d065c649ce0327c1230c6ba4928171d2c2916aa9dfda1981a27b5",
+    "phylo2vec_cuda_8xh100.cu": "a8e17c23776539ae4645d7efaf0b7d516831dd65a55d58b01b11ffe464441204",
+    "phylo2vec_eigen_dist.c": "8b3ce5106c8a2bd86d291be4d778ad0498a5424658db01c7cad4ea2b9f031a7a",
+    "phylo2vec_eigen_dist.h": "bcd485dd0b0009ea911217c8c64edaec9a528c787fee3bae27c83e2210e36b13",
+    "phylo2vec_eigen_dist_cuda.cu": "d9861c92528765c6be099c911d48233833e86999581f9fe5e70862b60c92c363",
+    "phylo2vec_fastme.c": "8c9be95816b237c82b39b82ffade87ce87150aa2c08f0c6aa29f4c9bfb5090be",
+    "verify_all.c": "8a37900fff0e8744d37b23b452bdd7a3b290f52ee3bf4161f64d2cd8a597d097",
+    "verify_eigen_dist.cu": "6b5cb10b5a4c2ed4179fbd35e32fdb0ed3a33a83dc82eef94a82dd40b1a48c0b",
+    "verify_spr_coverage.py": "d520d7b430b6008d8cfac3ff98f761e92b3acf9e2eb306714e834c04c2891117",
+    "paper/phylo2vec_bme_paper.tex": "a6e691826ce15f40e407103324f6b60bbcc29476256e32e6e4ae9c5e3a3bbaba"
+  }
+}

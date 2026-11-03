@@ -1,0 +1,34 @@
+{
+  "metric": "unit pendant edges, length-one split {0,10,13}|complement, other internal edges zero",
+  "full_BME_before": 19.9354248046875,
+  "full_BME_after": 19.9647216796875,
+  "pA_true": 0.00390625,
+  "pG_true": 0.0625,
+  "true_change": 0.029296875,
+  "4": {
+    "representatives": [
+      0,
+      7,
+      8,
+      8
+    ],
+    "surrogate_before": 11.0546875,
+    "surrogate_after": 10.9609375,
+    "surrogate_change": -0.09375
+  },
+  "8": {
+    "representatives": [
+      0,
+      6,
+      7,
+      7,
+      8,
+      8,
+      8,
+      8
+    ],
+    "surrogate_before": 10.99609375,
+    "surrogate_after": 10.96484375,
+    "surrogate_change": -0.03125
+  }
+}

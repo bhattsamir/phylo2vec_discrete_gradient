@@ -1,0 +1,975 @@
+{
+  "original_case": {
+    "cap": 1,
+    "case": 0,
+    "reported": 7.842162528665195,
+    "truth": 7.842162528665195,
+    "error": 0.0,
+    "gradient_evals": 1
+  },
+  "cases": 120,
+  "max_error": 4.440892098500626e-15,
+  "bad": 0,
+  "all": [
+    {
+      "cap": 1,
+      "case": 0,
+      "reported": 7.842162528665195,
+      "truth": 7.842162528665195,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 1,
+      "reported": 8.093801277886982,
+      "truth": 8.09380127788698,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 2,
+      "reported": 8.59490030922202,
+      "truth": 8.594900309222018,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 3,
+      "reported": 7.997612235775634,
+      "truth": 7.997612235775631,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 4,
+      "reported": 7.919373082834164,
+      "truth": 7.919373082834166,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 5,
+      "reported": 8.179428559650272,
+      "truth": 8.179428559650272,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 6,
+      "reported": 8.286334310105893,
+      "truth": 8.286334310105891,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 7,
+      "reported": 7.130541105327155,
+      "truth": 7.130541105327154,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 8,
+      "reported": 7.194417818502125,
+      "truth": 7.194417818502125,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 9,
+      "reported": 8.049687374651436,
+      "truth": 8.049687374651437,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 10,
+      "reported": 8.300262838445208,
+      "truth": 8.300262838445212,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 11,
+      "reported": 8.338261224897924,
+      "truth": 8.338261224897922,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 12,
+      "reported": 7.090870060257293,
+      "truth": 7.090870060257292,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 13,
+      "reported": 8.482504394178049,
+      "truth": 8.482504394178049,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 14,
+      "reported": 8.430291968492108,
+      "truth": 8.430291968492108,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 15,
+      "reported": 6.796647215829887,
+      "truth": 6.796647215829887,
+      "error": 0.0,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 16,
+      "reported": 8.69943914493836,
+      "truth": 8.699439144938363,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 17,
+      "reported": 6.865007052042078,
+      "truth": 6.865007052042076,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 18,
+      "reported": 7.669792983216716,
+      "truth": 7.669792983216715,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 1,
+      "case": 19,
+      "reported": 8.065727246303966,
+      "truth": 8.06572724630397,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 1
+    },
+    {
+      "cap": 2,
+      "case": 0,
+      "reported": 7.186062702132097,
+      "truth": 7.186062702132097,
+      "error": 0.0,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 1,
+      "reported": 6.969727631799993,
+      "truth": 6.969727631799992,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 2,
+      "reported": 7.042581433633767,
+      "truth": 7.0425814336337655,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 3,
+      "reported": 7.106423903863314,
+      "truth": 7.106423903863314,
+      "error": 0.0,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 4,
+      "reported": 7.890074881487432,
+      "truth": 7.890074881487434,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 5,
+      "reported": 7.879731641869987,
+      "truth": 7.879731641869988,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 6,
+      "reported": 6.619766724297373,
+      "truth": 6.619766724297377,
+      "error": 4.440892098500626e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 7,
+      "reported": 7.1901523635940725,
+      "truth": 7.190152363594075,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 8,
+      "reported": 7.648602826184017,
+      "truth": 7.648602826184017,
+      "error": 0.0,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 9,
+      "reported": 6.5743222794221055,
+      "truth": 6.574322279422103,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 10,
+      "reported": 7.178636211673904,
+      "truth": 7.178636211673903,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 11,
+      "reported": 7.586958401446776,
+      "truth": 7.586958401446777,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 12,
+      "reported": 6.366987743230682,
+      "truth": 6.366987743230681,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 13,
+      "reported": 7.983055822581196,
+      "truth": 7.983055822581199,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 14,
+      "reported": 7.766925987235532,
+      "truth": 7.766925987235533,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 15,
+      "reported": 6.708810663001439,
+      "truth": 6.708810663001442,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 16,
+      "reported": 6.977721068963149,
+      "truth": 6.97772106896315,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 17,
+      "reported": 7.671565437793804,
+      "truth": 7.671565437793804,
+      "error": 0.0,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 18,
+      "reported": 7.972246693073709,
+      "truth": 7.9722466930737115,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 2,
+      "case": 19,
+      "reported": 6.652093950618041,
+      "truth": 6.652093950618041,
+      "error": 0.0,
+      "gradient_evals": 2
+    },
+    {
+      "cap": 3,
+      "case": 0,
+      "reported": 6.60264196394216,
+      "truth": 6.602641963942158,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 1,
+      "reported": 7.364305201110198,
+      "truth": 7.364305201110197,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 2,
+      "reported": 7.867718799190493,
+      "truth": 7.867718799190493,
+      "error": 0.0,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 3,
+      "reported": 6.795142203088349,
+      "truth": 6.795142203088351,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 4,
+      "reported": 7.727149330397084,
+      "truth": 7.7271493303970855,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 5,
+      "reported": 7.365581172615023,
+      "truth": 7.365581172615024,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 6,
+      "reported": 6.928996599645727,
+      "truth": 6.928996599645727,
+      "error": 0.0,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 7,
+      "reported": 8.071704147143018,
+      "truth": 8.071704147143018,
+      "error": 0.0,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 8,
+      "reported": 6.765813477053272,
+      "truth": 6.765813477053275,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 9,
+      "reported": 6.7290473665722725,
+      "truth": 6.729047366572271,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 10,
+      "reported": 7.2381322766970415,
+      "truth": 7.238132276697045,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 11,
+      "reported": 7.716321458771114,
+      "truth": 7.716321458771115,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 12,
+      "reported": 6.896057745813101,
+      "truth": 6.8960577458131,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 13,
+      "reported": 7.996094397941229,
+      "truth": 7.996094397941228,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 14,
+      "reported": 6.352081221184677,
+      "truth": 6.352081221184676,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 15,
+      "reported": 7.2424940833162275,
+      "truth": 7.2424940833162275,
+      "error": 0.0,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 16,
+      "reported": 6.521481932105638,
+      "truth": 6.521481932105635,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 17,
+      "reported": 6.572584396126102,
+      "truth": 6.572584396126101,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 18,
+      "reported": 7.086800788632638,
+      "truth": 7.086800788632638,
+      "error": 0.0,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 3,
+      "case": 19,
+      "reported": 7.080943521190633,
+      "truth": 7.080943521190632,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 3
+    },
+    {
+      "cap": 5,
+      "case": 0,
+      "reported": 6.364124868778479,
+      "truth": 6.364124868778478,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 1,
+      "reported": 7.405361441017792,
+      "truth": 7.405361441017789,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 2,
+      "reported": 7.048505420051468,
+      "truth": 7.048505420051468,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 3,
+      "reported": 6.4587573104073925,
+      "truth": 6.458757310407394,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 4,
+      "reported": 7.7421555597493015,
+      "truth": 7.742155559749304,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 5,
+      "reported": 6.920123929668652,
+      "truth": 6.9201239296686525,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 6,
+      "reported": 5.982024639476125,
+      "truth": 5.982024639476125,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 7,
+      "reported": 5.999638351836802,
+      "truth": 5.9996383518368,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 8,
+      "reported": 7.412885109967146,
+      "truth": 7.412885109967146,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 9,
+      "reported": 5.760684691597038,
+      "truth": 5.760684691597038,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 10,
+      "reported": 7.728683276959234,
+      "truth": 7.728683276959237,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 11,
+      "reported": 6.05704595851488,
+      "truth": 6.05704595851488,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 12,
+      "reported": 6.266896979299074,
+      "truth": 6.266896979299074,
+      "error": 0.0,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 13,
+      "reported": 7.341018748741524,
+      "truth": 7.341018748741523,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 14,
+      "reported": 6.50248328216388,
+      "truth": 6.5024832821638805,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 15,
+      "reported": 7.087909683304422,
+      "truth": 7.08790968330442,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 16,
+      "reported": 5.857230295863729,
+      "truth": 5.8572302958637295,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 17,
+      "reported": 6.988364981401844,
+      "truth": 6.988364981401846,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 18,
+      "reported": 6.262854433180541,
+      "truth": 6.262854433180539,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 5,
+      "case": 19,
+      "reported": 6.879707121875865,
+      "truth": 6.879707121875868,
+      "error": 3.552713678800501e-15,
+      "gradient_evals": 5
+    },
+    {
+      "cap": 10,
+      "case": 0,
+      "reported": 7.285065687857372,
+      "truth": 7.285065687857373,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 1,
+      "reported": 7.117168778143684,
+      "truth": 7.117168778143684,
+      "error": 0.0,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 2,
+      "reported": 6.208014715394949,
+      "truth": 6.208014715394949,
+      "error": 0.0,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 10,
+      "case": 3,
+      "reported": 7.118642495637379,
+      "truth": 7.1186424956373795,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 6
+    },
+    {
+      "cap": 10,
+      "case": 4,
+      "reported": 6.851219735936113,
+      "truth": 6.851219735936115,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 5,
+      "reported": 5.604896671724901,
+      "truth": 5.6048966717249,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 6,
+      "reported": 6.873580259369147,
+      "truth": 6.873580259369148,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 7,
+      "reported": 6.569988479096806,
+      "truth": 6.569988479096806,
+      "error": 0.0,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 8,
+      "reported": 6.363064175345002,
+      "truth": 6.3630641753449995,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 8
+    },
+    {
+      "cap": 10,
+      "case": 9,
+      "reported": 6.5221788985829905,
+      "truth": 6.522178898582988,
+      "error": 2.6645352591003757e-15,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 10,
+      "case": 10,
+      "reported": 6.032293006647974,
+      "truth": 6.032293006647974,
+      "error": 0.0,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 11,
+      "reported": 7.31932386096944,
+      "truth": 7.31932386096944,
+      "error": 0.0,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 12,
+      "reported": 6.3989033329484455,
+      "truth": 6.398903332948445,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 6
+    },
+    {
+      "cap": 10,
+      "case": 13,
+      "reported": 6.9084568165345,
+      "truth": 6.908456816534498,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 8
+    },
+    {
+      "cap": 10,
+      "case": 14,
+      "reported": 7.11893399085556,
+      "truth": 7.118933990855559,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 15,
+      "reported": 6.42377888896642,
+      "truth": 6.423778888966419,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 16,
+      "reported": 6.680514838010611,
+      "truth": 6.6805148380106125,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 17,
+      "reported": 6.379289357276326,
+      "truth": 6.379289357276327,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 18,
+      "reported": 7.335158373876732,
+      "truth": 7.335158373876731,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 10,
+      "case": 19,
+      "reported": 5.965047763939339,
+      "truth": 5.965047763939338,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 8
+    },
+    {
+      "cap": 20,
+      "case": 0,
+      "reported": 5.883033774471786,
+      "truth": 5.883033774471788,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 6
+    },
+    {
+      "cap": 20,
+      "case": 1,
+      "reported": 7.197483210632899,
+      "truth": 7.1974832106329,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 12
+    },
+    {
+      "cap": 20,
+      "case": 2,
+      "reported": 6.338536661309179,
+      "truth": 6.33853666130918,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 20,
+      "case": 3,
+      "reported": 6.951351248498806,
+      "truth": 6.951351248498808,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 6
+    },
+    {
+      "cap": 20,
+      "case": 4,
+      "reported": 6.838995833596407,
+      "truth": 6.838995833596405,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 7
+    },
+    {
+      "cap": 20,
+      "case": 5,
+      "reported": 6.3782225839285696,
+      "truth": 6.378222583928569,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 15
+    },
+    {
+      "cap": 20,
+      "case": 6,
+      "reported": 7.079312439619546,
+      "truth": 7.079312439619547,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 20,
+      "case": 7,
+      "reported": 6.534850746157747,
+      "truth": 6.534850746157745,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 20,
+      "case": 8,
+      "reported": 7.12415566939317,
+      "truth": 7.124155669393169,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 9,
+      "reported": 6.5536334691090845,
+      "truth": 6.553633469109083,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 10,
+      "reported": 6.484425101576066,
+      "truth": 6.484425101576066,
+      "error": 0.0,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 11,
+      "reported": 5.8517012731325115,
+      "truth": 5.8517012731325115,
+      "error": 0.0,
+      "gradient_evals": 8
+    },
+    {
+      "cap": 20,
+      "case": 12,
+      "reported": 6.827369780654813,
+      "truth": 6.827369780654813,
+      "error": 0.0,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 13,
+      "reported": 6.845343149904622,
+      "truth": 6.845343149904621,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 14,
+      "reported": 7.321303052447778,
+      "truth": 7.321303052447778,
+      "error": 0.0,
+      "gradient_evals": 9
+    },
+    {
+      "cap": 20,
+      "case": 15,
+      "reported": 6.7174352917870035,
+      "truth": 6.717435291787003,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 11
+    },
+    {
+      "cap": 20,
+      "case": 16,
+      "reported": 6.263007059852091,
+      "truth": 6.263007059852091,
+      "error": 0.0,
+      "gradient_evals": 15
+    },
+    {
+      "cap": 20,
+      "case": 17,
+      "reported": 7.753127345256307,
+      "truth": 7.753127345256308,
+      "error": 8.881784197001252e-16,
+      "gradient_evals": 10
+    },
+    {
+      "cap": 20,
+      "case": 18,
+      "reported": 6.749267615465508,
+      "truth": 6.749267615465508,
+      "error": 0.0,
+      "gradient_evals": 20
+    },
+    {
+      "cap": 20,
+      "case": 19,
+      "reported": 6.531119409682109,
+      "truth": 6.531119409682107,
+      "error": 1.7763568394002505e-15,
+      "gradient_evals": 9
+    }
+  ]
+}

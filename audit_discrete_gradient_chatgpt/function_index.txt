@@ -1,0 +1,146 @@
+phylo2vec_cuda_8xh100.cu:49:void calculate_discrete_gradient_full_c(
+phylo2vec_cuda_8xh100.cu:54:static inline double now_ms_host(void) {
+phylo2vec_cuda_8xh100.cu:60:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:62:#ifdef _OPENMP
+phylo2vec_cuda_8xh100.cu:64:#endif
+phylo2vec_cuda_8xh100.cu:76:#else
+phylo2vec_cuda_8xh100.cu:89:static thread_local Dim3 blockIdx  = {0, 0, 0};
+phylo2vec_cuda_8xh100.cu:90:static thread_local Dim3 blockDim  = {1, 1, 1};
+phylo2vec_cuda_8xh100.cu:91:static thread_local Dim3 threadIdx = {0, 0, 0};
+phylo2vec_cuda_8xh100.cu:92:static thread_local int g_simt_target_phase = 0;
+phylo2vec_cuda_8xh100.cu:93:static thread_local int g_simt_curr_phase   = 0;
+phylo2vec_cuda_8xh100.cu:96:#endif
+phylo2vec_cuda_8xh100.cu:104:__global__ void k_bottom_up_leaf_cols(
+phylo2vec_cuda_8xh100.cu:127:__global__ void k_transpose_leaf_block(
+phylo2vec_cuda_8xh100.cu:133:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:148:#else
+phylo2vec_cuda_8xh100.cu:155:#endif
+phylo2vec_cuda_8xh100.cu:159:__global__ void k_bottom_up_int_cols(
+phylo2vec_cuda_8xh100.cu:179:__global__ void k_top_down_ancestor_walk(
+phylo2vec_cuda_8xh100.cu:231:__global__ void k_nd_u(
+phylo2vec_cuda_8xh100.cu:634:__global__ void k_spr_rows_smem(
+phylo2vec_cuda_8xh100.cu:648:#ifndef __CUDACC__
+phylo2vec_cuda_8xh100.cu:650:#endif
+phylo2vec_cuda_8xh100.cu:652:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:655:#else
+phylo2vec_cuda_8xh100.cu:658:#endif
+phylo2vec_cuda_8xh100.cu:692:__global__ void k_spr_rows_gmem(
+phylo2vec_cuda_8xh100.cu:708:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:710:#else
+phylo2vec_cuda_8xh100.cu:712:#endif
+phylo2vec_cuda_8xh100.cu:749:__global__ void k_spr_rows_top1(
+phylo2vec_cuda_8xh100.cu:769:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:774:#else
+phylo2vec_cuda_8xh100.cu:779:#endif
+phylo2vec_cuda_8xh100.cu:850:__global__ void k_tiled_leaf_cols(
+phylo2vec_cuda_8xh100.cu:1013:__global__ void k_load_auto_leaves_tiled(
+phylo2vec_cuda_8xh100.cu:1026:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1043:#endif
+phylo2vec_cuda_8xh100.cu:1046:__global__ void k_reconstruct_auto_cols(
+phylo2vec_cuda_8xh100.cu:1105:__global__ void k_transpose_auto_cols(
+phylo2vec_cuda_8xh100.cu:1111:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1124:#endif
+phylo2vec_cuda_8xh100.cu:1127:__global__ void k_spr_rows_tiled(
+phylo2vec_cuda_8xh100.cu:1154:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1157:#else
+phylo2vec_cuda_8xh100.cu:1160:#endif
+phylo2vec_cuda_8xh100.cu:1201:__global__ void k_load_nd_u_leaves_tiled(
+phylo2vec_cuda_8xh100.cu:1210:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1229:#endif
+phylo2vec_cuda_8xh100.cu:1232:__global__ void k_reconstruct_nd_u_cols(
+phylo2vec_cuda_8xh100.cu:1303:__global__ void k_spr_rows_tiled_top1(
+phylo2vec_cuda_8xh100.cu:1323:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1328:#else
+phylo2vec_cuda_8xh100.cu:1333:#endif
+phylo2vec_cuda_8xh100.cu:1412:__global__ void k_init_symmetric_D(float * __restrict__ D, int32_t N, uint32_t seed) {
+phylo2vec_cuda_8xh100.cu:1420:__global__ void k_init_D_shard(
+phylo2vec_cuda_8xh100.cu:1430:__global__ void k_tiled_leaf_cols_sharded(
+phylo2vec_cuda_8xh100.cu:1500:__global__ void k_load_nd_u_leaves_sharded(
+phylo2vec_cuda_8xh100.cu:1512:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1535:#endif
+phylo2vec_cuda_8xh100.cu:1538:__global__ void k_load_auto_leaves_sharded(
+phylo2vec_cuda_8xh100.cu:1554:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1588:#endif
+phylo2vec_cuda_8xh100.cu:1612:__global__ void k_condense_super_profiles(
+phylo2vec_cuda_8xh100.cu:1620:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1633:#endif
+phylo2vec_cuda_8xh100.cu:1636:__global__ void k_build_condensed_D(
+phylo2vec_cuda_8xh100.cu:1642:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:1657:#endif
+phylo2vec_cuda_8xh100.cu:1682:static void build_host_tree_topology(const int64_t *v, int32_t n_leaves, HostTreeTopology *T) {
+phylo2vec_cuda_8xh100.cu:1772:static void free_host_tree_topology(HostTreeTopology *T) {
+phylo2vec_cuda_8xh100.cu:1781:static int run_and_validate_cuda_pipeline(
+phylo2vec_cuda_8xh100.cu:1808:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:2016:#else
+phylo2vec_cuda_8xh100.cu:2184:#endif
+phylo2vec_cuda_8xh100.cu:2223:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:2224:static int run_full_subdist_top1_multi_gpu(
+phylo2vec_cuda_8xh100.cu:2397:static int run_tiled_top1_multi_gpu(
+phylo2vec_cuda_8xh100.cu:2620:static int run_sharded_multi_gpu_top1(
+phylo2vec_cuda_8xh100.cu:2981:static void enable_all_peer_access(int num_gpus) {
+phylo2vec_cuda_8xh100.cu:3001:static int run_large_n_scaling_sweep(int num_gpus_detected) {
+phylo2vec_cuda_8xh100.cu:3371:#endif
+phylo2vec_cuda_8xh100.cu:3373:int main(void) {
+phylo2vec_cuda_8xh100.cu:3375:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:3387:#else
+phylo2vec_cuda_8xh100.cu:3389:#endif
+phylo2vec_cuda_8xh100.cu:3465:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:3468:#else
+phylo2vec_cuda_8xh100.cu:3471:#endif
+phylo2vec_cuda_8xh100.cu:3508:#ifdef __CUDACC__
+phylo2vec_cuda_8xh100.cu:3512:#endif
+bench_minibatch_recovery.cu:45:void encode_rooted_to_v_c(
+bench_minibatch_recovery.cu:51:void relabel_cherry_first_c(
+bench_minibatch_recovery.cu:70:static inline double wall_sec(void) {
+bench_minibatch_recovery.cu:76:static inline uint64_t splitmix64(uint64_t *state) {
+bench_minibatch_recovery.cu:83:static inline double rand_uniform(uint64_t *state, double lo, double hi) {
+bench_minibatch_recovery.cu:92:static void decode_cf_to_rooted(
+bench_minibatch_recovery.cu:111:static void encode_rooted_fast_o_n(
+bench_minibatch_recovery.cu:175:static void compute_xor_splits_o_n(
+bench_minibatch_recovery.cu:221:static int64_t count_wrong_splits_rf(
+bench_minibatch_recovery.cu:357:__global__ void k_detect_quartet_violations(
+bench_minibatch_recovery.cu:416:__global__ void k_find_knn_partner_clade(
+bench_minibatch_recovery.cu:462:__global__ void k_build_true_condensed_D(
+bench_minibatch_recovery.cu:521:__global__ void k_copy_leaf_rows_perm(
+bench_minibatch_recovery.cu:534:__global__ void k_bottom_up_leaves(
+bench_minibatch_recovery.cu:546:__global__ void k_transpose_leaf_block(
+bench_minibatch_recovery.cu:559:__global__ void k_bottom_up_internals(
+bench_minibatch_recovery.cu:573:__global__ void k_top_down_and_root(
+bench_minibatch_recovery.cu:613:__global__ void k_populate_nd_u(
+bench_minibatch_recovery.cu:626:__global__ void k_compute_bme_length(
+bench_minibatch_recovery.cu:939:__global__ void k_spr_rows_top1(
+bench_minibatch_recovery.cu:1071:static void compute_tree_summaries_blind(
+bench_minibatch_recovery.cu:1125:static int32_t resolve_clade_root_by_leaf(
+bench_minibatch_recovery.cu:1137:static void discover_corrupted_clades_blind_gpu(
+bench_minibatch_recovery.cu:1200:static void extract_active_skeleton(
+bench_minibatch_recovery.cu:1249:static double optimize_skeleton_on_gpu(
+bench_minibatch_recovery.cu:1468:int main(void) {
+bench_rnasim_gpu.cu:30:static void relabel_from_rooted_tree(
+bench_rnasim_gpu.cu:90:static double wall_sec(void) {
+bench_rnasim_gpu.cu:96:static uint64_t splitmix64(uint64_t *state) {
+bench_rnasim_gpu.cu:106:static void decode_cf_to_rooted(
+bench_rnasim_gpu.cu:123:static void compute_xor_splits_o_n(
+bench_rnasim_gpu.cu:164:static int64_t count_wrong_splits_rf(
+bench_rnasim_gpu.cu:212:__global__ void k_build_real_seq_condensed_D(
+bench_rnasim_gpu.cu:268:__global__ void k_copy_leaf_rows_perm(
+bench_rnasim_gpu.cu:281:__global__ void k_bottom_up_leaves(
+bench_rnasim_gpu.cu:293:__global__ void k_transpose_leaf_block(
+bench_rnasim_gpu.cu:306:__global__ void k_bottom_up_internals(
+bench_rnasim_gpu.cu:320:__global__ void k_top_down_and_root(
+bench_rnasim_gpu.cu:359:__global__ void k_populate_nd_u(
+bench_rnasim_gpu.cu:371:__global__ void k_compute_bme_length(
+bench_rnasim_gpu.cu:660:__global__ void k_spr_rows_top1(
+bench_rnasim_gpu.cu:737:static void build_skeleton_metadata(
+bench_rnasim_gpu.cu:809:static void compute_tree_summaries_blind(
+bench_rnasim_gpu.cu:852:static void extract_active_skeleton(
+bench_rnasim_gpu.cu:954:static void build_component_waves(
+bench_rnasim_gpu.cu:1137:static void apply_unrooted_spr_host(
+bench_rnasim_gpu.cu:1168:static void relabel_from_adj_u(
+bench_rnasim_gpu.cu:1211:static double optimize_skeleton_on_gpu(
+bench_rnasim_gpu.cu:1373:static inline void update_one_node_summary(
+bench_rnasim_gpu.cu:1391:static void compute_outgroup_rep8(
+bench_rnasim_gpu.cu:1421:static double run_subtree_minibatch_window(
+bench_rnasim_gpu.cu:1567:static double run_multi_gpu_minibatch_bme(
+bench_rnasim_gpu.cu:1723:static FILE *open_rnasim_bin(int32_t N) {
+bench_rnasim_gpu.cu:1735:static void run_ladder_5000_verification(int n_gpus, std::vector<RnaSimGpuWorkspace> &mb_ws) {
+bench_rnasim_gpu.cu:1852:int main(int argc, char **argv) {

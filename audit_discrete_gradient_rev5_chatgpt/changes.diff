@@ -1,0 +1,421 @@
+--- rev4/bench_minibatch_recovery.cu
++++ rev5/bench_minibatch_recovery.cu
+@@ -1013,7 +1013,13 @@
+             else other1 = nb_node;
+         }
+     }
+-    if (other0 == -1) return;
++    if (other0 == -1) {
++        if (threadIdx.x == 0) {
++            best_delta_out[i] = 1e30f;
++            best_j_out[i]     = -1;
++        }
++        return;
++    }
+ 
+     dev_run_parallel_spr_dfs(
+         tree_root, parent, other0, other1, n_leaves, n_nodes_u,
+@@ -1712,7 +1718,9 @@
+             std::vector<int32_t> uncap_a, uncap_b;
+             for (int32_t a = 0; a < K; ++a) {
+                 for (int32_t b = a + 1; b < K; ++b) {
+-                    if (dist_best[(size_t)a * K + b] != dist_init[(size_t)a * K + b]) {
++                    int32_t db = dist_best[(size_t)a * K + b];
++                    int32_t di = dist_init[(size_t)a * K + b];
++                    if (db != di) {
+                         if (is_capped[a] || is_capped[b]) {
+                             pair_a.push_back(a);
+                             pair_b.push_back(b);
+@@ -1969,24 +1977,55 @@
+             std::vector<float> prof_weights;
+             prof_leaves.reserve((size_t)K * 4);
+             prof_weights.reserve((size_t)K * 4);
++            bool need_exact_prof = false;
+             for (int32_t a = 0; a < K; ++a) {
+                 prof_offsets[a] = (int32_t)prof_leaves.size();
+                 compute_clade_dyadic_profile(
+                     super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                     node_rep0.data(), gpu_ws.max_prof_leaves, prof_leaves, prof_weights
+                 );
++                if (gpu_ws.max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > gpu_ws.max_prof_leaves) {
++                    need_exact_prof = true;
++                }
+             }
+             prof_offsets[K] = (int32_t)prof_leaves.size();
++
++            std::vector<int32_t> exact_prof_offsets;
++            std::vector<int32_t> exact_prof_leaves;
++            std::vector<float> exact_prof_weights;
++            if (need_exact_prof) {
++                exact_prof_offsets.resize(K + 1, 0);
++                exact_prof_leaves.reserve((size_t)N);
++                exact_prof_weights.reserve((size_t)N);
++                for (int32_t a = 0; a < K; ++a) {
++                    exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
++                    if (leaf_cnt[super_roots[a]] <= gpu_ws.max_prof_leaves) {
++                        exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
++                        exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
++                    } else {
++                        compute_clade_dyadic_profile(
++                            super_roots[a], N, curr_c1.data(), curr_c2.data(),
++                            node_rep0.data(), -1, exact_prof_leaves, exact_prof_weights
++                        );
++                    }
++                }
++                exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
++            }
+ 
+             std::vector<int64_t> v_sk(K - 1), v_cf(K - 1);
+             std::vector<int32_t> perm(K);
+             encode_rooted_to_v_c(sk_c1.data(), sk_c2.data(), K, v_sk.data());
+             relabel_cherry_first_c(v_sk.data(), K, 0, v_cf.data(), perm.data());
+ 
+-            total_delta_L += optimize_skeleton_on_gpu(
++            double dL = optimize_skeleton_on_gpu(
+                 K, 60, prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+-                oracle, gpu_ws, v_cf, perm
++                oracle, gpu_ws, v_cf, perm,
++                need_exact_prof ? exact_prof_offsets.data() : NULL,
++                need_exact_prof ? exact_prof_leaves.data() : NULL,
++                need_exact_prof ? exact_prof_weights.data() : NULL
+             );
++            if (dL == 0.0) continue;
++            total_delta_L += dL;
+ 
+             int32_t R_sk = 2 * K - 1;
+             std::vector<int32_t> new_sk_c1(R_sk), new_sk_c2(R_sk);
+--- rev4/bench_rnasim_gpu.cu
++++ rev5/bench_rnasim_gpu.cu
+@@ -273,17 +273,61 @@
+     int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
+     int32_t len_a = end_a - off_a;
+     int32_t len_b = end_b - off_b;
+-    int64_t total_pq = (int64_t)len_a * (int64_t)len_b;
+-
++    if (len_a > len_b) {
++        int32_t to = off_a; off_a = off_b; off_b = to;
++        int32_t te = end_a; end_a = end_b; end_b = te;
++        int32_t tl = len_a; len_a = len_b; len_b = tl;
++    }
++
++    __shared__ uint64_t s_seq_a[256];
+     double my_sum = 0.0;
+-    for (int64_t idx = threadIdx.x; idx < total_pq; idx += blockDim.x) {
+-        int32_t p = off_a + (int32_t)(idx / len_b);
+-        int32_t q = off_b + (int32_t)(idx % len_b);
+-        int32_t la = d_exact_leaves[p];
+-        int32_t lb = d_exact_leaves[q];
+-        double w = (double)d_exact_weights[p] * (double)d_exact_weights[q];
+-        double d = (double)dev_jc69_dist_popc(la, lb, d_packed_seqs, W);
+-        my_sum += w * d;
++    if (len_a == 1 && 5 * W <= 256) {
++        int32_t la = d_exact_leaves[off_a];
++        double wa = (double)d_exact_weights[off_a];
++        const uint64_t *sx = d_packed_seqs + (size_t)la * (5 * W);
++        if (threadIdx.x < (uint32_t)(5 * W)) {
++            s_seq_a[threadIdx.x] = sx[threadIdx.x];
++        }
++        __syncthreads();
++        if (wa != 0.0) {
++            for (int32_t q = off_b + threadIdx.x; q < end_b; q += blockDim.x) {
++                float wq = d_exact_weights[q];
++                if (wq == 0.0f) continue;
++                int32_t lb = d_exact_leaves[q];
++                const uint64_t *sy = d_packed_seqs + (size_t)lb * (5 * W);
++                int32_t n_valid = 0, n_match = 0;
++                #pragma unroll
++                for (int32_t w = 0; w < 25; ++w) {
++                    uint64_t v = s_seq_a[4 * 25 + w] & sy[4 * 25 + w];
++                    n_valid += __popcll(v);
++                    uint64_t m = (s_seq_a[0 * 25 + w] & sy[0 * 25 + w])
++                               | (s_seq_a[1 * 25 + w] & sy[1 * 25 + w])
++                               | (s_seq_a[2 * 25 + w] & sy[2 * 25 + w])
++                               | (s_seq_a[3 * 25 + w] & sy[3 * 25 + w]);
++                    n_match += __popcll(m);
++                }
++                float d_jc = 1.5f;
++                if (n_valid > 0) {
++                    float p = (float)(n_valid - n_match) / (float)n_valid;
++                    if (p >= 0.74f) p = 0.74f;
++                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
++                    if (d_jc < 0.0f) d_jc = 0.0f;
++                }
++                my_sum += (wa * (double)wq) * (double)d_jc;
++            }
++        }
++    } else {
++        int64_t total_pq = (int64_t)len_a * (int64_t)len_b;
++        for (int64_t idx = threadIdx.x; idx < total_pq; idx += blockDim.x) {
++            int32_t p = off_a + (int32_t)(idx / len_b);
++            int32_t q = off_b + (int32_t)(idx % len_b);
++            double w = (double)d_exact_weights[p] * (double)d_exact_weights[q];
++            if (w == 0.0) continue;
++            int32_t la = d_exact_leaves[p];
++            int32_t lb = d_exact_leaves[q];
++            double d = (double)dev_jc69_dist_popc(la, lb, d_packed_seqs, W);
++            my_sum += w * d;
++        }
+     }
+     __shared__ double s_sum[256];
+     s_sum[threadIdx.x] = my_sum;
+@@ -723,7 +767,13 @@
+             else other1 = nb_node;
+         }
+     }
+-    if (other0 == -1) return;
++    if (other0 == -1) {
++        if (threadIdx.x == 0) {
++            best_delta_out[i] = 1e30f;
++            best_j_out[i]     = -1;
++        }
++        return;
++    }
+ 
+     dev_run_parallel_spr_dfs(
+         tree_root, parent, other0, other1, n_leaves, n_nodes_u,
+@@ -1757,7 +1807,9 @@
+             std::vector<int32_t> uncap_a, uncap_b;
+             for (int32_t a = 0; a < K; ++a) {
+                 for (int32_t b = a + 1; b < K; ++b) {
+-                    if (dist_best[(size_t)a * K + b] != dist_init[(size_t)a * K + b]) {
++                    int32_t db = dist_best[(size_t)a * K + b];
++                    int32_t di = dist_init[(size_t)a * K + b];
++                    if (db != di) {
+                         if (is_capped[a] || is_capped[b]) {
+                             pair_a.push_back(a);
+                             pair_b.push_back(b);
+@@ -2135,42 +2187,36 @@
+         for (int32_t sr : level_waves[0]) leaves_in_lvl0 += leaf_cnt[sr];
+     }
+ 
++    (void)n_gpus;
+     for (size_t lvl = 0; lvl < level_waves.size(); ++lvl) {
+         const std::vector<int32_t> &wave = level_waves[lvl];
+-        std::vector<std::vector<int32_t>> out_leaves_wave(wave.size());
+-        std::vector<std::vector<float>> out_weights_wave(wave.size());
+-        for (size_t idx = 0; idx < wave.size(); ++idx) {
++        std::vector<int32_t> out_leaves;
++        std::vector<float> out_weights;
++        for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+             int32_t sr = wave[idx];
++            out_leaves.clear();
++            out_weights.clear();
+             if (sr != root_r) {
+                 compute_outgroup_dyadic_profile(
+                     sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
+-                    max_prof_leaves, out_leaves_wave[idx], out_weights_wave[idx]
++                    max_prof_leaves, out_leaves, out_weights
+                 );
+             }
+-        }
+-
+-        const std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+-        #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+-        for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+-            int32_t tid = omp_get_thread_num();
+-            int32_t sr = wave[idx];
+-            total_mb_delta_L += run_subtree_minibatch_window(
+-                sr, N, W, 1, 25, node_has_active, out_leaves_wave[idx], out_weights_wave[idx],
+-                d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                1200, is_comp_root.data(),
+-                snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
++            double dL = run_subtree_minibatch_window(
++                sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
++                d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
++                1200, is_comp_root.data()
+             );
++            if (dL != 0.0) {
++                total_mb_delta_L += dL;
++                for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
++                    update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
++                }
++                parent_r[root_r] = -1;
++            }
+         }
+         if (lvl + 1 < level_waves.size()) {
+             compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+-        } else {
+-            for (int32_t idx = (int32_t)ord.size() - 1; idx >= 0; --idx) {
+-                int32_t u = ord[idx];
+-                if (leaf_cnt[u] > 1050) {
+-                    update_one_node_summary(u, curr_c1[u], curr_c2[u], parent_r.data(), leaf_cnt.data(), node_rep0.data());
+-                }
+-            }
+-            parent_r[root_r] = -1;
+         }
+     }
+ 
+@@ -2183,29 +2229,30 @@
+             build_component_waves(N, ord, curr_c1, curr_c2, 525, 1050, is_comp_root_stag, stag_waves);
+             for (int32_t lvl = (int32_t)stag_waves.size() - 1; lvl >= 0; --lvl) {
+                 const std::vector<int32_t> &wave = stag_waves[lvl];
+-                std::vector<std::vector<int32_t>> out_leaves_wave(wave.size());
+-                std::vector<std::vector<float>> out_weights_wave(wave.size());
+-                for (size_t idx = 0; idx < wave.size(); ++idx) {
++                std::vector<int32_t> out_leaves;
++                std::vector<float> out_weights;
++                for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                     int32_t sr = wave[idx];
++                    out_leaves.clear();
++                    out_weights.clear();
+                     if (sr != root_r) {
+                         compute_outgroup_dyadic_profile(
+                             sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
+-                            max_prof_leaves, out_leaves_wave[idx], out_weights_wave[idx]
++                            max_prof_leaves, out_leaves, out_weights
+                         );
+                     }
+-                }
+-
+-                const std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+-                #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+-                for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+-                    int32_t tid = omp_get_thread_num();
+-                    int32_t sr = wave[idx];
+-                    total_mb_delta_L += run_subtree_minibatch_window(
+-                        sr, N, W, 1, 25, node_has_active, out_leaves_wave[idx], out_weights_wave[idx],
+-                        d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                        1200, is_comp_root_stag.data(),
+-                        snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
++                    double dL = run_subtree_minibatch_window(
++                        sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
++                        d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
++                        1200, is_comp_root_stag.data()
+                     );
++                    if (dL != 0.0) {
++                        total_mb_delta_L += dL;
++                        for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
++                            update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
++                        }
++                        parent_r[root_r] = -1;
++                    }
+                 }
+                 compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+             }
+@@ -2236,36 +2283,32 @@
+                 }
+             }
+         }
+-        std::vector<std::vector<int32_t>> out_leaves_p2b(mid_roots.size());
+-        std::vector<std::vector<float>> out_weights_p2b(mid_roots.size());
+-        for (size_t idx = 0; idx < mid_roots.size(); ++idx) {
++        std::vector<int32_t> out_leaves_p2b;
++        std::vector<float> out_weights_p2b;
++        for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
+             int32_t sr = mid_roots[idx];
++            out_leaves_p2b.clear();
++            out_weights_p2b.clear();
+             if (sr != root_r) {
+                 compute_outgroup_dyadic_profile(
+                     sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
+-                    max_prof_leaves, out_leaves_p2b[idx], out_weights_p2b[idx]
++                    max_prof_leaves, out_leaves_p2b, out_weights_p2b
+                 );
+             }
+-        }
+-
+-        const std::vector<int32_t> snap_c1_p2b = curr_c1, snap_c2_p2b = curr_c2, snap_par_p2b = parent_r, snap_rep0_p2b = node_rep0;
+-        #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+-        for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
+-            int32_t tid = omp_get_thread_num();
+-            int32_t sr = mid_roots[idx];
+             int32_t c_thresh = std::max(4, leaf_cnt[sr] / 800);
+-            total_mb_delta_L += run_subtree_minibatch_window(
+-                sr, N, W, c_thresh, 25, node_has_active, out_leaves_p2b[idx], out_weights_p2b[idx],
+-                d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                1200, NULL,
+-                snap_c1_p2b.data(), snap_c2_p2b.data(), snap_par_p2b.data(), snap_rep0_p2b.data()
++            double dL = run_subtree_minibatch_window(
++                sr, N, W, c_thresh, 25, node_has_active, out_leaves_p2b, out_weights_p2b,
++                d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
++                1200, NULL
+             );
+-        }
+-        for (int32_t idx = (int32_t)spine_above_p2b.size() - 1; idx >= 0; --idx) {
+-            int32_t u = spine_above_p2b[idx];
+-            update_one_node_summary(u, curr_c1[u], curr_c2[u], parent_r.data(), leaf_cnt.data(), node_rep0.data());
+-        }
+-        parent_r[root_r] = -1;
++            if (dL != 0.0) {
++                total_mb_delta_L += dL;
++                for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
++                    update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
++                }
++                parent_r[root_r] = -1;
++            }
++        }
+     }
+ 
+     return total_mb_delta_L;
+--- rev4/verify_all.c
++++ rev5/verify_all.c
+@@ -1060,7 +1060,68 @@
+             if (fabs(cond_chg22 - 0.125) > 1e-12 || fabs(cond_chg22 - full_chg22) > 1e-12) test9_ok = 0;
+         }
+ 
+-        printf("[%s] Test 9: Non-Cherry-First Guard, 8-Thread Workspace Isolation, & Clade Condensation\n\n",
++        /* 9e. Cross-window wave interaction counterexample: frozen outside profiles vs sequential live rebuilding */
++        {
++            const int32_t N10 = 10;
++            const double D10[10 * 10] = {
++                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
++                0.504357635974884, 0.0, 1.263672113418579, 0.6325551271438599, 1.4168076515197754, 0.4012994170188904, 0.504357635974884, 0.504357635974884, 0.504357635974884, 0.504357635974884,
++                0.9801226854324341, 1.263672113418579, 0.0, 0.5590892434120178, 0.4197118878364563, 1.9408228397369385, 0.9801226854324341, 0.9801226854324341, 0.9801226854324341, 0.9801226854324341,
++                0.2683122754096985, 0.6325551271438599, 0.5590892434120178, 0.0, 0.7123850584030151, 1.0403475761413574, 0.2683122754096985, 0.2683122754096985, 0.2683122754096985, 0.2683122754096985,
++                0.6683472394943237, 1.4168076515197754, 0.4197118878364563, 0.7123850584030151, 0.0, 3.23811674118042, 0.6683472394943237, 0.6683472394943237, 0.6683472394943237, 0.6683472394943237,
++                0.9506180286407471, 0.4012994170188904, 1.9408228397369385, 1.0403475761413574, 3.23811674118042, 0.0, 0.9506180286407471, 0.9506180286407471, 0.9506180286407471, 0.9506180286407471,
++                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
++                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
++                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
++                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0
++            };
++            /* Build T0 (A=((0,1),2), B=((3,4),5)), TA (A=((0,2),1), B=((3,4),5)),
++             * TB (A=((0,1),2), B=((3,5),4)), TAB (A=((0,2),1), B=((3,5),4)) */
++            double L_states[4];
++            for (int state = 0; state < 4; ++state) {
++                int32_t c1[19], c2[19];
++                int32_t id = N10;
++                int32_t a_in = id++;
++                c1[a_in] = 0; c2[a_in] = (state & 1) ? 2 : 1;
++                int32_t uA = id++;
++                c1[uA] = a_in; c2[uA] = (state & 1) ? 1 : 2;
++                int32_t b_in = id++;
++                c1[b_in] = 3; c2[b_in] = (state & 2) ? 5 : 4;
++                int32_t uB = id++;
++                c1[uB] = b_in; c2[uB] = (state & 2) ? 4 : 5;
++                int32_t cur = id++;
++                c1[cur] = uA; c2[cur] = uB;
++                for (int32_t g = 6; g < 10; ++g) {
++                    int32_t nxt = id++;
++                    c1[nxt] = cur; c2[nxt] = g;
++                    cur = nxt;
++                }
++                int64_t v10[9];
++                encode_rooted_to_v_c(c1, c2, N10, v10);
++                L_states[state] = brute_force_pauplin_bme_length(v10, D10, N10, NULL);
++            }
++            double dA_init = L_states[1] - L_states[0];
++            double dB_init = L_states[2] - L_states[0];
++            double d_joint = L_states[3] - L_states[0];
++            double dA_after_B = L_states[3] - L_states[2];
++            double dB_after_A = L_states[3] - L_states[1];
++            double interaction = 0.0;
++            const double dp[3] = {0.0, 0.25, -0.25};
++            for (int i = 0; i < 3; ++i)
++                for (int j = 0; j < 3; ++j)
++                    interaction += 0.5 * dp[i] * D10[i * 10 + (3 + j)] * dp[j];
++
++            if (fabs(dA_init - (-0.0032945312559604645)) > 1e-12) test9_ok = 0;
++            if (fabs(dB_init - (-0.025448983535170555)) > 1e-12) test9_ok = 0;
++            if (fabs((dA_init + dB_init) - (-0.02874351479113102)) > 1e-12) test9_ok = 0;
++            if (fabs(d_joint - 0.050525834783911705) > 1e-12) test9_ok = 0;
++            if (fabs(interaction - 0.07926934957504272) > 1e-12) test9_ok = 0;
++            if (fabs(d_joint - (dA_init + dB_init + interaction)) > 1e-12) test9_ok = 0;
++            /* Under sequential outside-profile rebuilding, only the first window is accepted and the second is rejected (+0.07597 / +0.05382 >= -1e-6) */
++            if (!(dA_after_B > 0.075 && dB_after_A > 0.053)) test9_ok = 0;
++        }
++
++        printf("[%s] Test 9: Non-Cherry-First Guard, 8-Thread Workspace Isolation, & Clade/Wave Exactness\n\n",
+                test9_ok ? "PASS" : "FAIL");
+         if (!test9_ok) all_passed = 0;
+     }

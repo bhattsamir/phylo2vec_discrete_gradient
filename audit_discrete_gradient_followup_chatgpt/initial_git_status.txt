@@ -1,0 +1,22 @@
+ M bench_minibatch_recovery.cu
+ M bench_optimizers
+ M bench_rnasim_gpu.cu
+ M discrete_gradient.py
+ M libphylo2vec_fastme.dylib
+ M paper/phylo2vec_bme_paper.pdf
+ M paper/phylo2vec_bme_paper.tex
+ M phylo2vec_bme_paper.pdf
+ M phylo2vec_cuda_8xh100.cu
+ M phylo2vec_fastme.c
+ M rnasim_data/export_rnasim_bin.py
+ M verify_all
+ M verify_all.c
+?? REVIEW_discrete_gradient_chatgpt.md
+?? audit_discrete_gradient_chatgpt/
+?? audit_discrete_gradient_followup_chatgpt/
+?? bench_rnasim_gpu_sm90
+?? paper/phylo2vec_bme_paper.before-formatter.tex
+?? paper/phylo2vec_bme_paper.before-humanizer.tex
+?? phylo2vec_bme_paper.tex
+?? phylo2vec_cuda_8xh100
+?? run_rnasim_8xh100.slurm

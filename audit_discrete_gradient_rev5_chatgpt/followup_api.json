@@ -1,0 +1,51 @@
+{
+  "ordered": {
+    "c": {
+      "accepted": 150,
+      "rejected": 0,
+      "wrong_domain_behavior": 0,
+      "max_error": 1.7763568394002505e-15
+    },
+    "numba": {
+      "accepted": 150,
+      "rejected": 0,
+      "wrong_domain_behavior": 0,
+      "max_error": 1.7763568394002505e-15
+    }
+  },
+  "general_domain": {
+    "c": {
+      "accepted": 150,
+      "rejected": 915,
+      "wrong_domain_behavior": 0,
+      "max_error": 1.887379141862766e-15
+    },
+    "numba": {
+      "accepted": 150,
+      "rejected": 915,
+      "wrong_domain_behavior": 0,
+      "max_error": 1.887379141862766e-15
+    }
+  },
+  "minimal_rejections": {
+    "c": true,
+    "numba": true,
+    "direct_numba": true
+  },
+  "normalization": {
+    "before": 4.25,
+    "after": 6.5,
+    "delta": 2.25
+  },
+  "fractional_rejected": true,
+  "concurrent_calls": [
+    {
+      "bad_calls": 0,
+      "max_error": 0.0
+    },
+    {
+      "bad_calls": 0,
+      "max_error": 0.0
+    }
+  ]
+}

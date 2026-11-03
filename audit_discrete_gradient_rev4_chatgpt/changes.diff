@@ -1,0 +1,1305 @@
+--- rev3/bench_minibatch_recovery.cu
++++ rev4/bench_minibatch_recovery.cu
+@@ -21,9 +21,17 @@
+  *      a GPU kernel scans candidate clades C_c across the entire N-leaf tree and
+  *      computes the cross-clade leaf affinity min_{x in C_a} (D(x, C_c) - D(x, sib(x)))
+  *      to automatically pair C_a with its true evolutionary partner clade C_b.
+- *   4. Exact Monotonic BME Length Verification (`k_compute_bme_length`):
+- *      Every iteration computes the exact Pauplin BME length L(T) on the GPU and
+- *      enforces strict monotonic descent with path-disjoint SPR move batching.
++ *   4. Condensed-Skeleton BME Search with Exact Full-Objective Acceptance Check:
++ *      Every inner iteration computes the Pauplin BME length L(\tilde{T}; \tilde{D}) of the
++ *      K-leaf condensed skeleton on the GPU (`k_compute_bme_length`) using the capped profile
++ *      surrogate \tilde{D} (`max_prof_leaves = 128`). Because a finite cap collapses unresolved
++ *      frontier subtrees onto single representative leaves (which is approximate when a clade has
++ *      size > max_prof_leaves, especially on balanced clades), the inner search proposals are
++ *      heuristic above the cap. Before accepting any candidate skeleton \tilde{T}_{best} != \tilde{T}_{init},
++ *      `optimize_skeleton_on_gpu` identifies all super-leaf pairs (a, b) whose topological distance
++ *      changed and where a or b was capped, evaluates their exact uncapped super-leaf distance on the
++ *      GPU (`k_refine_true_condensed_D_pairs`), and rejects any candidate topology whose exact
++ *      full-tree BME change \Delta L_{full} >= -1e-6.
+  *
+  * Compile & Run:
+  *   nvcc -O3 -arch=sm_86 bench_minibatch_recovery.cu phylo2vec_fastme.c -o bench_minibatch_recovery
+@@ -462,7 +470,8 @@
+ /* Build K x K condensed distance matrix from dyadic-weighted super-leaf profiles:
+  *   D_cond[a, b] = sum_{p in prof(a)} sum_{q in prof(b)} w_p * w_q * D(leaf_p, leaf_q).
+  * Each super-leaf profile is stored in CSR format (d_prof_offsets, d_prof_leaves, d_prof_weights)
+- * with exact dyadic weights w_p = 2^{-depth(leaf_p)} summing to 1. */
++ * with nonnegative weights w_p summing to 1 (exact dyadic weights w_p = 2^{-depth(leaf_p)} when
++ * leaf_cnt <= max_prof_leaves or max_prof_leaves <= 0; approximate frontier-subtree collapse above cap). */
+ __global__ void k_build_true_condensed_D(
+     int32_t K,
+     const int32_t * __restrict__ d_prof_offsets,
+@@ -498,6 +507,60 @@
+         }
+         d_D_cond[(size_t)a * K + b] = d_val;
+         d_D_cond[(size_t)b * K + a] = d_val;
++    }
++}
++
++/* Block-parallel exact refinement of selected super-leaf pairs (a, b) using uncapped
++ * dyadic profiles (d_exact_offsets, d_exact_leaves, d_exact_weights).
++ * One 256-thread block evaluates one pair (a, b) = (d_pair_a[blockIdx.x], d_pair_b[blockIdx.x]),
++ * accumulating in FP64 across all (p, q) in prof_exact(a) x prof_exact(b) and writing
++ * the exact super-leaf distance to d_D_cond[a * K + b], d_D_cond[b * K + a], and d_pair_exact_D[pid]. */
++__global__ void k_refine_true_condensed_D_pairs(
++    int32_t K, int32_t n_pairs,
++    const int32_t * __restrict__ d_pair_a,
++    const int32_t * __restrict__ d_pair_b,
++    const int32_t * __restrict__ d_exact_offsets,
++    const int32_t * __restrict__ d_exact_leaves,
++    const float   * __restrict__ d_exact_weights,
++    const int32_t * __restrict__ d_head,
++    const int32_t * __restrict__ d_parent,
++    const int32_t * __restrict__ d_depth,
++    const float   * __restrict__ d_dist_root,
++    float  * __restrict__ d_D_cond,
++    double * __restrict__ d_pair_exact_D
++) {
++    int32_t pid = blockIdx.x;
++    if (pid >= n_pairs) return;
++    int32_t a = d_pair_a[pid];
++    int32_t b = d_pair_b[pid];
++    int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
++    int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
++    int32_t len_a = end_a - off_a;
++    int32_t len_b = end_b - off_b;
++    int64_t total_pq = (int64_t)len_a * (int64_t)len_b;
++
++    double my_sum = 0.0;
++    for (int64_t idx = threadIdx.x; idx < total_pq; idx += blockDim.x) {
++        int32_t p = off_a + (int32_t)(idx / len_b);
++        int32_t q = off_b + (int32_t)(idx % len_b);
++        int32_t la = d_exact_leaves[p];
++        int32_t lb = d_exact_leaves[q];
++        double w = (double)d_exact_weights[p] * (double)d_exact_weights[q];
++        double d = (double)dev_oracle_leaf_dist(la, lb, d_head, d_parent, d_depth, d_dist_root);
++        my_sum += w * d;
++    }
++    __shared__ double s_sum[256];
++    s_sum[threadIdx.x] = my_sum;
++    __syncthreads();
++    for (int32_t s = 128; s > 0; s >>= 1) {
++        if (threadIdx.x < s) s_sum[threadIdx.x] += s_sum[threadIdx.x + s];
++        __syncthreads();
++    }
++    if (threadIdx.x == 0) {
++        double exact_val = s_sum[0];
++        d_pair_exact_D[pid] = exact_val;
++        d_D_cond[(size_t)a * K + b] = (float)exact_val;
++        d_D_cond[(size_t)b * K + a] = (float)exact_val;
+     }
+ }
+ 
+@@ -1006,11 +1069,14 @@
+ struct MinibatchGPUWorkspace {
+     int32_t max_K;
+     int32_t max_prof_leaves;
+-    float *d_D_cond, *d_subdist, *d_nd_u, *d_row_tmp, *d_best_delta, *d_prof_weights;
+-    int32_t *d_prof_offsets, *d_prof_leaves, *d_perm, *d_c1_r, *d_c2_r, *d_m_lmin, *d_v_map, *d_next_k;
++    size_t exact_prof_cap;
++    size_t pair_cap;
++    float *d_D_cond, *d_subdist, *d_nd_u, *d_row_tmp, *d_best_delta, *d_prof_weights, *d_exact_weights;
++    int32_t *d_prof_offsets, *d_prof_leaves, *d_exact_offsets, *d_exact_leaves, *d_pair_a, *d_pair_b;
++    int32_t *d_perm, *d_c1_r, *d_c2_r, *d_m_lmin, *d_v_map, *d_next_k;
+     int32_t *d_parent_u, *d_sub_size, *d_tin, *d_adj_u, *d_best_j;
+     int64_t *d_v_curr;
+-    double *d_curr_L;
++    double *d_curr_L, *d_pair_exact_D;
+ 
+     void init(int32_t K_max) {
+         max_K = K_max;
+@@ -1018,10 +1084,18 @@
+         int32_t M_max = 2 * K_max - 2;
+         int32_t R_max = 2 * K_max - 1;
+         size_t prof_cap = std::max((size_t)128 * (size_t)K_max, (size_t)2048);
++        exact_prof_cap = std::max(prof_cap, (size_t)16384);
++        pair_cap = (size_t)K_max * (size_t)K_max / 2 + 16;
+         CUDA_CHECK(cudaSetDevice(0));
+         CUDA_CHECK(cudaMalloc(&d_prof_offsets, (size_t)(K_max + 1) * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_prof_leaves,  prof_cap * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_prof_weights, prof_cap * sizeof(float)));
++        CUDA_CHECK(cudaMalloc(&d_exact_offsets, (size_t)(K_max + 1) * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
++        CUDA_CHECK(cudaMalloc(&d_pair_a,       pair_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_pair_b,       pair_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_pair_exact_D, pair_cap * sizeof(double)));
+         CUDA_CHECK(cudaMalloc(&d_perm, (size_t)K_max * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_D_cond, (size_t)K_max * K_max * sizeof(float)));
+         CUDA_CHECK(cudaMalloc(&d_subdist, (size_t)M_max * M_max * sizeof(float)));
+@@ -1044,9 +1118,22 @@
+         CUDA_CHECK(cudaFuncSetAttribute(k_spr_rows_top1, cudaFuncAttributeMaxDynamicSharedMemorySize, 90112));
+     }
+ 
++    void ensure_exact_prof_cap(size_t needed) {
++        if (needed > exact_prof_cap) {
++            CUDA_CHECK(cudaSetDevice(0));
++            cudaFree(d_exact_leaves);
++            cudaFree(d_exact_weights);
++            exact_prof_cap = needed + 4096;
++            CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
++            CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
++        }
++    }
++
+     void destroy() {
+         CUDA_CHECK(cudaSetDevice(0));
+         cudaFree(d_prof_offsets); cudaFree(d_prof_leaves); cudaFree(d_prof_weights);
++        cudaFree(d_exact_offsets); cudaFree(d_exact_leaves); cudaFree(d_exact_weights);
++        cudaFree(d_pair_a); cudaFree(d_pair_b); cudaFree(d_pair_exact_D);
+         cudaFree(d_perm); cudaFree(d_D_cond);
+         cudaFree(d_subdist); cudaFree(d_nd_u); cudaFree(d_row_tmp);
+         cudaFree(d_best_delta); cudaFree(d_best_j); cudaFree(d_v_curr); cudaFree(d_curr_L);
+@@ -1104,7 +1191,11 @@
+ /* Compute the dyadic leaf-weight profile w(x) = 2^{-depth_u(x)} for a rooted clade u.
+  * Expands internal nodes in best-first order (highest weight w = 2^{-d} first).
+  * When max_prof_leaves <= 0 or leaf_cnt[u] <= max_prof_leaves (for balanced, unbalanced,
+- * or caterpillar clades alike), all leaves in u are emitted with their exact dyadic weights. */
++ * or caterpillar clades alike), all leaves in u are emitted with their exact dyadic weights.
++ * When max_prof_leaves > 0 and leaf_cnt[u] > max_prof_leaves, expansion stops at max_prof_leaves
++ * entries and each remaining frontier subtree in the priority queue collapses its mass onto a
++ * single representative leaf node_rep0[top.u] (an approximation that can retain substantial
++ * collapsed mass on balanced clades of size > max_prof_leaves). */
+ static void compute_clade_dyadic_profile(
+     int32_t u, int32_t N,
+     const int32_t *c1_r, const int32_t *c2_r,
+@@ -1116,6 +1207,31 @@
+     if (u < N) {
+         prof_leaves_out.push_back(u);
+         prof_weights_out.push_back(1.0f);
++        return;
++    }
++    if (max_prof_leaves < 0) {
++        struct StackEntry { int32_t u; double weight; };
++        std::vector<StackEntry> st;
++        st.reserve(64);
++        st.push_back({u, 1.0});
++        while (!st.empty()) {
++            StackEntry top = st.back();
++            st.pop_back();
++            int32_t b0 = c1_r[top.u], b1 = c2_r[top.u];
++            double hw = 0.5 * top.weight;
++            if (b1 < N) {
++                prof_leaves_out.push_back(b1);
++                prof_weights_out.push_back((float)hw);
++            } else {
++                st.push_back({b1, hw});
++            }
++            if (b0 < N) {
++                prof_leaves_out.push_back(b0);
++                prof_weights_out.push_back((float)hw);
++            } else {
++                st.push_back({b0, hw});
++            }
++        }
+         return;
+     }
+     struct WeightedNode {
+@@ -1288,7 +1404,63 @@
+     *out_skel_id = -1 - last_ret;
+ }
+ 
+-/* Optimize one K-leaf skeleton on GPU with exact path-disjoint SPR batching and monotonic BME length check */
++/* Compute all-pairs unrooted topological edge distances dist_out[a * K + b]
++ * between original super-leaves a, b in {0, ..., K-1} for skeleton (v_cf, perm)
++ * in O(K^2) time by visiting each leaf pair once at its rooted LCA. */
++static void compute_skeleton_leaf_dists(
++    const int64_t *v_cf, const int32_t *perm, int32_t K,
++    std::vector<int32_t> &dist_out
++) {
++    const int32_t R_sk = 2 * K - 1;
++    const int32_t root_r = R_sk - 1;
++    std::vector<int32_t> c1(R_sk), c2(R_sk), uf(R_sk);
++    for (int32_t x = 0; x < K; ++x) uf[x] = x;
++    for (int32_t k = 0; k < K - 1; ++k) {
++        int32_t i = K - 2 - k;
++        int32_t m = K + k;
++        int32_t x = (int32_t)v_cf[i];
++        int32_t y = i + 1;
++        c1[m] = uf[y];
++        c2[m] = uf[x];
++        uf[x] = m;
++    }
++    std::vector<int32_t> depth(R_sk, 0);
++    for (int32_t u = root_r; u >= K; --u) {
++        depth[c1[u]] = depth[u] + 1;
++        depth[c2[u]] = depth[u] + 1;
++    }
++    dist_out.assign((size_t)K * K, 0);
++    std::vector<std::vector<int32_t>> sub_leaves(R_sk);
++    for (int32_t x = 0; x < K; ++x) sub_leaves[x].push_back(x);
++    for (int32_t u = K; u <= root_r; ++u) {
++        int32_t b0 = c1[u], b1 = c2[u];
++        const auto &L0 = sub_leaves[b0];
++        const auto &L1 = sub_leaves[b1];
++        int32_t sub = (u == root_r) ? 1 : (2 * depth[u]);
++        for (int32_t x : L0) {
++            int32_t ox = perm[x];
++            int32_t dx = depth[x] - sub;
++            for (int32_t y : L1) {
++                int32_t oy = perm[y];
++                int32_t d = dx + depth[y];
++                dist_out[(size_t)ox * K + oy] = d;
++                dist_out[(size_t)oy * K + ox] = d;
++            }
++        }
++        if (u < root_r) {
++            auto &Lu = sub_leaves[u];
++            Lu.reserve(L0.size() + L1.size());
++            Lu.insert(Lu.end(), L0.begin(), L0.end());
++            Lu.insert(Lu.end(), L1.begin(), L1.end());
++            std::vector<int32_t>().swap(sub_leaves[b0]);
++            std::vector<int32_t>().swap(sub_leaves[b1]);
++        }
++    }
++}
++
++/* Optimize one K-leaf skeleton on GPU with path-disjoint SPR batching, monotonic condensed-skeleton
++ * BME check, and (when exact_prof_* is supplied) an exact full-objective GPU acceptance check on
++ * all changed super-leaf pairs involving capped clades. */
+ static double optimize_skeleton_on_gpu(
+     int32_t K, int32_t max_iters,
+     const int32_t *prof_offsets,
+@@ -1297,11 +1469,16 @@
+     const TrueTreeHLD &oracle,
+     MinibatchGPUWorkspace &gpu_ws,
+     std::vector<int64_t> &v_cf,
+-    std::vector<int32_t> &perm
++    std::vector<int32_t> &perm,
++    const int32_t *exact_prof_offsets = NULL,
++    const int32_t *exact_prof_leaves = NULL,
++    const float *exact_prof_weights = NULL
+ ) {
+     const int32_t M_sk = 2 * K - 2;
+     const int32_t R_sk = 2 * K - 1;
+     const int32_t root_u_sk = M_sk - 1;
++    const std::vector<int64_t> init_v_cf = v_cf;
++    const std::vector<int32_t> init_perm = perm;
+ 
+     /* Build K x K condensed D ONCE in original super-leaf order */
+     const int32_t total_prof = prof_offsets[K];
+@@ -1508,6 +1685,99 @@
+         for (int32_t a = 0; a < K; ++a) new_perm[a] = perm[step_perm[a]];
+         perm = new_perm;
+     }
++
++    if (best_L >= init_L - 1e-6) {
++        v_cf = init_v_cf;
++        perm = init_perm;
++        return 0.0;
++    }
++
++    if (exact_prof_offsets != NULL && exact_prof_leaves != NULL && exact_prof_weights != NULL) {
++        std::vector<uint8_t> is_capped(K, 0);
++        bool any_capped = false;
++        for (int32_t a = 0; a < K; ++a) {
++            int32_t cap_len = prof_offsets[a + 1] - prof_offsets[a];
++            int32_t ex_len  = exact_prof_offsets[a + 1] - exact_prof_offsets[a];
++            if (ex_len != cap_len) {
++                is_capped[a] = 1;
++                any_capped = true;
++            }
++        }
++        if (any_capped) {
++            std::vector<int32_t> dist_init, dist_best;
++            compute_skeleton_leaf_dists(init_v_cf.data(), init_perm.data(), K, dist_init);
++            compute_skeleton_leaf_dists(best_v_cf.data(), best_perm.data(), K, dist_best);
++
++            std::vector<int32_t> pair_a, pair_b;
++            std::vector<int32_t> uncap_a, uncap_b;
++            for (int32_t a = 0; a < K; ++a) {
++                for (int32_t b = a + 1; b < K; ++b) {
++                    if (dist_best[(size_t)a * K + b] != dist_init[(size_t)a * K + b]) {
++                        if (is_capped[a] || is_capped[b]) {
++                            pair_a.push_back(a);
++                            pair_b.push_back(b);
++                        } else {
++                            uncap_a.push_back(a);
++                            uncap_b.push_back(b);
++                        }
++                    }
++                }
++            }
++            if (pair_a.empty() && uncap_a.empty()) {
++                v_cf = init_v_cf;
++                perm = init_perm;
++                return 0.0;
++            }
++
++            std::vector<double> h_pair_exact_D(pair_a.size(), 0.0);
++            if (!pair_a.empty()) {
++                int32_t n_pairs = (int32_t)pair_a.size();
++                int32_t total_exact_prof = exact_prof_offsets[K];
++                gpu_ws.ensure_exact_prof_cap((size_t)total_exact_prof);
++                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_offsets, exact_prof_offsets, (size_t)(K + 1) * sizeof(int32_t), cudaMemcpyHostToDevice));
++                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_leaves,  exact_prof_leaves,  (size_t)total_exact_prof * sizeof(int32_t), cudaMemcpyHostToDevice));
++                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_weights, exact_prof_weights, (size_t)total_exact_prof * sizeof(float), cudaMemcpyHostToDevice));
++                CUDA_CHECK(cudaMemcpy(gpu_ws.d_pair_a, pair_a.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice));
++                CUDA_CHECK(cudaMemcpy(gpu_ws.d_pair_b, pair_b.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice));
++
++                k_refine_true_condensed_D_pairs<<<n_pairs, 256>>>(
++                    K, n_pairs, gpu_ws.d_pair_a, gpu_ws.d_pair_b,
++                    gpu_ws.d_exact_offsets, gpu_ws.d_exact_leaves, gpu_ws.d_exact_weights,
++                    oracle.d_head, oracle.d_parent, oracle.d_depth, oracle.d_dist_root,
++                    gpu_ws.d_D_cond, gpu_ws.d_pair_exact_D
++                );
++                CUDA_CHECK(cudaMemcpy(h_pair_exact_D.data(), gpu_ws.d_pair_exact_D, (size_t)n_pairs * sizeof(double), cudaMemcpyDeviceToHost));
++            }
++
++            std::vector<float> h_D_cond;
++            if (!uncap_a.empty()) {
++                h_D_cond.resize((size_t)K * K);
++                CUDA_CHECK(cudaMemcpy(h_D_cond.data(), gpu_ws.d_D_cond, (size_t)K * K * sizeof(float), cudaMemcpyDeviceToHost));
++            }
++
++            double exact_delta_L = 0.0;
++            for (size_t pid = 0; pid < pair_a.size(); ++pid) {
++                int32_t a = pair_a[pid], b = pair_b[pid];
++                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
++                exact_delta_L += w_diff * h_pair_exact_D[pid];
++            }
++            for (size_t uid = 0; uid < uncap_a.size(); ++uid) {
++                int32_t a = uncap_a[uid], b = uncap_b[uid];
++                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
++                exact_delta_L += w_diff * (double)h_D_cond[(size_t)a * K + b];
++            }
++
++            if (exact_delta_L >= -1e-6) {
++                v_cf = init_v_cf;
++                perm = init_perm;
++                return 0.0;
++            }
++            v_cf = best_v_cf;
++            perm = best_perm;
++            return exact_delta_L;
++        }
++    }
++
+     v_cf = best_v_cf;
+     perm = best_perm;
+     return best_L - init_L;
+@@ -2023,24 +2293,54 @@
+                 std::vector<float> prof_weights;
+                 prof_leaves.reserve((size_t)K * 4);
+                 prof_weights.reserve((size_t)K * 4);
++                bool need_exact_prof = false;
+                 for (int32_t a = 0; a < K; ++a) {
+                     prof_offsets[a] = (int32_t)prof_leaves.size();
+                     compute_clade_dyadic_profile(
+                         super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                         node_rep0.data(), gpu_ws.max_prof_leaves, prof_leaves, prof_weights
+                     );
++                    if (gpu_ws.max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > gpu_ws.max_prof_leaves) {
++                        need_exact_prof = true;
++                    }
+                 }
+                 prof_offsets[K] = (int32_t)prof_leaves.size();
++
++                std::vector<int32_t> exact_prof_offsets;
++                std::vector<int32_t> exact_prof_leaves;
++                std::vector<float> exact_prof_weights;
++                if (need_exact_prof) {
++                    exact_prof_offsets.resize(K + 1, 0);
++                    exact_prof_leaves.reserve((size_t)N);
++                    exact_prof_weights.reserve((size_t)N);
++                    for (int32_t a = 0; a < K; ++a) {
++                        exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
++                        if (leaf_cnt[super_roots[a]] <= gpu_ws.max_prof_leaves) {
++                            exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
++                            exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
++                        } else {
++                            compute_clade_dyadic_profile(
++                                super_roots[a], N, curr_c1.data(), curr_c2.data(),
++                                node_rep0.data(), -1, exact_prof_leaves, exact_prof_weights
++                            );
++                        }
++                    }
++                    exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
++                }
+ 
+                 std::vector<int64_t> v_sk(K - 1), v_cf(K - 1);
+                 std::vector<int32_t> perm(K);
+                 encode_rooted_to_v_c(sk_c1.data(), sk_c2.data(), K, v_sk.data());
+                 relabel_cherry_first_c(v_sk.data(), K, 0, v_cf.data(), perm.data());
+ 
+-                optimize_skeleton_on_gpu(
++                double dL = optimize_skeleton_on_gpu(
+                     K, 60, prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+-                    oracle, gpu_ws, v_cf, perm
++                    oracle, gpu_ws, v_cf, perm,
++                    need_exact_prof ? exact_prof_offsets.data() : NULL,
++                    need_exact_prof ? exact_prof_leaves.data() : NULL,
++                    need_exact_prof ? exact_prof_weights.data() : NULL
+                 );
++                if (dL == 0.0) continue;
+ 
+                 int32_t R_sk = 2 * K - 1;
+                 std::vector<int32_t> new_sk_c1(R_sk), new_sk_c2(R_sk);
+--- rev3/bench_rnasim_gpu.cu
++++ rev4/bench_rnasim_gpu.cu
+@@ -212,7 +212,8 @@
+ /* Build K x K condensed distance matrix on the fly from dyadic-weighted super-leaf profiles:
+  *   D_cond[a, b] = sum_{p in prof(a)} sum_{q in prof(b)} w_p * w_q * D(leaf_p, leaf_q).
+  * Each super-leaf profile is stored in CSR format (d_prof_offsets, d_prof_leaves, d_prof_weights)
+- * with exact dyadic weights w_p = 2^{-depth(leaf_p)} summing to 1. */
++ * with nonnegative weights w_p summing to 1 (exact dyadic weights w_p = 2^{-depth(leaf_p)} when
++ * leaf_cnt <= max_prof_leaves or max_prof_leaves <= 0; approximate frontier-subtree collapse above cap). */
+ __global__ void k_build_real_seq_condensed_D(
+     int32_t K, int32_t W,
+     const int32_t * __restrict__ d_prof_offsets,
+@@ -245,6 +246,57 @@
+         }
+         d_D_cond[(size_t)a * K + b] = d_val;
+         d_D_cond[(size_t)b * K + a] = d_val;
++    }
++}
++
++/* Block-parallel exact refinement of selected super-leaf pairs (a, b) using uncapped
++ * dyadic profiles (d_exact_offsets, d_exact_leaves, d_exact_weights) and on-the-fly JC69
++ * popcount distances. One 256-thread block evaluates one pair
++ * (a, b) = (d_pair_a[blockIdx.x], d_pair_b[blockIdx.x]) in FP64, updating d_D_cond[a * K + b],
++ * d_D_cond[b * K + a], and d_pair_exact_D[pid]. */
++__global__ void k_refine_real_seq_condensed_D_pairs(
++    int32_t K, int32_t W, int32_t n_pairs,
++    const int32_t  * __restrict__ d_pair_a,
++    const int32_t  * __restrict__ d_pair_b,
++    const int32_t  * __restrict__ d_exact_offsets,
++    const int32_t  * __restrict__ d_exact_leaves,
++    const float    * __restrict__ d_exact_weights,
++    const uint64_t * __restrict__ d_packed_seqs,
++    float  * __restrict__ d_D_cond,
++    double * __restrict__ d_pair_exact_D
++) {
++    int32_t pid = blockIdx.x;
++    if (pid >= n_pairs) return;
++    int32_t a = d_pair_a[pid];
++    int32_t b = d_pair_b[pid];
++    int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
++    int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
++    int32_t len_a = end_a - off_a;
++    int32_t len_b = end_b - off_b;
++    int64_t total_pq = (int64_t)len_a * (int64_t)len_b;
++
++    double my_sum = 0.0;
++    for (int64_t idx = threadIdx.x; idx < total_pq; idx += blockDim.x) {
++        int32_t p = off_a + (int32_t)(idx / len_b);
++        int32_t q = off_b + (int32_t)(idx % len_b);
++        int32_t la = d_exact_leaves[p];
++        int32_t lb = d_exact_leaves[q];
++        double w = (double)d_exact_weights[p] * (double)d_exact_weights[q];
++        double d = (double)dev_jc69_dist_popc(la, lb, d_packed_seqs, W);
++        my_sum += w * d;
++    }
++    __shared__ double s_sum[256];
++    s_sum[threadIdx.x] = my_sum;
++    __syncthreads();
++    for (int32_t s = 128; s > 0; s >>= 1) {
++        if (threadIdx.x < s) s_sum[threadIdx.x] += s_sum[threadIdx.x + s];
++        __syncthreads();
++    }
++    if (threadIdx.x == 0) {
++        double exact_val = s_sum[0];
++        d_pair_exact_D[pid] = exact_val;
++        d_D_cond[(size_t)a * K + b] = (float)exact_val;
++        d_D_cond[(size_t)b * K + a] = (float)exact_val;
+     }
+ }
+ 
+@@ -836,7 +888,11 @@
+ /* Compute the dyadic leaf-weight profile w(x) = 2^{-depth_u(x)} for a rooted clade u.
+  * Expands internal nodes in best-first order (highest weight w = 2^{-d} first).
+  * When max_prof_leaves <= 0 or leaf_cnt[u] <= max_prof_leaves (for balanced, unbalanced,
+- * or caterpillar clades alike), all leaves in u are emitted with their exact dyadic weights. */
++ * or caterpillar clades alike), all leaves in u are emitted with their exact dyadic weights.
++ * When max_prof_leaves > 0 and leaf_cnt[u] > max_prof_leaves, expansion stops at max_prof_leaves
++ * entries and each remaining frontier subtree in the priority queue collapses its mass onto a
++ * single representative leaf node_rep0[top.u] (an approximation that can retain substantial
++ * collapsed mass on balanced clades of size > max_prof_leaves). */
+ static void compute_clade_dyadic_profile(
+     int32_t u, int32_t N,
+     const int32_t *c1_r, const int32_t *c2_r,
+@@ -848,6 +904,31 @@
+     if (u < N) {
+         prof_leaves_out.push_back(u);
+         prof_weights_out.push_back(1.0f);
++        return;
++    }
++    if (max_prof_leaves < 0) {
++        struct StackEntry { int32_t u; double weight; };
++        std::vector<StackEntry> st;
++        st.reserve(64);
++        st.push_back({u, 1.0});
++        while (!st.empty()) {
++            StackEntry top = st.back();
++            st.pop_back();
++            int32_t b0 = c1_r[top.u], b1 = c2_r[top.u];
++            double hw = 0.5 * top.weight;
++            if (b1 < N) {
++                prof_leaves_out.push_back(b1);
++                prof_weights_out.push_back((float)hw);
++            } else {
++                st.push_back({b1, hw});
++            }
++            if (b0 < N) {
++                prof_leaves_out.push_back(b0);
++                prof_weights_out.push_back((float)hw);
++            } else {
++                st.push_back({b0, hw});
++            }
++        }
+         return;
+     }
+     struct WeightedNode {
+@@ -891,7 +972,9 @@
+ 
+ /* Compute the unrooted dyadic leaf-weight profile w_out(x) = 2^{-d_unrooted(sub_root, x)}
+  * for the entire outside component V \ L(sub_root) across the full ancestor path to root_r
+- * (suppressing degree-2 root_r). Expands directed subtrees in best-first weight order. */
++ * (suppressing degree-2 root_r). Expands directed subtrees in best-first weight order.
++ * Exact when max_prof_leaves <= 0 or N - leaf_cnt[sub_root] <= max_prof_leaves; above a positive
++ * cap max_prof_leaves > 0, unresolved directed frontier subtrees collapse onto node_rep0 representatives. */
+ static void compute_outgroup_dyadic_profile(
+     int32_t sub_root, int32_t root_r, int32_t N,
+     const int32_t *c1_r, const int32_t *c2_r,
+@@ -908,6 +991,36 @@
+     if (start_u < N) {
+         prof_leaves_out.push_back(start_u);
+         prof_weights_out.push_back(1.0f);
++        return;
++    }
++    if (max_prof_leaves < 0) {
++        struct DirectedStackEntry { int32_t u; int32_t from_u; double weight; };
++        std::vector<DirectedStackEntry> st;
++        st.reserve(64);
++        st.push_back({start_u, sub_root, 1.0});
++        while (!st.empty()) {
++            DirectedStackEntry top = st.back();
++            st.pop_back();
++            int32_t v = top.u;
++            int32_t n0 = c1_r[v];
++            int32_t n1 = c2_r[v];
++            int32_t pv = parent_r[v];
++            int32_t n2 = (pv == root_r)
++                ? ((c1_r[root_r] == v) ? c2_r[root_r] : c1_r[root_r])
++                : pv;
++            int32_t nbs[3] = {n0, n1, n2};
++            double hw = 0.5 * top.weight;
++            for (int k = 2; k >= 0; --k) {
++                int32_t nb = nbs[k];
++                if (nb == top.from_u || nb < 0) continue;
++                if (nb < N) {
++                    prof_leaves_out.push_back(nb);
++                    prof_weights_out.push_back((float)hw);
++                } else {
++                    st.push_back({nb, v, hw});
++                }
++            }
++        }
+         return;
+     }
+     struct DirectedWeightedNode {
+@@ -1220,10 +1333,18 @@
+ struct RnaSimGpuWorkspace {
+     int32_t dev_id;
+     int32_t max_K;
++    size_t  exact_prof_cap;
++    size_t  pair_cap;
+     cudaStream_t stream;
+     int32_t *d_prof_offsets;
+     int32_t *d_prof_leaves;
+     float   *d_prof_weights;
++    int32_t *d_exact_offsets;
++    int32_t *d_exact_leaves;
++    float   *d_exact_weights;
++    int32_t *d_pair_a;
++    int32_t *d_pair_b;
++    double  *d_pair_exact_D;
+     int32_t *d_perm;
+     float   *d_D;
+     float   *d_subdist;
+@@ -1249,11 +1370,19 @@
+         int32_t R = 2 * K_cap - 1;
+         int32_t M = 2 * K_cap - 2;
+         size_t prof_cap = std::max((size_t)128 * (size_t)K_cap, (size_t)2048);
++        exact_prof_cap = std::max(prof_cap, (size_t)16384);
++        pair_cap = (size_t)K_cap * (size_t)K_cap / 2 + 16;
+         CUDA_CHECK(cudaSetDevice(dev_id));
+         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+         CUDA_CHECK(cudaMalloc(&d_prof_offsets, (size_t)(K_cap + 1) * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_prof_leaves,  prof_cap * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_prof_weights, prof_cap * sizeof(float)));
++        CUDA_CHECK(cudaMalloc(&d_exact_offsets, (size_t)(K_cap + 1) * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
++        CUDA_CHECK(cudaMalloc(&d_pair_a,        pair_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_pair_b,        pair_cap * sizeof(int32_t)));
++        CUDA_CHECK(cudaMalloc(&d_pair_exact_D,  pair_cap * sizeof(double)));
+         CUDA_CHECK(cudaMalloc(&d_perm,        (size_t)K_cap * sizeof(int32_t)));
+         CUDA_CHECK(cudaMalloc(&d_D,           (size_t)K_cap * K_cap * sizeof(float)));
+         CUDA_CHECK(cudaMalloc(&d_subdist,     (size_t)M * M * sizeof(float)));
+@@ -1275,10 +1404,24 @@
+         CUDA_CHECK(cudaFuncSetAttribute(k_spr_rows_top1, cudaFuncAttributeMaxDynamicSharedMemorySize, 90112));
+     }
+ 
++    void ensure_exact_prof_cap(size_t needed) {
++        if (needed > exact_prof_cap) {
++            CUDA_CHECK(cudaSetDevice(dev_id));
++            CUDA_CHECK(cudaStreamSynchronize(stream));
++            cudaFree(d_exact_leaves);
++            cudaFree(d_exact_weights);
++            exact_prof_cap = needed + 4096;
++            CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
++            CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
++        }
++    }
++
+     void destroy() {
+         CUDA_CHECK(cudaSetDevice(dev_id));
+         CUDA_CHECK(cudaStreamDestroy(stream));
+         cudaFree(d_prof_offsets); cudaFree(d_prof_leaves); cudaFree(d_prof_weights);
++        cudaFree(d_exact_offsets); cudaFree(d_exact_leaves); cudaFree(d_exact_weights);
++        cudaFree(d_pair_a); cudaFree(d_pair_b); cudaFree(d_pair_exact_D);
+         cudaFree(d_perm); cudaFree(d_D); cudaFree(d_subdist); cudaFree(d_nd_u); cudaFree(d_row_scratch);
+         cudaFree(d_v_curr); cudaFree(d_c1_r); cudaFree(d_c2_r); cudaFree(d_v_map); cudaFree(d_m_lmin);
+         cudaFree(d_next_k); cudaFree(d_parent_u); cudaFree(d_sub_size); cudaFree(d_tin);
+@@ -1362,17 +1505,79 @@
+     perm = new_perm;
+ }
+ 
++/* Compute all-pairs unrooted topological edge distances dist_out[a * K + b]
++ * between original super-leaves a, b in {0, ..., K-1} for skeleton (v_cf, perm)
++ * in O(K^2) time by visiting each leaf pair once at its rooted LCA. */
++static void compute_skeleton_leaf_dists(
++    const int64_t *v_cf, const int32_t *perm, int32_t K,
++    std::vector<int32_t> &dist_out
++) {
++    const int32_t R_sk = 2 * K - 1;
++    const int32_t root_r = R_sk - 1;
++    std::vector<int32_t> c1(R_sk), c2(R_sk), uf(R_sk);
++    for (int32_t x = 0; x < K; ++x) uf[x] = x;
++    for (int32_t k = 0; k < K - 1; ++k) {
++        int32_t i = K - 2 - k;
++        int32_t m = K + k;
++        int32_t x = (int32_t)v_cf[i];
++        int32_t y = i + 1;
++        c1[m] = uf[y];
++        c2[m] = uf[x];
++        uf[x] = m;
++    }
++    std::vector<int32_t> depth(R_sk, 0);
++    for (int32_t u = root_r; u >= K; --u) {
++        depth[c1[u]] = depth[u] + 1;
++        depth[c2[u]] = depth[u] + 1;
++    }
++    dist_out.assign((size_t)K * K, 0);
++    std::vector<std::vector<int32_t>> sub_leaves(R_sk);
++    for (int32_t x = 0; x < K; ++x) sub_leaves[x].push_back(x);
++    for (int32_t u = K; u <= root_r; ++u) {
++        int32_t b0 = c1[u], b1 = c2[u];
++        const auto &L0 = sub_leaves[b0];
++        const auto &L1 = sub_leaves[b1];
++        int32_t sub = (u == root_r) ? 1 : (2 * depth[u]);
++        for (int32_t x : L0) {
++            int32_t ox = perm[x];
++            int32_t dx = depth[x] - sub;
++            for (int32_t y : L1) {
++                int32_t oy = perm[y];
++                int32_t d = dx + depth[y];
++                dist_out[(size_t)ox * K + oy] = d;
++                dist_out[(size_t)oy * K + ox] = d;
++            }
++        }
++        if (u < root_r) {
++            auto &Lu = sub_leaves[u];
++            Lu.reserve(L0.size() + L1.size());
++            Lu.insert(Lu.end(), L0.begin(), L0.end());
++            Lu.insert(Lu.end(), L1.begin(), L1.end());
++            std::vector<int32_t>().swap(sub_leaves[b0]);
++            std::vector<int32_t>().swap(sub_leaves[b1]);
++        }
++    }
++}
++
++/* Optimize one K-leaf skeleton on GPU with path-disjoint SPR batching, monotonic condensed-skeleton
++ * BME check, and (when exact_prof_* is supplied) an exact full-objective GPU acceptance check on
++ * all changed super-leaf pairs involving capped clades or capped outside profiles. */
+ static double optimize_skeleton_on_gpu(
+     int32_t K, int32_t W, int32_t max_iters, int32_t max_batch_cap,
+     const int32_t *prof_offsets, const int32_t *prof_leaves, const float *prof_weights,
+     const uint64_t *d_packed_seqs,
+     RnaSimGpuWorkspace &gpu_ws,
+-    std::vector<int64_t> &v_cf, std::vector<int32_t> &perm
++    std::vector<int64_t> &v_cf, std::vector<int32_t> &perm,
++    const int32_t *exact_prof_offsets = NULL,
++    const int32_t *exact_prof_leaves = NULL,
++    const float *exact_prof_weights = NULL
+ ) {
+     CUDA_CHECK(cudaSetDevice(gpu_ws.dev_id));
+     const int32_t R_sk = 2 * K - 1;
+     const int32_t M_sk = 2 * K - 2;
+     const int32_t root_u_sk = M_sk - 1;
++    const std::vector<int64_t> init_v_cf = v_cf;
++    const std::vector<int32_t> init_perm = perm;
+ 
+     int32_t total_prof = prof_offsets[K];
+     CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_prof_offsets, prof_offsets, (size_t)(K + 1) * sizeof(int32_t),    cudaMemcpyHostToDevice, gpu_ws.stream));
+@@ -1525,6 +1730,100 @@
+         int32_t r_nb = adj_u_cf[3 * root_u_sk + 0];
+         relabel_from_adj_u(adj_u_cf.data(), K, root_u_sk, r_nb, iter & 1, v_cf, perm);
+     }
++
++    if (best_L >= init_L - 1e-6) {
++        v_cf = init_v_cf;
++        perm = init_perm;
++        return 0.0;
++    }
++
++    if (exact_prof_offsets != NULL && exact_prof_leaves != NULL && exact_prof_weights != NULL) {
++        std::vector<uint8_t> is_capped(K, 0);
++        bool any_capped = false;
++        for (int32_t a = 0; a < K; ++a) {
++            int32_t cap_len = prof_offsets[a + 1] - prof_offsets[a];
++            int32_t ex_len  = exact_prof_offsets[a + 1] - exact_prof_offsets[a];
++            if (ex_len != cap_len) {
++                is_capped[a] = 1;
++                any_capped = true;
++            }
++        }
++        if (any_capped) {
++            std::vector<int32_t> dist_init, dist_best;
++            compute_skeleton_leaf_dists(init_v_cf.data(), init_perm.data(), K, dist_init);
++            compute_skeleton_leaf_dists(best_v_cf.data(), best_perm.data(), K, dist_best);
++
++            std::vector<int32_t> pair_a, pair_b;
++            std::vector<int32_t> uncap_a, uncap_b;
++            for (int32_t a = 0; a < K; ++a) {
++                for (int32_t b = a + 1; b < K; ++b) {
++                    if (dist_best[(size_t)a * K + b] != dist_init[(size_t)a * K + b]) {
++                        if (is_capped[a] || is_capped[b]) {
++                            pair_a.push_back(a);
++                            pair_b.push_back(b);
++                        } else {
++                            uncap_a.push_back(a);
++                            uncap_b.push_back(b);
++                        }
++                    }
++                }
++            }
++            if (pair_a.empty() && uncap_a.empty()) {
++                v_cf = init_v_cf;
++                perm = init_perm;
++                return 0.0;
++            }
++
++            std::vector<double> h_pair_exact_D(pair_a.size(), 0.0);
++            if (!pair_a.empty()) {
++                int32_t n_pairs = (int32_t)pair_a.size();
++                int32_t total_exact_prof = exact_prof_offsets[K];
++                gpu_ws.ensure_exact_prof_cap((size_t)total_exact_prof);
++                CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_exact_offsets, exact_prof_offsets, (size_t)(K + 1) * sizeof(int32_t),          cudaMemcpyHostToDevice, gpu_ws.stream));
++                CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_exact_leaves,  exact_prof_leaves,  (size_t)total_exact_prof * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
++                CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_exact_weights, exact_prof_weights, (size_t)total_exact_prof * sizeof(float),   cudaMemcpyHostToDevice, gpu_ws.stream));
++                CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_pair_a, pair_a.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
++                CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_pair_b, pair_b.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
++
++                k_refine_real_seq_condensed_D_pairs<<<n_pairs, 256, 0, gpu_ws.stream>>>(
++                    K, W, n_pairs, gpu_ws.d_pair_a, gpu_ws.d_pair_b,
++                    gpu_ws.d_exact_offsets, gpu_ws.d_exact_leaves, gpu_ws.d_exact_weights,
++                    d_packed_seqs, gpu_ws.d_D, gpu_ws.d_pair_exact_D
++                );
++                CUDA_CHECK(cudaMemcpyAsync(h_pair_exact_D.data(), gpu_ws.d_pair_exact_D, (size_t)n_pairs * sizeof(double), cudaMemcpyDeviceToHost, gpu_ws.stream));
++                CUDA_CHECK(cudaStreamSynchronize(gpu_ws.stream));
++            }
++
++            std::vector<float> h_D_cond;
++            if (!uncap_a.empty()) {
++                h_D_cond.resize((size_t)K * K);
++                CUDA_CHECK(cudaMemcpyAsync(h_D_cond.data(), gpu_ws.d_D, (size_t)K * K * sizeof(float), cudaMemcpyDeviceToHost, gpu_ws.stream));
++                CUDA_CHECK(cudaStreamSynchronize(gpu_ws.stream));
++            }
++
++            double exact_delta_L = 0.0;
++            for (size_t pid = 0; pid < pair_a.size(); ++pid) {
++                int32_t a = pair_a[pid], b = pair_b[pid];
++                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
++                exact_delta_L += w_diff * h_pair_exact_D[pid];
++            }
++            for (size_t uid = 0; uid < uncap_a.size(); ++uid) {
++                int32_t a = uncap_a[uid], b = uncap_b[uid];
++                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
++                exact_delta_L += w_diff * (double)h_D_cond[(size_t)a * K + b];
++            }
++
++            if (exact_delta_L >= -1e-6) {
++                v_cf = init_v_cf;
++                perm = init_perm;
++                return 0.0;
++            }
++            v_cf = best_v_cf;
++            perm = best_perm;
++            return exact_delta_L;
++        }
++    }
++
+     v_cf = best_v_cf;
+     perm = best_perm;
+     return best_L - init_L;
+@@ -1552,7 +1851,11 @@
+     std::vector<int32_t> &curr_c1, std::vector<int32_t> &curr_c2,
+     std::vector<int32_t> &parent_r, std::vector<int32_t> &leaf_cnt, std::vector<int32_t> &node_rep0,
+     int32_t max_internals = 1200,
+-    const uint8_t *stop_at_comp_root = NULL
++    const uint8_t *stop_at_comp_root = NULL,
++    const int32_t *outgroup_c1 = NULL,
++    const int32_t *outgroup_c2 = NULL,
++    const int32_t *outgroup_par = NULL,
++    const int32_t *outgroup_rep0 = NULL
+ ) {
+     const int32_t root_r = 2 * N - 2;
+     const int32_t max_prof_leaves = (N <= 2048) ? 0 : 64;
+@@ -1580,14 +1883,39 @@
+         std::vector<float> prof_weights;
+         prof_leaves.reserve(4 * K);
+         prof_weights.reserve(4 * K);
++        bool need_exact_prof = false;
+         for (int32_t a = 0; a < K; ++a) {
+             prof_offsets[a] = (int32_t)prof_leaves.size();
+             compute_clade_dyadic_profile(
+                 super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
+                 max_prof_leaves, prof_leaves, prof_weights
+             );
++            if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
++                need_exact_prof = true;
++            }
+         }
+         prof_offsets[K] = (int32_t)prof_leaves.size();
++
++        std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
++        std::vector<float> exact_prof_weights;
++        if (need_exact_prof) {
++            exact_prof_offsets.resize(K + 1, 0);
++            exact_prof_leaves.reserve((size_t)N);
++            exact_prof_weights.reserve((size_t)N);
++            for (int32_t a = 0; a < K; ++a) {
++                exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
++                if (leaf_cnt[super_roots[a]] <= max_prof_leaves) {
++                    exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
++                    exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
++                } else {
++                    compute_clade_dyadic_profile(
++                        super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
++                        -1, exact_prof_leaves, exact_prof_weights
++                    );
++                }
++            }
++            exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
++        }
+ 
+         std::vector<int64_t> v_mb(K - 1);
+         std::vector<int32_t> perm_mb(K);
+@@ -1596,8 +1924,12 @@
+         double dL = optimize_skeleton_on_gpu(
+             K, W, max_iters, 32,
+             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+-            d_packed_seqs, gpu_ws, v_mb, perm_mb
++            d_packed_seqs, gpu_ws, v_mb, perm_mb,
++            need_exact_prof ? exact_prof_offsets.data() : NULL,
++            need_exact_prof ? exact_prof_leaves.data() : NULL,
++            need_exact_prof ? exact_prof_weights.data() : NULL
+         );
++        if (dL == 0.0) return 0.0;
+ 
+         int32_t R_k = 2 * K - 1;
+         std::vector<int32_t> new_sk_c1(R_k), new_sk_c2(R_k), scratch_uf(R_k);
+@@ -1634,18 +1966,63 @@
+         std::vector<float> prof_weights;
+         prof_leaves.reserve(4 * K);
+         prof_weights.reserve(4 * K);
++        bool need_exact_prof = false;
+         for (int32_t a = 0; a < K_in; ++a) {
+             prof_offsets[a] = (int32_t)prof_leaves.size();
+             compute_clade_dyadic_profile(
+                 super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
+                 max_prof_leaves, prof_leaves, prof_weights
+             );
++            if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
++                need_exact_prof = true;
++            }
+         }
+         prof_offsets[K_in] = (int32_t)prof_leaves.size();
+         prof_leaves.insert(prof_leaves.end(), outgroup_leaves.begin(), outgroup_leaves.end());
+         prof_weights.insert(prof_weights.end(), outgroup_weights.begin(), outgroup_weights.end());
+         prof_offsets[K] = (int32_t)prof_leaves.size();
+ 
++        int32_t outgroup_true_leaves = N - leaf_cnt[sub_root];
++        if (max_prof_leaves > 0 && outgroup_true_leaves > (int32_t)outgroup_leaves.size()) {
++            need_exact_prof = true;
++        }
++
++        std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
++        std::vector<float> exact_prof_weights;
++        if (need_exact_prof) {
++            const int32_t *oc1 = (outgroup_c1 != NULL) ? outgroup_c1 : curr_c1.data();
++            const int32_t *oc2 = (outgroup_c2 != NULL) ? outgroup_c2 : curr_c2.data();
++            const int32_t *opar = (outgroup_par != NULL) ? outgroup_par : parent_r.data();
++            const int32_t *orep = (outgroup_rep0 != NULL) ? outgroup_rep0 : node_rep0.data();
++
++            exact_prof_offsets.resize(K + 1, 0);
++            exact_prof_leaves.reserve((size_t)N);
++            exact_prof_weights.reserve((size_t)N);
++            for (int32_t a = 0; a < K_in; ++a) {
++                exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
++                if (max_prof_leaves <= 0 || leaf_cnt[super_roots[a]] <= max_prof_leaves) {
++                    exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
++                    exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
++                } else {
++                    compute_clade_dyadic_profile(
++                        super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
++                        -1, exact_prof_leaves, exact_prof_weights
++                    );
++                }
++            }
++            exact_prof_offsets[K_in] = (int32_t)exact_prof_leaves.size();
++            if (outgroup_true_leaves <= (int32_t)outgroup_leaves.size()) {
++                exact_prof_leaves.insert(exact_prof_leaves.end(), outgroup_leaves.begin(), outgroup_leaves.end());
++                exact_prof_weights.insert(exact_prof_weights.end(), outgroup_weights.begin(), outgroup_weights.end());
++            } else {
++                compute_outgroup_dyadic_profile(
++                    sub_root, root_r, N, oc1, oc2, opar, orep,
++                    -1, exact_prof_leaves, exact_prof_weights
++                );
++            }
++            exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
++        }
++
+         std::vector<int64_t> v_mb(K - 1);
+         std::vector<int32_t> perm_mb(K);
+         relabel_from_rooted_tree(sk_c1.data(), sk_c2.data(), K, 0, v_mb.data(), perm_mb.data());
+@@ -1653,8 +2030,12 @@
+         double dL = optimize_skeleton_on_gpu(
+             K, W, max_iters, 32,
+             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+-            d_packed_seqs, gpu_ws, v_mb, perm_mb
++            d_packed_seqs, gpu_ws, v_mb, perm_mb,
++            need_exact_prof ? exact_prof_offsets.data() : NULL,
++            need_exact_prof ? exact_prof_leaves.data() : NULL,
++            need_exact_prof ? exact_prof_weights.data() : NULL
+         );
++        if (dL == 0.0) return 0.0;
+ 
+         std::vector<int32_t> c1_cf, c2_cf, v_map_cf, m_lmin_cf, next_k_cf, parent_u_cf, sub_sz_cf, tin_cf, adj_u_cf;
+         int32_t other_rc, rc0, rc1, rc2;
+@@ -1768,6 +2149,7 @@
+             }
+         }
+ 
++        const std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+         #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+         for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+             int32_t tid = omp_get_thread_num();
+@@ -1775,7 +2157,8 @@
+             total_mb_delta_L += run_subtree_minibatch_window(
+                 sr, N, W, 1, 25, node_has_active, out_leaves_wave[idx], out_weights_wave[idx],
+                 d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                1200, is_comp_root.data()
++                1200, is_comp_root.data(),
++                snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
+             );
+         }
+         if (lvl + 1 < level_waves.size()) {
+@@ -1812,6 +2195,7 @@
+                     }
+                 }
+ 
++                const std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+                 #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+                 for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                     int32_t tid = omp_get_thread_num();
+@@ -1819,7 +2203,8 @@
+                     total_mb_delta_L += run_subtree_minibatch_window(
+                         sr, N, W, 1, 25, node_has_active, out_leaves_wave[idx], out_weights_wave[idx],
+                         d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                        1200, is_comp_root_stag.data()
++                        1200, is_comp_root_stag.data(),
++                        snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
+                     );
+                 }
+                 compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+@@ -1863,6 +2248,7 @@
+             }
+         }
+ 
++        const std::vector<int32_t> snap_c1_p2b = curr_c1, snap_c2_p2b = curr_c2, snap_par_p2b = parent_r, snap_rep0_p2b = node_rep0;
+         #pragma omp parallel for schedule(dynamic, 1) num_threads(n_gpus) reduction(+:total_mb_delta_L)
+         for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
+             int32_t tid = omp_get_thread_num();
+@@ -1871,7 +2257,8 @@
+             total_mb_delta_L += run_subtree_minibatch_window(
+                 sr, N, W, c_thresh, 25, node_has_active, out_leaves_p2b[idx], out_weights_p2b[idx],
+                 d_packed_seqs[tid], mb_ws[tid], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+-                1200, NULL
++                1200, NULL,
++                snap_c1_p2b.data(), snap_c2_p2b.data(), snap_par_p2b.data(), snap_rep0_p2b.data()
+             );
+         }
+         for (int32_t idx = (int32_t)spine_above_p2b.size() - 1; idx >= 0; --idx) {
+--- rev3/verify_all.c
++++ rev4/verify_all.c
+@@ -1001,7 +1001,66 @@
+             if (fabs(cond_chg17 - 0.029296875) > 1e-12 || fabs(cond_chg17 - full_chg17) > 1e-12) test9_ok = 0;
+         }
+ 
+-        printf("[%s] Test 9: Non-Cherry-First Guard, 8-Thread Workspace Isolation, & Caterpillar Condensation\n\n",
++        /* 9d. Balanced-clade frontier-collapse counterexample vs exact uncapped condensation (N=22, 16-leaf balanced clade A) */
++        {
++            const int32_t N22 = 22;
++            double D22[22 * 22] = {0};
++            /* 4 frontier representatives {0, 4, 8, 12} of 16-leaf balanced clade A, plus C=17, 18, 19 */
++            for (int32_t i = 0; i < N22; ++i) {
++                int in_s_i = (i == 0 || i == 4 || i == 8 || i == 12 || i == 17 || i == 18 || i == 19);
++                for (int32_t j = i + 1; j < N22; ++j) {
++                    int in_s_j = (j == 0 || j == 4 || j == 8 || j == 12 || j == 17 || j == 18 || j == 19);
++                    D22[i * N22 + j] = D22[j * N22 + i] = 2.0 + (in_s_i != in_s_j ? 1.0 : 0.0);
++                }
++            }
++            int32_t c1_22[43], c2_22[43];
++            int32_t id = N22;
++            int32_t lvl1[8], lvl2[4], lvl3[2];
++            for (int32_t k = 0; k < 8; ++k) { lvl1[k] = id++; c1_22[lvl1[k]] = 2 * k; c2_22[lvl1[k]] = 2 * k + 1; }
++            for (int32_t k = 0; k < 4; ++k) { lvl2[k] = id++; c1_22[lvl2[k]] = lvl1[2 * k]; c2_22[lvl2[k]] = lvl1[2 * k + 1]; }
++            for (int32_t k = 0; k < 2; ++k) { lvl3[k] = id++; c1_22[lvl3[k]] = lvl2[2 * k]; c2_22[lvl3[k]] = lvl2[2 * k + 1]; }
++            int32_t rA = id++; c1_22[rA] = lvl3[0]; c2_22[rA] = lvl3[1];
++            int32_t g0 = id++; c1_22[g0] = 18; c2_22[g0] = 19;
++            int32_t g1 = id++; c1_22[g1] = 20; c2_22[g1] = 21;
++            int32_t rG = id++; c1_22[rG] = g0; c2_22[rG] = g1;
++            int32_t u_left = id++;  c1_22[u_left] = rA; c2_22[u_left] = 16;
++            int32_t u_right = id++; c1_22[u_right] = 17; c2_22[u_right] = rG;
++            int32_t root22 = id++;  c1_22[root22] = u_left; c2_22[root22] = u_right;
++
++            int64_t v_bef22[21], v_aft22[21];
++            encode_rooted_to_v_c(c1_22, c2_22, N22, v_bef22);
++            c2_22[u_left] = 17; c1_22[u_right] = 16;
++            encode_rooted_to_v_c(c1_22, c2_22, N22, v_aft22);
++
++            double L_bef22 = brute_force_pauplin_bme_length(v_bef22, D22, N22, NULL);
++            double L_aft22 = brute_force_pauplin_bme_length(v_aft22, D22, N22, NULL);
++            double full_chg22 = L_aft22 - L_bef22;
++            /* True fraction of A in S is 4/16 = 1/4, so true full-tree change is 0.5 * (1/2 - 1/4) = +0.125 */
++            if (fabs(full_chg22 - 0.125) > 1e-12) test9_ok = 0;
++
++            int32_t dec_c1[43], dec_c2[43], sub_cnt[43];
++            decode_v_to_trees(v_bef22, N22, dec_c1, dec_c2, NULL);
++            for (int32_t x = 0; x < N22; ++x) sub_cnt[x] = 1;
++            uint8_t is_cond22[43] = {0};
++            for (int32_t u = N22; u < 2 * N22 - 1; ++u) {
++                sub_cnt[u] = sub_cnt[dec_c1[u]] + sub_cnt[dec_c2[u]];
++                if (sub_cnt[u] == 16) { is_cond22[u] = 1; break; }
++            }
++            int32_t n_eff = 0, n_eff2 = 0, super_map[43], leaf_to_super[43], super_map2[43], leaf_to_super2[43];
++            int64_t v_eff[21], v_eff_aft[21];
++            double omega[43], omega2[43], D_eff[22 * 22], D_eff2[22 * 22];
++            condense_tree_bme_c(v_bef22, D22, N22, is_cond22, &n_eff, v_eff, super_map, leaf_to_super, omega, D_eff);
++            condense_tree_bme_c(v_aft22, D22, N22, is_cond22, &n_eff2, v_eff_aft, super_map2, leaf_to_super2, omega2, D_eff2);
++            if (n_eff != 7 || n_eff2 != 7) test9_ok = 0;
++            for (int32_t l = 0; l < 16; ++l) {
++                if (fabs(omega[l] - (1.0 / 16.0)) > 1e-15) test9_ok = 0;
++            }
++            double cond_chg22 = brute_force_pauplin_bme_length(v_eff_aft, D_eff2, n_eff2, NULL)
++                              - brute_force_pauplin_bme_length(v_eff, D_eff, n_eff, NULL);
++            if (fabs(cond_chg22 - 0.125) > 1e-12 || fabs(cond_chg22 - full_chg22) > 1e-12) test9_ok = 0;
++        }
++
++        printf("[%s] Test 9: Non-Cherry-First Guard, 8-Thread Workspace Isolation, & Clade Condensation\n\n",
+                test9_ok ? "PASS" : "FAIL");
+         if (!test9_ok) all_passed = 0;
+     }
+--- rev3/paper/phylo2vec_bme_paper.tex
++++ rev4/paper/phylo2vec_bme_paper.tex
+@@ -42,7 +42,7 @@
+ \maketitle
+ 
+ \begin{abstract}
+-Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference and underlies standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a mathematical formulation and a high-performance software implementation for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ tree-based top-down cherry-first gauge transformation and an inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to very large trees on multi-core CPUs and GPUs, we prove five architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{Stackless Ancestor-Walk Top-Down Theorem} ($O(N \log N)$ expected work on balanced trees, $O(N^2)$ worst-case on caterpillars, with $O(1)$ stack space), (iii) the \emph{Branchless Cherry-First Tree Decoding and Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with 3-edge incident zeroing, $O(1)$ incremental destination mapping, and race-free SIMT parallel destination indexing, (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling paired with fused top-1 row candidate reductions, and (v) the \emph{Exact Clade-Condensation Theorem for Minibatch BME Optimization}, which collapses inactive clades into dyadic-weighted super-leaves to evaluate exact full-tree BME discrete gradients on active subtrees of size $N_{\text{eff}} \ll N$. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $99.2\%$ win/tie rate ($119/120$ trials) in BME tree length against FastME while requiring up to $3.32\times$ fewer $O(N^2)$ evaluations and running up to $4.16\times$ faster on Apple M5 and up to $5.74\times$ faster on AMD Threadripper PRO 5995WX (single core). At large scale ($N = 100 \dots 10{,}000{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on an Apple M5 Metal GPU, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ ($6.22\text{ ms}$ vs.\ $701.38\text{ ms}$) on an NVIDIA H100 80GB HBM3, $5.15\times$ end-to-end ($7.70\times$ Stage-3) scaling on 8$\times$ NVIDIA H100 at $N = 40{,}000$ ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves), distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ candidate moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), and clade-condensed minibatch optimization at $N = 1{,}000{,}000$, $5{,}000{,}000$, and $10{,}000{,}000$ taxa ($3.43\text{ s}$, $17.82\text{ s}$, and $39.20\text{ s}$ per full epoch on 8$\times$ NVIDIA H100 using $7.8\text{ GB}$ VRAM/GPU). Finally, on $1{,}596$-bp \texttt{JC69} and biophysical \textbf{RNASim} 16S rRNA sequence benchmarks up to $N = 100{,}000$ taxa, our GPU optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} in Robinson--Foulds topological accuracy across every tested scale while running up to $4{,}087\times$ faster than \texttt{FastME} and $303\times\text{--}688\times$ faster than \texttt{VeryFastTree} ($8{,}809$ vs.\ $8{,}857$ wrong splits at $N = 100{,}000$ in $1.16\text{ s}$ vs.\ $772.53\text{ s}$).
++Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference and underlies standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a mathematical formulation and a high-performance software implementation for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ tree-based top-down cherry-first gauge transformation and an inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to very large trees on multi-core CPUs and GPUs, we prove five architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{Stackless Ancestor-Walk Top-Down Theorem} ($O(N \log N)$ expected work on balanced trees, $O(N^2)$ worst-case on caterpillars, with $O(1)$ stack space), (iii) the \emph{Branchless Cherry-First Tree Decoding and Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with 3-edge incident zeroing, $O(1)$ incremental destination mapping, and race-free SIMT parallel destination indexing, (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling paired with fused top-1 row candidate reductions, and (v) the \emph{Exact Clade-Condensation Theorem for Minibatch BME Optimization}, which collapses inactive clades into dyadic-weighted super-leaves to evaluate exact full-tree BME discrete gradients on active subtrees of size $N_{\text{eff}} \ll N$. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $99.2\%$ win/tie rate ($119/120$ trials) in BME tree length against FastME while requiring up to $3.32\times$ fewer $O(N^2)$ evaluations and running up to $4.16\times$ faster on Apple M5 and up to $5.74\times$ faster on AMD Threadripper PRO 5995WX (single core). At large scale ($N = 100 \dots 10{,}000{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on an Apple M5 Metal GPU, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ ($6.22\text{ ms}$ vs.\ $701.38\text{ ms}$) on an NVIDIA H100 80GB HBM3, $5.15\times$ end-to-end ($7.70\times$ Stage-3) scaling on 8$\times$ NVIDIA H100 at $N = 40{,}000$ ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves), distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ candidate moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), and clade-condensed minibatch optimization at $N = 1{,}000{,}000$, $5{,}000{,}000$, and $10{,}000{,}000$ taxa ($3.43\text{ s}$, $17.82\text{ s}$, and $39.20\text{ s}$ per full epoch on 8$\times$ NVIDIA H100 using $7.8\text{ GB}$ VRAM/GPU). Finally, on $1{,}596$-bp \texttt{JC69} and biophysical \textbf{RNASim} 16S rRNA sequence benchmarks up to $N = 100{,}000$ taxa, our GPU optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} in Robinson--Foulds topological accuracy across every tested scale while running up to $4{,}087\times$ faster than \texttt{FastME} and $142\times\text{--}688\times$ faster than \texttt{VeryFastTree} ($8{,}805$ vs.\ $8{,}857$ wrong splits at $N = 100{,}000$ in $3.46\text{ s}$ vs.\ $772.53\text{ s}$).
+ \end{abstract}
+ 
+ \tableofcontents
+@@ -325,12 +325,16 @@
+ For any two leaves $x \in S_a$ and $y \in S_b$ in distinct clades ($a \neq b$), the unique path between $x$ and $y$ in $T$ decomposes into the path from $x$ to $r_a$ inside $S_a$ (containing $d_{S_a}(r_a, x)$ internal nodes), the skeleton path between super-leaves $a$ and $b$ in $\widetilde{T}$ (containing $d_{\widetilde{T}}(a, b)$ internal skeleton nodes), and the path from $r_b$ to $y$ inside $S_b$ (containing $d_{S_b}(r_b, y)$ internal nodes). Therefore $d_T(x, y) = d_{S_a}(r_a, x) + d_{\widetilde{T}}(a, b) + d_{S_b}(r_b, y)$, so Pauplin's weight factors multiplicatively as $2^{-d_T(x,y)} = \omega_x \, 2^{-d_{\widetilde{T}}(a,b)} \, \omega_y$. Summing over all unordered pairs $\{x, y\}$ and separating inter-clade pairs ($a \neq b$) from intra-clade pairs ($a = b$) yields Eq.~\eqref{eq:bme_condense_decomp}. Because any SPR move on $\widetilde{T}$ leaves the internal topologies of $S_0, \dots, S_{K-1}$ unchanged, the intra-clade sum $C_{\text{int}}$ cancels identically in $L(T^{(i \leftarrow j)}; D) - L(T; D)$.
+ \end{proof}
+ 
+-\begin{remark}[Algorithmic Tradeoff: $2^{-\text{depth}}$ Signal Dilution, Distance-Seeded Unpacking, and Best-First Dyadic Profile Condensation]
++\begin{remark}[Algorithmic Tradeoff: $2^{-\text{depth}}$ Signal Dilution, Distance-Seeded Unpacking, Capped Dyadic Surrogates, and Exact Changed-Pair Acceptance Verification]
+ \label{rem:minibatch_tradeoffs}
+ While Theorem~\ref{thm:clade_condense} guarantees that full-profile condensation (\texttt{condense\_tree\_bme\_c} and \texttt{k\_condense\_super\_profiles} $+$ \texttt{k\_build\_condensed\_D}) has zero approximation error for the condensed moves ($\Delta L$ is exact for each frozen clade moving as a unit), practical large-$N$ minibatch optimization involves two design considerations:
+ \begin{enumerate}
+     \item \textbf{Search-Space Restriction and $2^{-\text{depth}}$ Signal Dilution:} If a single misplaced taxon $x^*$ is buried at depth $d$ inside a frozen clade $S_b$ while its true sister clade $S_a$ is unpacked, its weight inside the super-leaf profile $\widetilde{\phi}(b) = \sum_{y \in S_b} 2^{-d(r_b, y)} \phi(y)$ is attenuated by $2^{-d}$, so the optimizer will not pull the entire clade $S_b$ across the tree unless $x^*$ itself is unpacked into the active minibatch; moving $x^*$ from $S_b$ to $S_a$ when $S_a$ and $S_b$ are unpacked in separate minibatches likewise requires multiple passes. Our minibatch schedulers (\texttt{select\_minibatch\_clades\_c} and \texttt{optimize\_phylo2vec\_bme\_minibatch\_c}) mitigate both effects by rotating the unpacking window across tree neighborhoods and retaining a backbone of condensed clade representatives.
+-    \item \textbf{Best-First CSR Dyadic-Weighted Profile Condensation vs.\ Unweighted Top-Split Sampling:} When distances come from a precomputed matrix $D$ (\texttt{condense\_tree\_bme\_c}) or linear inner-product embeddings $\phi(x) \in \mathbb{R}^P$ (\texttt{k\_condense\_super\_profiles}, Table~\ref{tab:minibatch_scaling}), exact dyadic profiles $\widetilde{\phi}(a) = \sum_{x \in S_a} \omega_x \phi(x)$ are computed over all $N$ leaves. When pairwise distances are evaluated on the fly from non-linear sequence formulas such as Jukes--Cantor $\log$-corrected Hamming distances (\texttt{bench\_rnasim\_gpu.cu}) or an $O(\log N)$ LCA tree oracle (\texttt{bench\_minibatch\_recovery.cu}) without $O(N^2)$ distance storage, a naive unweighted $2^d$-slot top-split table (duplicating leaves across $2^d \in \{4, 8\}$ uniform slots of weight $2^{-d}$) is only exact when every leaf in the clade has depth $\le d$; on unbalanced or caterpillar clades of size as small as $d + 2$ (or $9$ leaves for $2^d = 8$), uniform slot duplication distorts deep-leaf weights by up to $2^{\text{depth}-d}$ and can invert the sign of $\Delta L$. Instead, \texttt{compute\_clade\_dyadic\_profile} and \texttt{compute\_outgroup\_dyadic\_profile} expand internal nodes in best-first order (highest dyadic weight $\omega = 2^{-d}$ first) and store explicit $(\text{leaf\_id}, \omega_x)$ pairs in compressed sparse row (CSR) arrays $(\texttt{d\_prof\_offsets}, \texttt{d\_prof\_leaves}, \texttt{d\_prof\_weights})$ up to a capacity of $M_{\text{prof}} = 64\text{--}128$ leaves per super-leaf (\texttt{k\_build\_true\_condensed\_D} and \texttt{k\_build\_real\_seq\_condensed\_D}). Every condensed clade or outgroup of size $\le M_{\text{prof}}$---whether balanced, unbalanced, or a caterpillar---is represented with $100\%$ of its leaves and their exact dyadic weights $\omega_x = 2^{-d(r_a, x)}$, and even on arbitrarily long caterpillar spines each best-first split adds only one leaf while halving the residual internal node weight down to $2^{-30} < \varepsilon_{\text{fp32}}$. Likewise, for proper-subtree windows ($\text{sub\_root} \neq \text{root}$), \texttt{compute\_outgroup\_dyadic\_profile} walks the entire ancestor path from $\text{sub\_root}$ to the unrooted tree root (suppressing the degree-2 root split) and expands all outside sibling clades in best-first dyadic order.
++    \item \textbf{Best-First CSR Dyadic-Weighted Surrogate Profiles and Exact Changed-Pair Full-Objective Acceptance:} When distances come from a precomputed matrix $D$ (\texttt{condense\_tree\_bme\_c}) or linear inner-product embeddings $\phi(x) \in \mathbb{R}^P$ (\texttt{k\_condense\_super\_profiles}, Table~\ref{tab:minibatch_scaling}), exact dyadic profiles $\widetilde{\phi}(a) = \sum_{x \in S_a} \omega_x \phi(x)$ are computed over all $N$ leaves. When pairwise distances are evaluated on the fly from non-linear sequence formulas such as Jukes--Cantor $\log$-corrected Hamming distances (\texttt{bench\_rnasim\_gpu.cu}) or an $O(\log N)$ LCA tree oracle (\texttt{bench\_minibatch\_recovery.cu}) without $O(N^2)$ distance storage, a naive unweighted $2^d$-slot top-split table (duplicating leaves across $2^d \in \{4, 8\}$ uniform slots of weight $2^{-d}$) is only exact when every leaf in the clade has depth $\le d$; on unbalanced or caterpillar clades of size as small as $d + 2$ (or $9$ leaves for $2^d = 8$), uniform slot duplication distorts deep-leaf weights by up to $2^{\text{depth}-d}$ and can invert the sign of $\Delta L$. Instead, \texttt{compute\_clade\_dyadic\_profile} and \texttt{compute\_outgroup\_dyadic\_profile} expand internal nodes in best-first order (highest dyadic weight $\omega = 2^{-d}$ first) and store explicit $(\text{leaf\_id}, \omega_x)$ pairs in compressed sparse row (CSR) arrays $(\texttt{d\_prof\_offsets}, \texttt{d\_prof\_leaves}, \texttt{d\_prof\_weights})$ up to a capacity of $M_{\text{prof}} = 64\text{--}128$ leaves per super-leaf (\texttt{k\_build\_true\_condensed\_D} and \texttt{k\_build\_real\_seq\_condensed\_D}), with \texttt{compute\_outgroup\_dyadic\_profile} walking the full ancestor path from $\text{sub\_root}$ to the unrooted tree root (suppressing the degree-2 root split) for proper-subtree windows ($\text{sub\_root} \neq \text{root}$). Every condensed clade or outgroup of size $\le M_{\text{prof}}$ (or of any size when uncapped, $M_{\text{prof}} \le 0$)---whether balanced, unbalanced, or a caterpillar---has $100\%$ of its internal nodes expanded and is represented with $100\%$ of its leaves and their exact dyadic weights $\omega_x = 2^{-d(r_a, x)}$. For clades or outgroups whose size exceeds a finite cap ($|S_a| > M_{\text{prof}} > 0$), expansion stops at $M_{\text{prof}}$ entries and collapses each remaining frontier subtree in the priority queue onto a single representative leaf \texttt{node\_rep0[u]} carrying that subtree's mass: while on a pure caterpillar spine only one internal node of residual weight $2^{-(M_{\text{prof}}-1)} \le 2^{-63} \ll \varepsilon_{\text{fp32}}$ remains unexpanded, on a balanced clade of size $|S_a| > M_{\text{prof}}$ stopping at depth $\log_2 M_{\text{prof}}$ leaves $M_{\text{prof}}$ frontier subtrees of weight $1/M_{\text{prof}}$ each (retaining total-variation distance $1 - M_{\text{prof}}/|S_a|$ when collapsed onto single leaves; for instance, on a $4{,}102$-leaf tree with a $4{,}096$-leaf balanced clade $A$, an adversarial split metric marking the $M_{\text{prof}}$ selected representatives of $A$ yields an unrefined capped surrogate change of $-0.25$ versus a true full-tree change of $+0.2421875$ at $M_{\text{prof}} = 64$ and $+0.234375$ at $M_{\text{prof}} = 128$). Consequently, the inner SPR search loop over the capped matrix $\widetilde{D}^{\text{cap}}$ is an $O(M_{\text{prof}}^2)$ heuristic proposal mechanism above the cap (an improving full-tree move whose capped surrogate score is non-negative may not be proposed). To guarantee that no accepted skeleton update ever worsens the true full-tree BME objective $L(T; D)$, \texttt{optimize\_skeleton\_on\_gpu} (and \texttt{run\_subtree\_minibatch\_window} for both $\text{sub\_root} = \text{root}$ and $\text{sub\_root} \neq \text{root}$ with outside profiles) performs an \emph{exact changed-pair GPU acceptance check} before committing any candidate topology $\widetilde{T}_{\text{best}} \neq \widetilde{T}_{\text{init}}$: it identifies all super-leaf pairs $(a, b)$ whose unrooted topological edge distance changed ($d_{\widetilde{T}_{\text{best}}}(a, b) \neq d_{\widetilde{T}_{\text{init}}}(a, b)$) and where $a$ or $b$ was capped, evaluates their exact uncapped super-leaf distance $\widetilde{D}^{\text{exact}}_{ab} = \sum_{x \in S_a} \sum_{y \in S_b} \omega_x \omega_y D(x, y)$ in FP64 on the GPU (\texttt{k\_refine\_true\_condensed\_D\_pairs} and \texttt{k\_refine\_real\_seq\_condensed\_D\_pairs}) using the full uncapped clade and outgroup profiles ($\sum_{a=0}^{K-1} |S_a| = N$), computes the exact full-tree objective change
++    \begin{equation}
++    \Delta L_{\text{full}} = L(T_{\text{best}}; D) - L(T_{\text{init}}; D) = \sum_{\substack{0 \le a < b < K \\ d_{\text{best}}(a,b) \neq d_{\text{init}}(a,b)}} \Big(2^{1 - d_{\text{best}}(a,b)} - 2^{1 - d_{\text{init}}(a,b)}\Big) \widetilde{D}^{\text{exact}}_{ab},
++    \end{equation}
++    and rejects the candidate update (restoring $\widetilde{T}_{\text{init}}$ and returning $0$) whenever $\Delta L_{\text{full}} \ge -10^{-6}$.
+ \end{enumerate}
+ \end{remark}
+ 
+@@ -563,7 +567,7 @@
+ }
+ \end{table}
+ 
+-Finally, to verify ground-truth topological recovery at $N \in \{10{,}000, 50{,}000, 100{,}000, 500{,}000, 1{,}000{,}000\}$ without allocating an $O(N^2)$ distance matrix and with zero leakage of perturbation metadata, we implemented a 100\% blind GPU recovery benchmark (\texttt{bench\_minibatch\_recovery.cu}). The optimizer receives only the corrupted topology and a black-box $O(N)$-memory GPU Heavy-Light Decomposition (HLD) leaf-distance oracle that evaluates $d_{T^*}(x,y) = d_{\text{root}}(x) + d_{\text{root}}(y) - 2 d_{\text{root}}(\text{LCA}_{T^*}(x,y))$ in $O(\log N)$ hops across CSR dyadic-weighted clade profiles (\texttt{compute\_clade\_dyadic\_profile} and \texttt{k\_build\_true\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}). Corrupted clades are discovered blindly on the GPU by scanning all $N-2$ internal edges for four-point condition quartet violations (\texttt{k\_detect\_quartet\_violations}), and cross-clade partner windows are discovered blindly via GPU $k$-NN leaf-to-leaf distance queries (\texttt{k\_find\_knn\_partner\_clade}), tracked via invariant leaf anchors across skeleton graft-backs. Table~\ref{tab:minibatch_recovery} reports both intra-clade topological recovery ($800$ SPR perturbations inducing $2{,}457\text{--}2{,}816$ wrong bipartition splits) and long-range cross-clade SPR recovery comparing Blind Naive Single-Clade Windows against Blind $k$-NN Paired-Clade Minibatching (Remark~\ref{rem:minibatch_tradeoffs}). Across $N \in \{10{,}000 \dots 1{,}000{,}000\}$, our blind GPU Clade-Condensed Minibatch optimizer recovers $\mathbf{97.07\%\text{--}99.73\%}$ of all corrupted bipartition splits ($\mathbf{93.33\%\text{--}99.22\%}$ canonical Phylo2Vec Hamming recovery) in $0.31\text{--}1.21\text{ s}$, while Blind $k$-NN Paired-Clade Minibatching lifts cross-clade recovery from $74.70\%\text{--}79.22\%$ (naive single-clade windows) to $\mathbf{91.31\%\text{--}100.00\%}$ (reaching $\mathbf{99.93\%\text{--}100.00\%}$ at $N \ge 100{,}000$).
++Finally, to verify ground-truth topological recovery at $N \in \{10{,}000, 50{,}000, 100{,}000, 500{,}000, 1{,}000{,}000\}$ without allocating an $O(N^2)$ distance matrix and with zero leakage of perturbation metadata, we implemented a 100\% blind GPU recovery benchmark (\texttt{bench\_minibatch\_recovery.cu}). The optimizer receives only the corrupted topology and a black-box $O(N)$-memory GPU Heavy-Light Decomposition (HLD) leaf-distance oracle that evaluates $d_{T^*}(x,y) = d_{\text{root}}(x) + d_{\text{root}}(y) - 2 d_{\text{root}}(\text{LCA}_{T^*}(x,y))$ in $O(\log N)$ hops across CSR dyadic-weighted clade profiles (\texttt{compute\_clade\_dyadic\_profile} and \texttt{k\_build\_true\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}). Corrupted clades are discovered blindly on the GPU by scanning all $N-2$ internal edges for four-point condition quartet violations (\texttt{k\_detect\_quartet\_violations}), and cross-clade partner windows are discovered blindly via GPU $k$-NN leaf-to-leaf distance queries (\texttt{k\_find\_knn\_partner\_clade}), tracked via invariant leaf anchors across skeleton graft-backs. Table~\ref{tab:minibatch_recovery} reports both intra-clade topological recovery ($800$ SPR perturbations inducing $2{,}457\text{--}2{,}816$ wrong bipartition splits) and long-range cross-clade SPR recovery comparing Blind Naive Single-Clade Windows against Blind $k$-NN Paired-Clade Minibatching (Remark~\ref{rem:minibatch_tradeoffs}). Across $N \in \{10{,}000 \dots 1{,}000{,}000\}$, our blind GPU Clade-Condensed Minibatch optimizer recovers $\mathbf{96.98\%\text{--}99.47\%}$ of all corrupted bipartition splits ($\mathbf{93.06\%\text{--}98.56\%}$ canonical Phylo2Vec Hamming recovery) in $0.60\text{--}13.02\text{ s}$, while Blind $k$-NN Paired-Clade Minibatching lifts cross-clade recovery from $74.70\%\text{--}79.22\%$ (naive single-clade windows) to $\mathbf{94.16\%\text{--}100.00\%}$ (reaching $\mathbf{100.00\%}$ with $0$ wrong splits at $N = 100{,}000$ and $N = 1{,}000{,}000$).
+ 
+ \begin{table}[h!]
+ \centering
+@@ -575,11 +579,11 @@
+ \toprule
+ \textbf{Taxa ($N$)} & \textbf{Window $N_{\text{eff}}$} & \textbf{Init $\to$ Final $d_H(v,v^*)$} & \textbf{Init $\to$ Final RF} & \textbf{$d_H$ Recov \%} & \textbf{RF Recov \%} & \textbf{Time (s)} & \textbf{Cross-Clade Init RF} & \textbf{Naive Window Recov} & \textbf{Blind $k$-NN Guided Recov} \\
+ \midrule
+-$10{,}000$      & $629$   & $766 \to 19$ & $2{,}650 \to 22$ & $\mathbf{97.52\%}$ & $\mathbf{99.17\%}$ & $0.31\text{ s}$ & $1{,}439$ & $77.14\%$ ($329$ rem) & $\mathbf{91.31\%}$ ($125$ rem) \\
+-$50{,}000$      & $692$   & $780 \to 52$ & $2{,}457 \to 72$ & $\mathbf{93.33\%}$ & $\mathbf{97.07\%}$ & $0.35\text{ s}$ & $1{,}680$ & $74.70\%$ ($425$ rem) & $\mathbf{98.45\%}$ ($26$ rem) \\
+-$100{,}000$     & $808$   & $778 \to 50$ & $2{,}609 \to 59$ & $\mathbf{93.57\%}$ & $\mathbf{97.74\%}$ & $0.43\text{ s}$ & $1{,}511$ & $79.22\%$ ($314$ rem) & $\mathbf{99.93\%}$ ($1$ rem) \\
+-$500{,}000$     & $1{,}310$ & $773 \to 6$  & $2{,}599 \to 7$  & $\mathbf{99.22\%}$ & $\mathbf{99.73\%}$ & $0.84\text{ s}$ & $1{,}539$ & $75.24\%$ ($381$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
+-$1{,}000{,}000$ & $1{,}346$ & $778 \to 33$ & $2{,}816 \to 52$ & $\mathbf{95.76\%}$ & $\mathbf{98.15\%}$ & $1.21\text{ s}$ & $1{,}516$ & $79.22\%$ ($315$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
++$10{,}000$      & $629$   & $766 \to 11$ & $2{,}650 \to 14$ & $\mathbf{98.56\%}$ & $\mathbf{99.47\%}$ & $0.60\text{ s}$ & $1{,}439$ & $77.14\%$ ($329$ rem) & $\mathbf{94.16\%}$ ($84$ rem) \\
++$50{,}000$      & $692$   & $780 \to 50$ & $2{,}457 \to 70$ & $\mathbf{93.59\%}$ & $\mathbf{97.15\%}$ & $0.92\text{ s}$ & $1{,}680$ & $74.70\%$ ($425$ rem) & $\mathbf{98.45\%}$ ($26$ rem) \\
++$100{,}000$     & $808$   & $778 \to 16$ & $2{,}609 \to 21$ & $\mathbf{97.94\%}$ & $\mathbf{99.20\%}$ & $1.19\text{ s}$ & $1{,}511$ & $79.22\%$ ($314$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
++$500{,}000$     & $1{,}310$ & $773 \to 29$ & $2{,}599 \to 44$ & $\mathbf{96.25\%}$ & $\mathbf{98.31\%}$ & $6.52\text{ s}$ & $1{,}539$ & $75.24\%$ ($381$ rem) & $\mathbf{95.71\%}$ ($66$ rem) \\
++$1{,}000{,}000$ & $1{,}346$ & $778 \to 54$ & $2{,}816 \to 85$ & $\mathbf{93.06\%}$ & $\mathbf{96.98\%}$ & $13.02\text{ s}$ & $1{,}516$ & $79.22\%$ ($315$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
+ \bottomrule
+ \end{tabular}%
+ }
+@@ -608,7 +612,7 @@
+ }
+ \end{table}
+ 
+-Second, we evaluated all methods on the empirical biophysical \textbf{RNASim} $1{,}596$-bp 16S rRNA alignments~\cite{mirarab2015pasta} ($N \in \{1{,}000, \, 5{,}000, \, 10{,}000, \, 50{,}000, \, 100{,}000\}$ sequences evolved under thermodynamic secondary-structure folding selection, indels, and strong site-to-site rate heterogeneity). In addition to gap-aware \texttt{JC69} distances, we evaluated our GPU Bayesian Eigenvalue $\text{GTR}+\Gamma(\alpha,\alpha)$ distance estimator (\texttt{phylo2vec\_eigen\_dist\_cuda.cu}~\cite{penn2025eigen}), which fits the 7-parameter $\text{GTR}+\Gamma$ exchangeabilities $\hat{S} = [0.82, 1.14, 1.72, 0.39, 1.13, 0.80]$ and shape $\hat{\alpha}$ in $0.18\text{--}0.25\text{ s}$ on the GPU and computes reversible symmetrized Iteratively Reweighted WLS distances (\texttt{Eigen-RevSymWLS}). For large-$N$ minibatch optimization (\texttt{bench\_rnasim\_gpu.cu}), our Subtree-Wave Multigrid Minibatch algorithm uses best-first CSR dyadic-weighted clade and outgroup profiles (\texttt{compute\_clade\_dyadic\_profile}, \texttt{compute\_outgroup\_dyadic\_profile}, and \texttt{k\_build\_real\_seq\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}) and priority-queue-bounded skeleton extraction ($\text{max\_internals} = 1{,}200$, guaranteeing $K \le 1{,}201 \le 2{,}048$ even on maximally unbalanced caterpillar trees) across three conflict-free phases: (i) a global backbone pass at the tree root ($B_{\text{thresh}} = N/700$), (ii) a bottom-up connected-component wave (\texttt{build\_component\_waves}, partitioning all $N-1$ internal nodes into connected components of $\le 1{,}050$ internal nodes and scheduling all leaf-bearing components with $c_{\text{thresh}} = 1$ so that $100\%$ of the $N$ original leaves are uncondensed) anchored by an outgroup super-leaf whose CSR dyadic profile expands all ancestor sibling clades along the path to the unrooted tree root (\texttt{compute\_outgroup\_dyadic\_profile}), and (iii) a staggered medium cross-clade wave ($\text{first\_cap} = 525$, $\text{max\_cap} = 1{,}050$) with $O(K)$ incremental post-order summary propagation. Notably, at $N = 1{,}000$, even when initialized from a \textbf{100\% uniformly random binary tree} ($997/997$ wrong splits, zero NJ initialization), our GPU Full-Tree BME optimizer converges in $\mathbf{0.48\text{ s}}$ ($\Delta L = -143.88$) to $\mathbf{178/997}$ wrong splits ($17.85\%$), matching 64-thread \texttt{VeryFastTree} ($178/997$ in $7.46\text{ s}$) and 64-thread \texttt{FastME -u} ($178/997$ in $11.85\text{ s}$) from pure white noise. Starting from the shared \texttt{VFT-InitNJ} topology, Table~\ref{tab:rnasim_benchmark} shows that our GPU Phylo2Vec BME optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} across \textbf{every} dataset size up to $N = 100{,}000$ while running $\mathbf{303\times\text{--}688\times}$ faster than \texttt{VeryFastTree} and $\mathbf{1{,}127\times\text{--}2{,}168\times}$ faster than \texttt{FastME}: at $N = 50{,}000$, GPU Minibatch BME reduces wrong splits from $6{,}729$ to $\mathbf{4{,}942}$ ($\mathbf{9.88\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{38}$ splits) in $\mathbf{0.61\text{ s}}$ vs.\ $+313.53\text{ s}$ ($\mathbf{514\times}$ faster), and at $N = 100{,}000$, it reduces wrong splits from $12{,}375$ to $\mathbf{8{,}809}$ ($\mathbf{8.81\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{48}$ splits) in $\mathbf{1.16\text{ s}}$ vs.\ $+593.50\text{ s}$ ($\mathbf{512\times}$ faster refinement, or $\mathbf{666\times}$ faster than \texttt{VeryFastTree}'s $772.53\text{ s}$ total runtime).
++Second, we evaluated all methods on the empirical biophysical \textbf{RNASim} $1{,}596$-bp 16S rRNA alignments~\cite{mirarab2015pasta} ($N \in \{1{,}000, \, 5{,}000, \, 10{,}000, \, 50{,}000, \, 100{,}000\}$ sequences evolved under thermodynamic secondary-structure folding selection, indels, and strong site-to-site rate heterogeneity). In addition to gap-aware \texttt{JC69} distances, we evaluated our GPU Bayesian Eigenvalue $\text{GTR}+\Gamma(\alpha,\alpha)$ distance estimator (\texttt{phylo2vec\_eigen\_dist\_cuda.cu}~\cite{penn2025eigen}), which fits the 7-parameter $\text{GTR}+\Gamma$ exchangeabilities $\hat{S} = [0.82, 1.14, 1.72, 0.39, 1.13, 0.80]$ and shape $\hat{\alpha}$ in $0.18\text{--}0.25\text{ s}$ on the GPU and computes reversible symmetrized Iteratively Reweighted WLS distances (\texttt{Eigen-RevSymWLS}). For large-$N$ minibatch optimization (\texttt{bench\_rnasim\_gpu.cu}), our Subtree-Wave Multigrid Minibatch algorithm uses best-first CSR dyadic-weighted clade and outgroup profiles (\texttt{compute\_clade\_dyadic\_profile}, \texttt{compute\_outgroup\_dyadic\_profile}, and \texttt{k\_build\_real\_seq\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}) and priority-queue-bounded skeleton extraction ($\text{max\_internals} = 1{,}200$, guaranteeing $K \le 1{,}201 \le 2{,}048$ even on maximally unbalanced caterpillar trees) across three conflict-free phases: (i) a global backbone pass at the tree root ($B_{\text{thresh}} = N/700$), (ii) a bottom-up connected-component wave (\texttt{build\_component\_waves}, partitioning all $N-1$ internal nodes into connected components of $\le 1{,}050$ internal nodes and scheduling all leaf-bearing components with $c_{\text{thresh}} = 1$ so that $100\%$ of the $N$ original leaves are uncondensed) anchored by an outgroup super-leaf whose CSR dyadic profile expands all ancestor sibling clades along the path to the unrooted tree root (\texttt{compute\_outgroup\_dyadic\_profile}), and (iii) a staggered medium cross-clade wave ($\text{first\_cap} = 525$, $\text{max\_cap} = 1{,}050$) with $O(K)$ incremental post-order summary propagation. Notably, at $N = 1{,}000$, even when initialized from a \textbf{100\% uniformly random binary tree} ($997/997$ wrong splits, zero NJ initialization), our GPU Full-Tree BME optimizer converges in $\mathbf{0.48\text{ s}}$ ($\Delta L = -143.88$) to $\mathbf{178/997}$ wrong splits ($17.85\%$), matching 64-thread \texttt{VeryFastTree} ($178/997$ in $7.46\text{ s}$) and 64-thread \texttt{FastME -u} ($178/997$ in $11.85\text{ s}$) from pure white noise. Starting from the shared \texttt{VFT-InitNJ} topology, Table~\ref{tab:rnasim_benchmark} shows that our GPU Phylo2Vec BME optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} across \textbf{every} dataset size up to $N = 100{,}000$ while running $\mathbf{127\times\text{--}688\times}$ faster than \texttt{VeryFastTree} and $\mathbf{1{,}127\times\text{--}2{,}168\times}$ faster than \texttt{FastME}: at $N = 50{,}000$, GPU Minibatch BME reduces wrong splits from $6{,}729$ to $\mathbf{4{,}947}$ ($\mathbf{9.89\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{33}$ splits) in $\mathbf{2.26\text{ s}}$ vs.\ $+313.53\text{ s}$ ($\mathbf{139\times}$ faster refinement, or $\mathbf{167\times}$ faster total runtime), and at $N = 100{,}000$, it reduces wrong splits from $12{,}375$ to $\mathbf{8{,}805}$ ($\mathbf{8.81\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{52}$ splits) in $\mathbf{3.46\text{ s}}$ vs.\ $+593.50\text{ s}$ ($\mathbf{172\times}$ faster refinement, or $\mathbf{223\times}$ faster than \texttt{VeryFastTree}'s $772.53\text{ s}$ total runtime).
+ 
+ \begin{table}[h!]
+ \centering
+@@ -621,14 +625,14 @@
+ \textbf{Taxa ($N$)} & \textbf{Splits} & \textbf{VFT-InitNJ 64T} & \textbf{FastME 2.1.6 64T (SPR)} & \textbf{VFT-ME 64T (\texttt{-noml})} & \textbf{GPU Full-Tree BME (Time)} & \textbf{GPU Minibatch BME (Time)} & \textbf{Minibatch Speedup vs.\ VFT-ME} & \textbf{$\Delta L_{\text{BME}}$} \\
+ \midrule
+ $1{,}000$   & $997$     & $214$ ($21.46\%$, $0.58\text{ s}$)     & $177$ ($17.75\%$, $21.68\text{ s}$)$^{\dagger}$ & $178$ ($17.85\%$, $+6.88\text{ s}$)     & $\mathbf{176}$ ($\mathbf{17.65\%}$, $\mathbf{0.01\text{ s}}$)$^{\ddagger}$ & $\mathbf{176}$ ($\mathbf{17.65\%}$, $\mathbf{0.01\text{ s}}$) & $\mathbf{688\times}$ ($\mathbf{2{,}168\times}$ vs.\ FastME) & $-0.19$ \\
+-$5{,}000$   & $4{,}997$   & $890$ ($17.81\%$, $3.40\text{ s}$)     & \emph{$>35\text{ min}$ (CPU wall)}              & $703$ ($14.07\%$, $+33.38\text{ s}$)    & $692$ ($13.85\%$, $0.32\text{ s}$)                                         & $\mathbf{688}$ ($\mathbf{13.77\%}$, $\mathbf{0.11\text{ s}}$) & $\mathbf{303\times}$                                       & $-0.90$ \\
+-$10{,}000$  & $9{,}997$   & $1{,}667$ ($16.68\%$, $7.82\text{ s}$)   & \emph{$>5\text{ hr}$ (CPU wall)}                & $1{,}313$ ($13.13\%$, $+65.98\text{ s}$)  & $1{,}309$ ($13.09\%$, $4.57\text{ s}$)$^{\S}$                              & $\mathbf{1{,}306}$ ($\mathbf{13.06\%}$, $\mathbf{0.17\text{ s}}$) & $\mathbf{388\times}$                                       & $-1.65$ \\
+-$50{,}000$  & $49{,}997$  & $6{,}729$ ($13.46\%$, $63.01\text{ s}$)  & \emph{OOM / CPU wall}                           & $4{,}980$ ($9.96\%$, $+313.53\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{4{,}942}$ ($\mathbf{9.88\%}$, $\mathbf{0.61\text{ s}}$)  & $\mathbf{514\times}$ ($617\times$ total)                   & $-6.37$ \\
+-$100{,}000$ & $99{,}997$  & $12{,}375$ ($12.38\%$, $179.03\text{ s}$) & \emph{OOM / CPU wall}                           & $8{,}857$ ($8.86\%$, $+593.50\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{8{,}809}$ ($\mathbf{8.81\%}$, $\mathbf{1.16\text{ s}}$)  & $\mathbf{512\times}$ ($666\times$ total)                   & $-11.42$ \\
++$5{,}000$   & $4{,}997$   & $890$ ($17.81\%$, $3.40\text{ s}$)     & \emph{$>35\text{ min}$ (CPU wall)}              & $703$ ($14.07\%$, $+33.38\text{ s}$)    & $\mathbf{692}$ ($\mathbf{13.85\%}$, $0.32\text{ s}$)                       & $694$ ($13.89\%$, $\mathbf{0.22\text{ s}}$)                   & $\mathbf{152\times}$ ($167\times$ total)                   & $-0.90$ \\
++$10{,}000$  & $9{,}997$   & $1{,}667$ ($16.68\%$, $7.82\text{ s}$)   & \emph{$>5\text{ hr}$ (CPU wall)}                & $1{,}313$ ($13.13\%$, $+65.98\text{ s}$)  & $\mathbf{1{,}309}$ ($\mathbf{13.09\%}$, $4.57\text{ s}$)$^{\S}$            & $1{,}320$ ($13.20\%$, $\mathbf{0.52\text{ s}}$)               & $\mathbf{127\times}$ ($142\times$ total)                   & $-1.63$ \\
++$50{,}000$  & $49{,}997$  & $6{,}729$ ($13.46\%$, $63.01\text{ s}$)  & \emph{OOM / CPU wall}                           & $4{,}980$ ($9.96\%$, $+313.53\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{4{,}947}$ ($\mathbf{9.89\%}$, $\mathbf{2.26\text{ s}}$)  & $\mathbf{139\times}$ ($167\times$ total)                   & $-6.33$ \\
++$100{,}000$ & $99{,}997$  & $12{,}375$ ($12.38\%$, $179.03\text{ s}$) & \emph{OOM / CPU wall}                           & $8{,}857$ ($8.86\%$, $+593.50\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{8{,}805}$ ($\mathbf{8.81\%}$, $\mathbf{3.46\text{ s}}$)  & $\mathbf{172\times}$ ($223\times$ total)                   & $-11.35$ \\
+ \bottomrule
+ \multicolumn{9}{@{}l}{\footnotesize $^{\dagger}$On raw gappy FASTA (\texttt{-d J -m B -n -s}), \texttt{FastME 64T} reaches $182$ wrong splits ($24.83\text{ s}$); on GPU \texttt{JC69} matrix it reaches $177$ (\texttt{BIONJ+SPR}, $21.68\text{ s}$) and $178$ (\texttt{-u InitNJ+SPR}, $+11.27\text{ s}$).}\\
+ \multicolumn{9}{@{}l}{\footnotesize $^{\ddagger}$Both \texttt{JC69} and \texttt{Eigen-SymWLS} achieve $176/997$ ($17.65\%$) at $N=1{,}000$; starting from a $100\%$ random tree ($997/997$ wrong), GPU Full-Tree BME reaches $178/997$ in $0.48\text{ s}$.}\\
+-\multicolumn{9}{@{}l}{\footnotesize $^{\S}$At $N=10{,}000$, Full-Tree \texttt{Eigen-RevSymWLS} achieves $1{,}309$ wrong splits ($13.09\%$, $4.57\text{ s}$), Full-Tree \texttt{JC69} achieves $1{,}320$ ($3.71\text{ s}$), and Subtree-Wave Minibatch achieves $\mathbf{1{,}306}$ ($13.06\%$, $0.17\text{ s}$).}
++\multicolumn{9}{@{}l}{\footnotesize $^{\S}$At $N=10{,}000$, Full-Tree \texttt{Eigen-RevSymWLS} achieves $\mathbf{1{,}309}$ wrong splits ($13.09\%$, $4.57\text{ s}$), Full-Tree \texttt{JC69} achieves $1{,}320$ ($3.71\text{ s}$), and Subtree-Wave Minibatch achieves $1{,}320$ ($13.20\%$, $0.52\text{ s}$).}
+ \end{tabular}%
+ }
+ \end{table}
+@@ -637,7 +641,7 @@
+ \section{Conclusion}
+ % ============================================================================
+ 
+-By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ tree-based cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and exact inverse bijections (Theorem~\ref{thm:inverse}), and using node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $4.16\times\text{--}5.74\times$ on a single CPU core while recovering identical or superior BME topologies across $99.2\%$ ($119/120$) of tested datasets. Our Column-Independence (Theorem~\ref{thm:col_indep}), Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack with race-free SIMT destination indexing (Theorem~\ref{thm:heavy_stack}), Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}), and Exact Clade-Condensation Minibatch (Theorem~\ref{thm:clade_condense}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations. They deliver up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on Apple M5 unified memory, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ on an NVIDIA H100 80GB HBM3, a $5.15\times$ multi-GPU speedup ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves) at $N = 40{,}000$ on 8$\times$ H100, distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), clade-condensed minibatch optimization up to $N = 10{,}000{,}000$ taxa ($39.20\text{ s}$ per full epoch on 8$\times$ H100 in $7.8\text{ GB}$ VRAM/GPU), and a $303\times\text{--}688\times$ speedup over 64-thread \texttt{VeryFastTree 4.0.5} (and up to $4{,}087\times$ over 64-thread \texttt{FastME 2.1.6}) on the $1{,}596$-bp \texttt{JC69} and biophysical RNASim benchmarks while outperforming both tools in topological accuracy across every tested dataset size up to $N = 100{,}000$ ($8{,}809$ vs.\ $8{,}857$ wrong splits in $1.16\text{ s}$ vs.\ $772.53\text{ s}$).
++By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ tree-based cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and exact inverse bijections (Theorem~\ref{thm:inverse}), and using node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $4.16\times\text{--}5.74\times$ on a single CPU core while recovering identical or superior BME topologies across $99.2\%$ ($119/120$) of tested datasets. Our Column-Independence (Theorem~\ref{thm:col_indep}), Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack with race-free SIMT destination indexing (Theorem~\ref{thm:heavy_stack}), Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}), and Exact Clade-Condensation Minibatch (Theorem~\ref{thm:clade_condense}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations. They deliver up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on Apple M5 unified memory, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ on an NVIDIA H100 80GB HBM3, a $5.15\times$ multi-GPU speedup ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves) at $N = 40{,}000$ on 8$\times$ H100, distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), clade-condensed minibatch optimization up to $N = 10{,}000{,}000$ taxa ($39.20\text{ s}$ per full epoch on 8$\times$ H100 in $7.8\text{ GB}$ VRAM/GPU), and a $127\times\text{--}688\times$ speedup over 64-thread \texttt{VeryFastTree 4.0.5} (and up to $4{,}087\times$ over 64-thread \texttt{FastME 2.1.6}) on the $1{,}596$-bp \texttt{JC69} and biophysical RNASim benchmarks while outperforming both tools in topological accuracy across every tested dataset size up to $N = 100{,}000$ ($8{,}805$ vs.\ $8{,}857$ wrong splits in $3.46\text{ s}$ vs.\ $772.53\text{ s}$).
+ 
+ \begin{thebibliography}{9}
+ \bibitem{pauplin2000direct}
+--- rev3/phylo2vec_bme_paper.tex
++++ rev4/phylo2vec_bme_paper.tex
+@@ -42,7 +42,7 @@
+ \maketitle
+ 
+ \begin{abstract}
+-Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference and underlies standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a mathematical formulation and a high-performance software implementation for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ tree-based top-down cherry-first gauge transformation and an inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to very large trees on multi-core CPUs and GPUs, we prove five architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{Stackless Ancestor-Walk Top-Down Theorem} ($O(N \log N)$ expected work on balanced trees, $O(N^2)$ worst-case on caterpillars, with $O(1)$ stack space), (iii) the \emph{Branchless Cherry-First Tree Decoding and Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with 3-edge incident zeroing, $O(1)$ incremental destination mapping, and race-free SIMT parallel destination indexing, (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling paired with fused top-1 row candidate reductions, and (v) the \emph{Exact Clade-Condensation Theorem for Minibatch BME Optimization}, which collapses inactive clades into dyadic-weighted super-leaves to evaluate exact full-tree BME discrete gradients on active subtrees of size $N_{\text{eff}} \ll N$. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $99.2\%$ win/tie rate ($119/120$ trials) in BME tree length against FastME while requiring up to $3.32\times$ fewer $O(N^2)$ evaluations and running up to $4.16\times$ faster on Apple M5 and up to $5.74\times$ faster on AMD Threadripper PRO 5995WX (single core). At large scale ($N = 100 \dots 10{,}000{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on an Apple M5 Metal GPU, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ ($6.22\text{ ms}$ vs.\ $701.38\text{ ms}$) on an NVIDIA H100 80GB HBM3, $5.15\times$ end-to-end ($7.70\times$ Stage-3) scaling on 8$\times$ NVIDIA H100 at $N = 40{,}000$ ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves), distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ candidate moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), and clade-condensed minibatch optimization at $N = 1{,}000{,}000$, $5{,}000{,}000$, and $10{,}000{,}000$ taxa ($3.43\text{ s}$, $17.82\text{ s}$, and $39.20\text{ s}$ per full epoch on 8$\times$ NVIDIA H100 using $7.8\text{ GB}$ VRAM/GPU). Finally, on $1{,}596$-bp \texttt{JC69} and biophysical \textbf{RNASim} 16S rRNA sequence benchmarks up to $N = 100{,}000$ taxa, our GPU optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} in Robinson--Foulds topological accuracy across every tested scale while running up to $4{,}087\times$ faster than \texttt{FastME} and $303\times\text{--}688\times$ faster than \texttt{VeryFastTree} ($8{,}809$ vs.\ $8{,}857$ wrong splits at $N = 100{,}000$ in $1.16\text{ s}$ vs.\ $772.53\text{ s}$).
++Balanced Minimum Evolution (BME) is one of the most statistically consistent and widely used distance-based criteria for phylogenetic tree inference and underlies standard tools such as FastME. Classical BME optimizers represent trees as pointer-linked graph structures and perform sequential Subtree Prune and Regraft (SPR) hill-climbing, applying a single topological move per $O(N^2)$ sweep. In contrast, the Phylo2Vec representation bijectively encodes any rooted binary tree on $N$ leaves as an integer vector $v \in \mathbb{Z}^{N-1}$ satisfying $0 \le v_i \le 2i$. In this paper, we present a mathematical formulation and a high-performance software implementation for exact $O(N^2)$ BME discrete gradient computation and topological optimization directly in Phylo2Vec vector space. First, we derive the complete $(N-1) \times (2N-3)$ discrete gradient matrix $\nabla_{\text{disc}} L(v)$ over all valid coordinate values $0 \le j \le 2i$, paired with an $O(N)$ tree-based top-down cherry-first gauge transformation and an inverse tree-to-vector bijection. Second, we introduce a node-disjoint multi-coordinate ($K$-SPR) batch optimizer with dual-mode gauge rotation and stochastic 2-SPR basin hopping that applies multiple non-interfering SPR moves per $O(N^2)$ gradient evaluation. Third, to scale to very large trees on multi-core CPUs and GPUs, we prove five architectural theorems: (i) the \emph{Column-Independence Theorem} for lockstep SIMT clade-distance dynamic programming, (ii) the \emph{Stackless Ancestor-Walk Top-Down Theorem} ($O(N \log N)$ expected work on balanced trees, $O(N^2)$ worst-case on caterpillars, with $O(1)$ stack space), (iii) the \emph{Branchless Cherry-First Tree Decoding and Heavy-First $\lceil \log_2(2N) \rceil$-Slot Register-Stack Theorem} with 3-edge incident zeroing, $O(1)$ incremental destination mapping, and race-free SIMT parallel destination indexing, (iv) the \emph{Complete Column-Autonomy Theorem} for $4\times$ memory-reduced column tiling paired with fused top-1 row candidate reductions, and (v) the \emph{Exact Clade-Condensation Theorem for Minibatch BME Optimization}, which collapses inactive clades into dyadic-weighted super-leaves to evaluate exact full-tree BME discrete gradients on active subtrees of size $N_{\text{eff}} \ll N$. Across 120 benchmark datasets ($N = 20 \dots 200$), our optimizer achieves a $99.2\%$ win/tie rate ($119/120$ trials) in BME tree length against FastME while requiring up to $3.32\times$ fewer $O(N^2)$ evaluations and running up to $4.16\times$ faster on Apple M5 and up to $5.74\times$ faster on AMD Threadripper PRO 5995WX (single core). At large scale ($N = 100 \dots 10{,}000{,}000$), our column-parallel and GPU-accelerated kernels achieve up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on an Apple M5 Metal GPU, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ ($6.22\text{ ms}$ vs.\ $701.38\text{ ms}$) on an NVIDIA H100 80GB HBM3, $5.15\times$ end-to-end ($7.70\times$ Stage-3) scaling on 8$\times$ NVIDIA H100 at $N = 40{,}000$ ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves), distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ candidate moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), and clade-condensed minibatch optimization at $N = 1{,}000{,}000$, $5{,}000{,}000$, and $10{,}000{,}000$ taxa ($3.43\text{ s}$, $17.82\text{ s}$, and $39.20\text{ s}$ per full epoch on 8$\times$ NVIDIA H100 using $7.8\text{ GB}$ VRAM/GPU). Finally, on $1{,}596$-bp \texttt{JC69} and biophysical \textbf{RNASim} 16S rRNA sequence benchmarks up to $N = 100{,}000$ taxa, our GPU optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} in Robinson--Foulds topological accuracy across every tested scale while running up to $4{,}087\times$ faster than \texttt{FastME} and $142\times\text{--}688\times$ faster than \texttt{VeryFastTree} ($8{,}805$ vs.\ $8{,}857$ wrong splits at $N = 100{,}000$ in $3.46\text{ s}$ vs.\ $772.53\text{ s}$).
+ \end{abstract}
+ 
+ \tableofcontents
+@@ -325,12 +325,16 @@
+ For any two leaves $x \in S_a$ and $y \in S_b$ in distinct clades ($a \neq b$), the unique path between $x$ and $y$ in $T$ decomposes into the path from $x$ to $r_a$ inside $S_a$ (containing $d_{S_a}(r_a, x)$ internal nodes), the skeleton path between super-leaves $a$ and $b$ in $\widetilde{T}$ (containing $d_{\widetilde{T}}(a, b)$ internal skeleton nodes), and the path from $r_b$ to $y$ inside $S_b$ (containing $d_{S_b}(r_b, y)$ internal nodes). Therefore $d_T(x, y) = d_{S_a}(r_a, x) + d_{\widetilde{T}}(a, b) + d_{S_b}(r_b, y)$, so Pauplin's weight factors multiplicatively as $2^{-d_T(x,y)} = \omega_x \, 2^{-d_{\widetilde{T}}(a,b)} \, \omega_y$. Summing over all unordered pairs $\{x, y\}$ and separating inter-clade pairs ($a \neq b$) from intra-clade pairs ($a = b$) yields Eq.~\eqref{eq:bme_condense_decomp}. Because any SPR move on $\widetilde{T}$ leaves the internal topologies of $S_0, \dots, S_{K-1}$ unchanged, the intra-clade sum $C_{\text{int}}$ cancels identically in $L(T^{(i \leftarrow j)}; D) - L(T; D)$.
+ \end{proof}
+ 
+-\begin{remark}[Algorithmic Tradeoff: $2^{-\text{depth}}$ Signal Dilution, Distance-Seeded Unpacking, and Best-First Dyadic Profile Condensation]
++\begin{remark}[Algorithmic Tradeoff: $2^{-\text{depth}}$ Signal Dilution, Distance-Seeded Unpacking, Capped Dyadic Surrogates, and Exact Changed-Pair Acceptance Verification]
+ \label{rem:minibatch_tradeoffs}
+ While Theorem~\ref{thm:clade_condense} guarantees that full-profile condensation (\texttt{condense\_tree\_bme\_c} and \texttt{k\_condense\_super\_profiles} $+$ \texttt{k\_build\_condensed\_D}) has zero approximation error for the condensed moves ($\Delta L$ is exact for each frozen clade moving as a unit), practical large-$N$ minibatch optimization involves two design considerations:
+ \begin{enumerate}
+     \item \textbf{Search-Space Restriction and $2^{-\text{depth}}$ Signal Dilution:} If a single misplaced taxon $x^*$ is buried at depth $d$ inside a frozen clade $S_b$ while its true sister clade $S_a$ is unpacked, its weight inside the super-leaf profile $\widetilde{\phi}(b) = \sum_{y \in S_b} 2^{-d(r_b, y)} \phi(y)$ is attenuated by $2^{-d}$, so the optimizer will not pull the entire clade $S_b$ across the tree unless $x^*$ itself is unpacked into the active minibatch; moving $x^*$ from $S_b$ to $S_a$ when $S_a$ and $S_b$ are unpacked in separate minibatches likewise requires multiple passes. Our minibatch schedulers (\texttt{select\_minibatch\_clades\_c} and \texttt{optimize\_phylo2vec\_bme\_minibatch\_c}) mitigate both effects by rotating the unpacking window across tree neighborhoods and retaining a backbone of condensed clade representatives.
+-    \item \textbf{Best-First CSR Dyadic-Weighted Profile Condensation vs.\ Unweighted Top-Split Sampling:} When distances come from a precomputed matrix $D$ (\texttt{condense\_tree\_bme\_c}) or linear inner-product embeddings $\phi(x) \in \mathbb{R}^P$ (\texttt{k\_condense\_super\_profiles}, Table~\ref{tab:minibatch_scaling}), exact dyadic profiles $\widetilde{\phi}(a) = \sum_{x \in S_a} \omega_x \phi(x)$ are computed over all $N$ leaves. When pairwise distances are evaluated on the fly from non-linear sequence formulas such as Jukes--Cantor $\log$-corrected Hamming distances (\texttt{bench\_rnasim\_gpu.cu}) or an $O(\log N)$ LCA tree oracle (\texttt{bench\_minibatch\_recovery.cu}) without $O(N^2)$ distance storage, a naive unweighted $2^d$-slot top-split table (duplicating leaves across $2^d \in \{4, 8\}$ uniform slots of weight $2^{-d}$) is only exact when every leaf in the clade has depth $\le d$; on unbalanced or caterpillar clades of size as small as $d + 2$ (or $9$ leaves for $2^d = 8$), uniform slot duplication distorts deep-leaf weights by up to $2^{\text{depth}-d}$ and can invert the sign of $\Delta L$. Instead, \texttt{compute\_clade\_dyadic\_profile} and \texttt{compute\_outgroup\_dyadic\_profile} expand internal nodes in best-first order (highest dyadic weight $\omega = 2^{-d}$ first) and store explicit $(\text{leaf\_id}, \omega_x)$ pairs in compressed sparse row (CSR) arrays $(\texttt{d\_prof\_offsets}, \texttt{d\_prof\_leaves}, \texttt{d\_prof\_weights})$ up to a capacity of $M_{\text{prof}} = 64\text{--}128$ leaves per super-leaf (\texttt{k\_build\_true\_condensed\_D} and \texttt{k\_build\_real\_seq\_condensed\_D}). Every condensed clade or outgroup of size $\le M_{\text{prof}}$---whether balanced, unbalanced, or a caterpillar---is represented with $100\%$ of its leaves and their exact dyadic weights $\omega_x = 2^{-d(r_a, x)}$, and even on arbitrarily long caterpillar spines each best-first split adds only one leaf while halving the residual internal node weight down to $2^{-30} < \varepsilon_{\text{fp32}}$. Likewise, for proper-subtree windows ($\text{sub\_root} \neq \text{root}$), \texttt{compute\_outgroup\_dyadic\_profile} walks the entire ancestor path from $\text{sub\_root}$ to the unrooted tree root (suppressing the degree-2 root split) and expands all outside sibling clades in best-first dyadic order.
++    \item \textbf{Best-First CSR Dyadic-Weighted Surrogate Profiles and Exact Changed-Pair Full-Objective Acceptance:} When distances come from a precomputed matrix $D$ (\texttt{condense\_tree\_bme\_c}) or linear inner-product embeddings $\phi(x) \in \mathbb{R}^P$ (\texttt{k\_condense\_super\_profiles}, Table~\ref{tab:minibatch_scaling}), exact dyadic profiles $\widetilde{\phi}(a) = \sum_{x \in S_a} \omega_x \phi(x)$ are computed over all $N$ leaves. When pairwise distances are evaluated on the fly from non-linear sequence formulas such as Jukes--Cantor $\log$-corrected Hamming distances (\texttt{bench\_rnasim\_gpu.cu}) or an $O(\log N)$ LCA tree oracle (\texttt{bench\_minibatch\_recovery.cu}) without $O(N^2)$ distance storage, a naive unweighted $2^d$-slot top-split table (duplicating leaves across $2^d \in \{4, 8\}$ uniform slots of weight $2^{-d}$) is only exact when every leaf in the clade has depth $\le d$; on unbalanced or caterpillar clades of size as small as $d + 2$ (or $9$ leaves for $2^d = 8$), uniform slot duplication distorts deep-leaf weights by up to $2^{\text{depth}-d}$ and can invert the sign of $\Delta L$. Instead, \texttt{compute\_clade\_dyadic\_profile} and \texttt{compute\_outgroup\_dyadic\_profile} expand internal nodes in best-first order (highest dyadic weight $\omega = 2^{-d}$ first) and store explicit $(\text{leaf\_id}, \omega_x)$ pairs in compressed sparse row (CSR) arrays $(\texttt{d\_prof\_offsets}, \texttt{d\_prof\_leaves}, \texttt{d\_prof\_weights})$ up to a capacity of $M_{\text{prof}} = 64\text{--}128$ leaves per super-leaf (\texttt{k\_build\_true\_condensed\_D} and \texttt{k\_build\_real\_seq\_condensed\_D}), with \texttt{compute\_outgroup\_dyadic\_profile} walking the full ancestor path from $\text{sub\_root}$ to the unrooted tree root (suppressing the degree-2 root split) for proper-subtree windows ($\text{sub\_root} \neq \text{root}$). Every condensed clade or outgroup of size $\le M_{\text{prof}}$ (or of any size when uncapped, $M_{\text{prof}} \le 0$)---whether balanced, unbalanced, or a caterpillar---has $100\%$ of its internal nodes expanded and is represented with $100\%$ of its leaves and their exact dyadic weights $\omega_x = 2^{-d(r_a, x)}$. For clades or outgroups whose size exceeds a finite cap ($|S_a| > M_{\text{prof}} > 0$), expansion stops at $M_{\text{prof}}$ entries and collapses each remaining frontier subtree in the priority queue onto a single representative leaf \texttt{node\_rep0[u]} carrying that subtree's mass: while on a pure caterpillar spine only one internal node of residual weight $2^{-(M_{\text{prof}}-1)} \le 2^{-63} \ll \varepsilon_{\text{fp32}}$ remains unexpanded, on a balanced clade of size $|S_a| > M_{\text{prof}}$ stopping at depth $\log_2 M_{\text{prof}}$ leaves $M_{\text{prof}}$ frontier subtrees of weight $1/M_{\text{prof}}$ each (retaining total-variation distance $1 - M_{\text{prof}}/|S_a|$ when collapsed onto single leaves; for instance, on a $4{,}102$-leaf tree with a $4{,}096$-leaf balanced clade $A$, an adversarial split metric marking the $M_{\text{prof}}$ selected representatives of $A$ yields an unrefined capped surrogate change of $-0.25$ versus a true full-tree change of $+0.2421875$ at $M_{\text{prof}} = 64$ and $+0.234375$ at $M_{\text{prof}} = 128$). Consequently, the inner SPR search loop over the capped matrix $\widetilde{D}^{\text{cap}}$ is an $O(M_{\text{prof}}^2)$ heuristic proposal mechanism above the cap (an improving full-tree move whose capped surrogate score is non-negative may not be proposed). To guarantee that no accepted skeleton update ever worsens the true full-tree BME objective $L(T; D)$, \texttt{optimize\_skeleton\_on\_gpu} (and \texttt{run\_subtree\_minibatch\_window} for both $\text{sub\_root} = \text{root}$ and $\text{sub\_root} \neq \text{root}$ with outside profiles) performs an \emph{exact changed-pair GPU acceptance check} before committing any candidate topology $\widetilde{T}_{\text{best}} \neq \widetilde{T}_{\text{init}}$: it identifies all super-leaf pairs $(a, b)$ whose unrooted topological edge distance changed ($d_{\widetilde{T}_{\text{best}}}(a, b) \neq d_{\widetilde{T}_{\text{init}}}(a, b)$) and where $a$ or $b$ was capped, evaluates their exact uncapped super-leaf distance $\widetilde{D}^{\text{exact}}_{ab} = \sum_{x \in S_a} \sum_{y \in S_b} \omega_x \omega_y D(x, y)$ in FP64 on the GPU (\texttt{k\_refine\_true\_condensed\_D\_pairs} and \texttt{k\_refine\_real\_seq\_condensed\_D\_pairs}) using the full uncapped clade and outgroup profiles ($\sum_{a=0}^{K-1} |S_a| = N$), computes the exact full-tree objective change
++    \begin{equation}
++    \Delta L_{\text{full}} = L(T_{\text{best}}; D) - L(T_{\text{init}}; D) = \sum_{\substack{0 \le a < b < K \\ d_{\text{best}}(a,b) \neq d_{\text{init}}(a,b)}} \Big(2^{1 - d_{\text{best}}(a,b)} - 2^{1 - d_{\text{init}}(a,b)}\Big) \widetilde{D}^{\text{exact}}_{ab},
++    \end{equation}
++    and rejects the candidate update (restoring $\widetilde{T}_{\text{init}}$ and returning $0$) whenever $\Delta L_{\text{full}} \ge -10^{-6}$.
+ \end{enumerate}
+ \end{remark}
+ 
+@@ -563,7 +567,7 @@
+ }
+ \end{table}
+ 
+-Finally, to verify ground-truth topological recovery at $N \in \{10{,}000, 50{,}000, 100{,}000, 500{,}000, 1{,}000{,}000\}$ without allocating an $O(N^2)$ distance matrix and with zero leakage of perturbation metadata, we implemented a 100\% blind GPU recovery benchmark (\texttt{bench\_minibatch\_recovery.cu}). The optimizer receives only the corrupted topology and a black-box $O(N)$-memory GPU Heavy-Light Decomposition (HLD) leaf-distance oracle that evaluates $d_{T^*}(x,y) = d_{\text{root}}(x) + d_{\text{root}}(y) - 2 d_{\text{root}}(\text{LCA}_{T^*}(x,y))$ in $O(\log N)$ hops across CSR dyadic-weighted clade profiles (\texttt{compute\_clade\_dyadic\_profile} and \texttt{k\_build\_true\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}). Corrupted clades are discovered blindly on the GPU by scanning all $N-2$ internal edges for four-point condition quartet violations (\texttt{k\_detect\_quartet\_violations}), and cross-clade partner windows are discovered blindly via GPU $k$-NN leaf-to-leaf distance queries (\texttt{k\_find\_knn\_partner\_clade}), tracked via invariant leaf anchors across skeleton graft-backs. Table~\ref{tab:minibatch_recovery} reports both intra-clade topological recovery ($800$ SPR perturbations inducing $2{,}457\text{--}2{,}816$ wrong bipartition splits) and long-range cross-clade SPR recovery comparing Blind Naive Single-Clade Windows against Blind $k$-NN Paired-Clade Minibatching (Remark~\ref{rem:minibatch_tradeoffs}). Across $N \in \{10{,}000 \dots 1{,}000{,}000\}$, our blind GPU Clade-Condensed Minibatch optimizer recovers $\mathbf{97.07\%\text{--}99.73\%}$ of all corrupted bipartition splits ($\mathbf{93.33\%\text{--}99.22\%}$ canonical Phylo2Vec Hamming recovery) in $0.31\text{--}1.21\text{ s}$, while Blind $k$-NN Paired-Clade Minibatching lifts cross-clade recovery from $74.70\%\text{--}79.22\%$ (naive single-clade windows) to $\mathbf{91.31\%\text{--}100.00\%}$ (reaching $\mathbf{99.93\%\text{--}100.00\%}$ at $N \ge 100{,}000$).
++Finally, to verify ground-truth topological recovery at $N \in \{10{,}000, 50{,}000, 100{,}000, 500{,}000, 1{,}000{,}000\}$ without allocating an $O(N^2)$ distance matrix and with zero leakage of perturbation metadata, we implemented a 100\% blind GPU recovery benchmark (\texttt{bench\_minibatch\_recovery.cu}). The optimizer receives only the corrupted topology and a black-box $O(N)$-memory GPU Heavy-Light Decomposition (HLD) leaf-distance oracle that evaluates $d_{T^*}(x,y) = d_{\text{root}}(x) + d_{\text{root}}(y) - 2 d_{\text{root}}(\text{LCA}_{T^*}(x,y))$ in $O(\log N)$ hops across CSR dyadic-weighted clade profiles (\texttt{compute\_clade\_dyadic\_profile} and \texttt{k\_build\_true\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}). Corrupted clades are discovered blindly on the GPU by scanning all $N-2$ internal edges for four-point condition quartet violations (\texttt{k\_detect\_quartet\_violations}), and cross-clade partner windows are discovered blindly via GPU $k$-NN leaf-to-leaf distance queries (\texttt{k\_find\_knn\_partner\_clade}), tracked via invariant leaf anchors across skeleton graft-backs. Table~\ref{tab:minibatch_recovery} reports both intra-clade topological recovery ($800$ SPR perturbations inducing $2{,}457\text{--}2{,}816$ wrong bipartition splits) and long-range cross-clade SPR recovery comparing Blind Naive Single-Clade Windows against Blind $k$-NN Paired-Clade Minibatching (Remark~\ref{rem:minibatch_tradeoffs}). Across $N \in \{10{,}000 \dots 1{,}000{,}000\}$, our blind GPU Clade-Condensed Minibatch optimizer recovers $\mathbf{96.98\%\text{--}99.47\%}$ of all corrupted bipartition splits ($\mathbf{93.06\%\text{--}98.56\%}$ canonical Phylo2Vec Hamming recovery) in $0.60\text{--}13.02\text{ s}$, while Blind $k$-NN Paired-Clade Minibatching lifts cross-clade recovery from $74.70\%\text{--}79.22\%$ (naive single-clade windows) to $\mathbf{94.16\%\text{--}100.00\%}$ (reaching $\mathbf{100.00\%}$ with $0$ wrong splits at $N = 100{,}000$ and $N = 1{,}000{,}000$).
+ 
+ \begin{table}[h!]
+ \centering
+@@ -575,11 +579,11 @@
+ \toprule
+ \textbf{Taxa ($N$)} & \textbf{Window $N_{\text{eff}}$} & \textbf{Init $\to$ Final $d_H(v,v^*)$} & \textbf{Init $\to$ Final RF} & \textbf{$d_H$ Recov \%} & \textbf{RF Recov \%} & \textbf{Time (s)} & \textbf{Cross-Clade Init RF} & \textbf{Naive Window Recov} & \textbf{Blind $k$-NN Guided Recov} \\
+ \midrule
+-$10{,}000$      & $629$   & $766 \to 19$ & $2{,}650 \to 22$ & $\mathbf{97.52\%}$ & $\mathbf{99.17\%}$ & $0.31\text{ s}$ & $1{,}439$ & $77.14\%$ ($329$ rem) & $\mathbf{91.31\%}$ ($125$ rem) \\
+-$50{,}000$      & $692$   & $780 \to 52$ & $2{,}457 \to 72$ & $\mathbf{93.33\%}$ & $\mathbf{97.07\%}$ & $0.35\text{ s}$ & $1{,}680$ & $74.70\%$ ($425$ rem) & $\mathbf{98.45\%}$ ($26$ rem) \\
+-$100{,}000$     & $808$   & $778 \to 50$ & $2{,}609 \to 59$ & $\mathbf{93.57\%}$ & $\mathbf{97.74\%}$ & $0.43\text{ s}$ & $1{,}511$ & $79.22\%$ ($314$ rem) & $\mathbf{99.93\%}$ ($1$ rem) \\
+-$500{,}000$     & $1{,}310$ & $773 \to 6$  & $2{,}599 \to 7$  & $\mathbf{99.22\%}$ & $\mathbf{99.73\%}$ & $0.84\text{ s}$ & $1{,}539$ & $75.24\%$ ($381$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
+-$1{,}000{,}000$ & $1{,}346$ & $778 \to 33$ & $2{,}816 \to 52$ & $\mathbf{95.76\%}$ & $\mathbf{98.15\%}$ & $1.21\text{ s}$ & $1{,}516$ & $79.22\%$ ($315$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
++$10{,}000$      & $629$   & $766 \to 11$ & $2{,}650 \to 14$ & $\mathbf{98.56\%}$ & $\mathbf{99.47\%}$ & $0.60\text{ s}$ & $1{,}439$ & $77.14\%$ ($329$ rem) & $\mathbf{94.16\%}$ ($84$ rem) \\
++$50{,}000$      & $692$   & $780 \to 50$ & $2{,}457 \to 70$ & $\mathbf{93.59\%}$ & $\mathbf{97.15\%}$ & $0.92\text{ s}$ & $1{,}680$ & $74.70\%$ ($425$ rem) & $\mathbf{98.45\%}$ ($26$ rem) \\
++$100{,}000$     & $808$   & $778 \to 16$ & $2{,}609 \to 21$ & $\mathbf{97.94\%}$ & $\mathbf{99.20\%}$ & $1.19\text{ s}$ & $1{,}511$ & $79.22\%$ ($314$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
++$500{,}000$     & $1{,}310$ & $773 \to 29$ & $2{,}599 \to 44$ & $\mathbf{96.25\%}$ & $\mathbf{98.31\%}$ & $6.52\text{ s}$ & $1{,}539$ & $75.24\%$ ($381$ rem) & $\mathbf{95.71\%}$ ($66$ rem) \\
++$1{,}000{,}000$ & $1{,}346$ & $778 \to 54$ & $2{,}816 \to 85$ & $\mathbf{93.06\%}$ & $\mathbf{96.98\%}$ & $13.02\text{ s}$ & $1{,}516$ & $79.22\%$ ($315$ rem) & $\mathbf{100.00\%}$ ($0$ rem) \\
+ \bottomrule
+ \end{tabular}%
+ }
+@@ -608,7 +612,7 @@
+ }
+ \end{table}
+ 
+-Second, we evaluated all methods on the empirical biophysical \textbf{RNASim} $1{,}596$-bp 16S rRNA alignments~\cite{mirarab2015pasta} ($N \in \{1{,}000, \, 5{,}000, \, 10{,}000, \, 50{,}000, \, 100{,}000\}$ sequences evolved under thermodynamic secondary-structure folding selection, indels, and strong site-to-site rate heterogeneity). In addition to gap-aware \texttt{JC69} distances, we evaluated our GPU Bayesian Eigenvalue $\text{GTR}+\Gamma(\alpha,\alpha)$ distance estimator (\texttt{phylo2vec\_eigen\_dist\_cuda.cu}~\cite{penn2025eigen}), which fits the 7-parameter $\text{GTR}+\Gamma$ exchangeabilities $\hat{S} = [0.82, 1.14, 1.72, 0.39, 1.13, 0.80]$ and shape $\hat{\alpha}$ in $0.18\text{--}0.25\text{ s}$ on the GPU and computes reversible symmetrized Iteratively Reweighted WLS distances (\texttt{Eigen-RevSymWLS}). For large-$N$ minibatch optimization (\texttt{bench\_rnasim\_gpu.cu}), our Subtree-Wave Multigrid Minibatch algorithm uses best-first CSR dyadic-weighted clade and outgroup profiles (\texttt{compute\_clade\_dyadic\_profile}, \texttt{compute\_outgroup\_dyadic\_profile}, and \texttt{k\_build\_real\_seq\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}) and priority-queue-bounded skeleton extraction ($\text{max\_internals} = 1{,}200$, guaranteeing $K \le 1{,}201 \le 2{,}048$ even on maximally unbalanced caterpillar trees) across three conflict-free phases: (i) a global backbone pass at the tree root ($B_{\text{thresh}} = N/700$), (ii) a bottom-up connected-component wave (\texttt{build\_component\_waves}, partitioning all $N-1$ internal nodes into connected components of $\le 1{,}050$ internal nodes and scheduling all leaf-bearing components with $c_{\text{thresh}} = 1$ so that $100\%$ of the $N$ original leaves are uncondensed) anchored by an outgroup super-leaf whose CSR dyadic profile expands all ancestor sibling clades along the path to the unrooted tree root (\texttt{compute\_outgroup\_dyadic\_profile}), and (iii) a staggered medium cross-clade wave ($\text{first\_cap} = 525$, $\text{max\_cap} = 1{,}050$) with $O(K)$ incremental post-order summary propagation. Notably, at $N = 1{,}000$, even when initialized from a \textbf{100\% uniformly random binary tree} ($997/997$ wrong splits, zero NJ initialization), our GPU Full-Tree BME optimizer converges in $\mathbf{0.48\text{ s}}$ ($\Delta L = -143.88$) to $\mathbf{178/997}$ wrong splits ($17.85\%$), matching 64-thread \texttt{VeryFastTree} ($178/997$ in $7.46\text{ s}$) and 64-thread \texttt{FastME -u} ($178/997$ in $11.85\text{ s}$) from pure white noise. Starting from the shared \texttt{VFT-InitNJ} topology, Table~\ref{tab:rnasim_benchmark} shows that our GPU Phylo2Vec BME optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} across \textbf{every} dataset size up to $N = 100{,}000$ while running $\mathbf{303\times\text{--}688\times}$ faster than \texttt{VeryFastTree} and $\mathbf{1{,}127\times\text{--}2{,}168\times}$ faster than \texttt{FastME}: at $N = 50{,}000$, GPU Minibatch BME reduces wrong splits from $6{,}729$ to $\mathbf{4{,}942}$ ($\mathbf{9.88\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{38}$ splits) in $\mathbf{0.61\text{ s}}$ vs.\ $+313.53\text{ s}$ ($\mathbf{514\times}$ faster), and at $N = 100{,}000$, it reduces wrong splits from $12{,}375$ to $\mathbf{8{,}809}$ ($\mathbf{8.81\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{48}$ splits) in $\mathbf{1.16\text{ s}}$ vs.\ $+593.50\text{ s}$ ($\mathbf{512\times}$ faster refinement, or $\mathbf{666\times}$ faster than \texttt{VeryFastTree}'s $772.53\text{ s}$ total runtime).
++Second, we evaluated all methods on the empirical biophysical \textbf{RNASim} $1{,}596$-bp 16S rRNA alignments~\cite{mirarab2015pasta} ($N \in \{1{,}000, \, 5{,}000, \, 10{,}000, \, 50{,}000, \, 100{,}000\}$ sequences evolved under thermodynamic secondary-structure folding selection, indels, and strong site-to-site rate heterogeneity). In addition to gap-aware \texttt{JC69} distances, we evaluated our GPU Bayesian Eigenvalue $\text{GTR}+\Gamma(\alpha,\alpha)$ distance estimator (\texttt{phylo2vec\_eigen\_dist\_cuda.cu}~\cite{penn2025eigen}), which fits the 7-parameter $\text{GTR}+\Gamma$ exchangeabilities $\hat{S} = [0.82, 1.14, 1.72, 0.39, 1.13, 0.80]$ and shape $\hat{\alpha}$ in $0.18\text{--}0.25\text{ s}$ on the GPU and computes reversible symmetrized Iteratively Reweighted WLS distances (\texttt{Eigen-RevSymWLS}). For large-$N$ minibatch optimization (\texttt{bench\_rnasim\_gpu.cu}), our Subtree-Wave Multigrid Minibatch algorithm uses best-first CSR dyadic-weighted clade and outgroup profiles (\texttt{compute\_clade\_dyadic\_profile}, \texttt{compute\_outgroup\_dyadic\_profile}, and \texttt{k\_build\_real\_seq\_condensed\_D}, Remark~\ref{rem:minibatch_tradeoffs}) and priority-queue-bounded skeleton extraction ($\text{max\_internals} = 1{,}200$, guaranteeing $K \le 1{,}201 \le 2{,}048$ even on maximally unbalanced caterpillar trees) across three conflict-free phases: (i) a global backbone pass at the tree root ($B_{\text{thresh}} = N/700$), (ii) a bottom-up connected-component wave (\texttt{build\_component\_waves}, partitioning all $N-1$ internal nodes into connected components of $\le 1{,}050$ internal nodes and scheduling all leaf-bearing components with $c_{\text{thresh}} = 1$ so that $100\%$ of the $N$ original leaves are uncondensed) anchored by an outgroup super-leaf whose CSR dyadic profile expands all ancestor sibling clades along the path to the unrooted tree root (\texttt{compute\_outgroup\_dyadic\_profile}), and (iii) a staggered medium cross-clade wave ($\text{first\_cap} = 525$, $\text{max\_cap} = 1{,}050$) with $O(K)$ incremental post-order summary propagation. Notably, at $N = 1{,}000$, even when initialized from a \textbf{100\% uniformly random binary tree} ($997/997$ wrong splits, zero NJ initialization), our GPU Full-Tree BME optimizer converges in $\mathbf{0.48\text{ s}}$ ($\Delta L = -143.88$) to $\mathbf{178/997}$ wrong splits ($17.85\%$), matching 64-thread \texttt{VeryFastTree} ($178/997$ in $7.46\text{ s}$) and 64-thread \texttt{FastME -u} ($178/997$ in $11.85\text{ s}$) from pure white noise. Starting from the shared \texttt{VFT-InitNJ} topology, Table~\ref{tab:rnasim_benchmark} shows that our GPU Phylo2Vec BME optimizer outperforms both 64-thread \texttt{FastME 2.1.6} and 64-thread \texttt{VeryFastTree 4.0.5} across \textbf{every} dataset size up to $N = 100{,}000$ while running $\mathbf{127\times\text{--}688\times}$ faster than \texttt{VeryFastTree} and $\mathbf{1{,}127\times\text{--}2{,}168\times}$ faster than \texttt{FastME}: at $N = 50{,}000$, GPU Minibatch BME reduces wrong splits from $6{,}729$ to $\mathbf{4{,}947}$ ($\mathbf{9.89\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{33}$ splits) in $\mathbf{2.26\text{ s}}$ vs.\ $+313.53\text{ s}$ ($\mathbf{139\times}$ faster refinement, or $\mathbf{167\times}$ faster total runtime), and at $N = 100{,}000$, it reduces wrong splits from $12{,}375$ to $\mathbf{8{,}805}$ ($\mathbf{8.81\%}$ nRF, beating \texttt{VeryFastTree} by $\mathbf{52}$ splits) in $\mathbf{3.46\text{ s}}$ vs.\ $+593.50\text{ s}$ ($\mathbf{172\times}$ faster refinement, or $\mathbf{223\times}$ faster than \texttt{VeryFastTree}'s $772.53\text{ s}$ total runtime).
+ 
+ \begin{table}[h!]
+ \centering
+@@ -621,14 +625,14 @@
+ \textbf{Taxa ($N$)} & \textbf{Splits} & \textbf{VFT-InitNJ 64T} & \textbf{FastME 2.1.6 64T (SPR)} & \textbf{VFT-ME 64T (\texttt{-noml})} & \textbf{GPU Full-Tree BME (Time)} & \textbf{GPU Minibatch BME (Time)} & \textbf{Minibatch Speedup vs.\ VFT-ME} & \textbf{$\Delta L_{\text{BME}}$} \\
+ \midrule
+ $1{,}000$   & $997$     & $214$ ($21.46\%$, $0.58\text{ s}$)     & $177$ ($17.75\%$, $21.68\text{ s}$)$^{\dagger}$ & $178$ ($17.85\%$, $+6.88\text{ s}$)     & $\mathbf{176}$ ($\mathbf{17.65\%}$, $\mathbf{0.01\text{ s}}$)$^{\ddagger}$ & $\mathbf{176}$ ($\mathbf{17.65\%}$, $\mathbf{0.01\text{ s}}$) & $\mathbf{688\times}$ ($\mathbf{2{,}168\times}$ vs.\ FastME) & $-0.19$ \\
+-$5{,}000$   & $4{,}997$   & $890$ ($17.81\%$, $3.40\text{ s}$)     & \emph{$>35\text{ min}$ (CPU wall)}              & $703$ ($14.07\%$, $+33.38\text{ s}$)    & $692$ ($13.85\%$, $0.32\text{ s}$)                                         & $\mathbf{688}$ ($\mathbf{13.77\%}$, $\mathbf{0.11\text{ s}}$) & $\mathbf{303\times}$                                       & $-0.90$ \\
+-$10{,}000$  & $9{,}997$   & $1{,}667$ ($16.68\%$, $7.82\text{ s}$)   & \emph{$>5\text{ hr}$ (CPU wall)}                & $1{,}313$ ($13.13\%$, $+65.98\text{ s}$)  & $1{,}309$ ($13.09\%$, $4.57\text{ s}$)$^{\S}$                              & $\mathbf{1{,}306}$ ($\mathbf{13.06\%}$, $\mathbf{0.17\text{ s}}$) & $\mathbf{388\times}$                                       & $-1.65$ \\
+-$50{,}000$  & $49{,}997$  & $6{,}729$ ($13.46\%$, $63.01\text{ s}$)  & \emph{OOM / CPU wall}                           & $4{,}980$ ($9.96\%$, $+313.53\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{4{,}942}$ ($\mathbf{9.88\%}$, $\mathbf{0.61\text{ s}}$)  & $\mathbf{514\times}$ ($617\times$ total)                   & $-6.37$ \\
+-$100{,}000$ & $99{,}997$  & $12{,}375$ ($12.38\%$, $179.03\text{ s}$) & \emph{OOM / CPU wall}                           & $8{,}857$ ($8.86\%$, $+593.50\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{8{,}809}$ ($\mathbf{8.81\%}$, $\mathbf{1.16\text{ s}}$)  & $\mathbf{512\times}$ ($666\times$ total)                   & $-11.42$ \\
++$5{,}000$   & $4{,}997$   & $890$ ($17.81\%$, $3.40\text{ s}$)     & \emph{$>35\text{ min}$ (CPU wall)}              & $703$ ($14.07\%$, $+33.38\text{ s}$)    & $\mathbf{692}$ ($\mathbf{13.85\%}$, $0.32\text{ s}$)                       & $694$ ($13.89\%$, $\mathbf{0.22\text{ s}}$)                   & $\mathbf{152\times}$ ($167\times$ total)                   & $-0.90$ \\
++$10{,}000$  & $9{,}997$   & $1{,}667$ ($16.68\%$, $7.82\text{ s}$)   & \emph{$>5\text{ hr}$ (CPU wall)}                & $1{,}313$ ($13.13\%$, $+65.98\text{ s}$)  & $\mathbf{1{,}309}$ ($\mathbf{13.09\%}$, $4.57\text{ s}$)$^{\S}$            & $1{,}320$ ($13.20\%$, $\mathbf{0.52\text{ s}}$)               & $\mathbf{127\times}$ ($142\times$ total)                   & $-1.63$ \\
++$50{,}000$  & $49{,}997$  & $6{,}729$ ($13.46\%$, $63.01\text{ s}$)  & \emph{OOM / CPU wall}                           & $4{,}980$ ($9.96\%$, $+313.53\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{4{,}947}$ ($\mathbf{9.89\%}$, $\mathbf{2.26\text{ s}}$)  & $\mathbf{139\times}$ ($167\times$ total)                   & $-6.33$ \\
++$100{,}000$ & $99{,}997$  & $12{,}375$ ($12.38\%$, $179.03\text{ s}$) & \emph{OOM / CPU wall}                           & $8{,}857$ ($8.86\%$, $+593.50\text{ s}$)  & \emph{N/A (Minibatch)}                                                     & $\mathbf{8{,}805}$ ($\mathbf{8.81\%}$, $\mathbf{3.46\text{ s}}$)  & $\mathbf{172\times}$ ($223\times$ total)                   & $-11.35$ \\
+ \bottomrule
+ \multicolumn{9}{@{}l}{\footnotesize $^{\dagger}$On raw gappy FASTA (\texttt{-d J -m B -n -s}), \texttt{FastME 64T} reaches $182$ wrong splits ($24.83\text{ s}$); on GPU \texttt{JC69} matrix it reaches $177$ (\texttt{BIONJ+SPR}, $21.68\text{ s}$) and $178$ (\texttt{-u InitNJ+SPR}, $+11.27\text{ s}$).}\\
+ \multicolumn{9}{@{}l}{\footnotesize $^{\ddagger}$Both \texttt{JC69} and \texttt{Eigen-SymWLS} achieve $176/997$ ($17.65\%$) at $N=1{,}000$; starting from a $100\%$ random tree ($997/997$ wrong), GPU Full-Tree BME reaches $178/997$ in $0.48\text{ s}$.}\\
+-\multicolumn{9}{@{}l}{\footnotesize $^{\S}$At $N=10{,}000$, Full-Tree \texttt{Eigen-RevSymWLS} achieves $1{,}309$ wrong splits ($13.09\%$, $4.57\text{ s}$), Full-Tree \texttt{JC69} achieves $1{,}320$ ($3.71\text{ s}$), and Subtree-Wave Minibatch achieves $\mathbf{1{,}306}$ ($13.06\%$, $0.17\text{ s}$).}
++\multicolumn{9}{@{}l}{\footnotesize $^{\S}$At $N=10{,}000$, Full-Tree \texttt{Eigen-RevSymWLS} achieves $\mathbf{1{,}309}$ wrong splits ($13.09\%$, $4.57\text{ s}$), Full-Tree \texttt{JC69} achieves $1{,}320$ ($3.71\text{ s}$), and Subtree-Wave Minibatch achieves $1{,}320$ ($13.20\%$, $0.52\text{ s}$).}
+ \end{tabular}%
+ }
+ \end{table}
+@@ -637,7 +641,7 @@
+ \section{Conclusion}
+ % ============================================================================
+ 
+-By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ tree-based cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and exact inverse bijections (Theorem~\ref{thm:inverse}), and using node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $4.16\times\text{--}5.74\times$ on a single CPU core while recovering identical or superior BME topologies across $99.2\%$ ($119/120$) of tested datasets. Our Column-Independence (Theorem~\ref{thm:col_indep}), Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack with race-free SIMT destination indexing (Theorem~\ref{thm:heavy_stack}), Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}), and Exact Clade-Condensation Minibatch (Theorem~\ref{thm:clade_condense}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations. They deliver up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on Apple M5 unified memory, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ on an NVIDIA H100 80GB HBM3, a $5.15\times$ multi-GPU speedup ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves) at $N = 40{,}000$ on 8$\times$ H100, distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), clade-condensed minibatch optimization up to $N = 10{,}000{,}000$ taxa ($39.20\text{ s}$ per full epoch on 8$\times$ H100 in $7.8\text{ GB}$ VRAM/GPU), and a $303\times\text{--}688\times$ speedup over 64-thread \texttt{VeryFastTree 4.0.5} (and up to $4{,}087\times$ over 64-thread \texttt{FastME 2.1.6}) on the $1{,}596$-bp \texttt{JC69} and biophysical RNASim benchmarks while outperforming both tools in topological accuracy across every tested dataset size up to $N = 100{,}000$ ($8{,}809$ vs.\ $8{,}857$ wrong splits in $1.16\text{ s}$ vs.\ $772.53\text{ s}$).
++By formulating Balanced Minimum Evolution discrete gradients over the full $0 \le j \le 2i$ Phylo2Vec domain (Theorem~\ref{thm:full_2i}), pairing them with $O(N)$ tree-based cherry-first gauge transformations (Theorem~\ref{thm:relabel}) and exact inverse bijections (Theorem~\ref{thm:inverse}), and using node-disjoint multi-coordinate ($K$-SPR) batch updates, Phylo2Vec optimization surpasses FastME in convergence speed by up to $4.16\times\text{--}5.74\times$ on a single CPU core while recovering identical or superior BME topologies across $99.2\%$ ($119/120$) of tested datasets. Our Column-Independence (Theorem~\ref{thm:col_indep}), Stackless Ancestor-Walk (Theorem~\ref{thm:ancestor_walk}), Heavy-First Logarithmic Register-Stack with race-free SIMT destination indexing (Theorem~\ref{thm:heavy_stack}), Complete Column-Autonomy Tiling (Theorem~\ref{thm:column_tiling}), and Exact Clade-Condensation Minibatch (Theorem~\ref{thm:clade_condense}) reformulations convert pointer-chasing tree recurrences into lockstep, cache-resident matrix operations. They deliver up to a $9.01\times$ \texttt{subdist} speedup ($5.98\times$ end-to-end hybrid speedup) on Apple M5 unified memory, up to a $62.5\times$ single-GPU speedup on an NVIDIA RTX A6000 and a $112.8\times$ single-GPU speedup at $N = 4{,}000$ on an NVIDIA H100 80GB HBM3, a $5.15\times$ multi-GPU speedup ($158.36\text{ ms}$ for $3.2 \times 10^9$ moves) at $N = 40{,}000$ on 8$\times$ H100, distributed column-sharded full-tree execution across 8$\times$ NVIDIA H100 up to $N = 380{,}000$ taxa ($2.89 \times 10^{11}$ moves in $205.45\text{ s}$ across $569.9\text{ GB}$ HBM3), clade-condensed minibatch optimization up to $N = 10{,}000{,}000$ taxa ($39.20\text{ s}$ per full epoch on 8$\times$ H100 in $7.8\text{ GB}$ VRAM/GPU), and a $127\times\text{--}688\times$ speedup over 64-thread \texttt{VeryFastTree 4.0.5} (and up to $4{,}087\times$ over 64-thread \texttt{FastME 2.1.6}) on the $1{,}596$-bp \texttt{JC69} and biophysical RNASim benchmarks while outperforming both tools in topological accuracy across every tested dataset size up to $N = 100{,}000$ ($8{,}805$ vs.\ $8{,}857$ wrong splits in $3.46\text{ s}$ vs.\ $772.53\text{ s}$).
+ 
+ \begin{thebibliography}{9}
+ \bibitem{pauplin2000direct}

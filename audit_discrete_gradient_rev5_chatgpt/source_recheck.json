@@ -1,0 +1,11 @@
+{
+  "checked_utc": "2026-11-03T09:09:57.724462+00:00",
+  "late_host_functions_identical_to_tested_snapshot": {
+    "run_multi_gpu_minibatch_bme": true,
+    "run_subtree_minibatch_window": true,
+    "compute_outgroup_dyadic_profile": true,
+    "update_one_node_summary": true,
+    "optimize_skeleton_on_gpu": true
+  },
+  "changed_since_late_snapshot": []
+}
