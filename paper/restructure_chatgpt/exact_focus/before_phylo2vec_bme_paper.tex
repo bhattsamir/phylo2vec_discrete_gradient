@@ -1,0 +1,549 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs,graphicx,array,microtype,xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
+\setlength{\emergencystretch}{3em}
+\makeatletter
+\DeclareRobustCommand{\_}{\ifmmode\nfss@text{\textunderscore}\else\textunderscore\allowbreak\fi}
+\makeatother
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+\title{Parallel balanced minimum evolution optimization\\in Phylo2Vec coordinates}
+% Author names and affiliations to be supplied.
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Balanced minimum evolution (BME) provides a distance-based criterion for phylogenetic inference, but searching large tree spaces requires repeated evaluation of many candidate rearrangements.
+We formulate these evaluations as discrete coordinate differences in Phylo2Vec space and organize the underlying subtree-distance recurrences for parallel execution.
+For a tree represented in an ordered labeling, all valid single-coordinate changes are evaluated in $O(N^2)$ time.
+Relabeling preserves the current tree while changing the coordinate neighborhood.
+To reduce memory requirements, we optimize smaller skeleton trees whose leaves represent fixed components of the full tree.
+We give a self-contained proof that dyadically weighted component distances preserve every skeleton-induced BME change exactly.
+This reduction also covers a subtree window when its entire complement is retained as an oriented component.
+Capped profiles accelerate proposal generation, with full-profile evaluation used for acceptance and outside profiles refreshed after each committed window.
+In 120 small-tree comparisons, the CPU optimizer matches or improves the reference BME score in 119 cases.
+A full gradient sweep at $N=40{,}000$ takes 158.36~ms on eight H100 GPUs.
+On a 100,000-sequence RNASim benchmark, minibatch refinement with full-profile acceptance takes 104.45~s and returns 8,802 incorrect splits, compared with 593.50~s and 8,857 splits for VeryFastTree refinement.
+Exact evaluation applies to the specified distance matrix and candidate moves, while the search remains heuristic.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Distance-based phylogenetic inference separates the estimation of pairwise evolutionary distances from the search for a tree.
+Balanced minimum evolution (BME) scores a topology using a weighted sum of those distances, with weights determined by the branching structure along each leaf-to-leaf path~\cite{pauplin2000direct,desper2002fast,desper2004theory}.
+Efficient recurrences permit an entire subtree-prune-and-regraft (SPR) neighborhood to be evaluated in quadratic time~\cite{hordijk2005spr,lefort2015fastme}.
+For large trees, the practical costs include storing the subtree-distance table, repeatedly traversing the tree, and coordinating many small candidate evaluations.
+The number of optimization sweeps depends on the instance and the search strategy.
+
+Phylo2Vec represents rooted binary trees by bounded integer vectors~\cite{penn2024phylo2vec}.
+This representation provides a coordinate system in which a discrete difference records the change in BME after replacing one vector entry.
+An ordered labeling permits efficient decoding and maps coordinate changes to a structured collection of SPR moves.
+The representation also separates the tree topology from its leaf-label permutation.
+Changing the permutation can expose different coordinate moves without changing the current labeled tree or its score.
+
+Our method combines this coordinate formulation with parallel evaluation and component-based reduction.
+The reduction relies on established BME structure.
+Balanced subtree averages underlie earlier distance-based algorithms~\cite{desper2002fast,desper2004theory}, and fixed-clade families have been described as affine images of smaller BME polytopes~\cite[Section~2.4]{haws2011optimality}.
+We state the corresponding objective identity explicitly because its assumptions determine when minibatch optimization evaluates the full-tree objective.
+In particular, a component must retain its complete balanced leaf profile, and a subtree window must retain the rest of the tree through the correct attachment orientation.
+
+The contribution developed here is an algorithmic formulation: a quadratic-time Phylo2Vec coordinate evaluator, an optimizer that verifies proposed updates against BME, and parallel implementations using column decomposition and reduced skeletons.
+We distinguish exact identities from finite-precision calculations and from heuristic search decisions.
+The experiments separately assess objective agreement, local optimization, gradient throughput, and sequence-tree refinement.
+
+\section{Methods}
+\label{sec:math}
+
+\subsection{BME and Phylo2Vec coordinates}
+
+Let $T$ be an unrooted binary tree on $N\geq3$ labeled leaves, and let $D$ be a fixed, finite, symmetric matrix with zero diagonal.
+Write $q_T(x,y)$ for the number of internal degree-three vertices on the path from $x$ to $y$.
+The BME objective is
+\begin{equation}
+ L(T;D)=\sum_{0\leq x<y<N}D_{xy}\,2^{-q_T(x,y)}.
+ \label{eq:pauplin}
+\end{equation}
+If the path has $e_T(x,y)$ edges, then $q_T(x,y)=e_T(x,y)-1$.
+Thus the unordered-pair coefficient is $2^{1-e_T(x,y)}$.
+An artificial degree-two root used to encode the tree is suppressed before evaluating these path lengths.
+No additivity assumption on $D$ is needed for the identities below.
+
+The Phylo2Vec domain for rooted binary trees is
+\begin{equation}
+ \mathcal V_N=\{(v_0,\ldots,v_{N-2}):0\leq v_i\leq2i\},
+ \qquad |\mathcal V_N|=(2N-3)!!.
+ \label{eq:phylo2vec_space}
+\end{equation}
+We use the ordered, or cherry-first, subset
+$\mathcal V_N^{\mathrm{cf}}=\{v:0\leq v_i\leq i\}$ as the baseline for coordinate evaluation.
+Every rooted binary tree can be represented in this subset after a suitable leaf permutation.
+The relabeling construction and its proof are given in Appendix~\ref{sec:gauge}.
+If $\pi(a)$ is the original leaf represented by current index $a$, the distance matrix in these coordinates is
+$D_\pi[a,b]=D[\pi(a),\pi(b)]$.
+Permuting both axes in this way preserves the objective.
+Constructing the permutation takes $O(N)$ time from a decoded tree, while explicitly copying a dense permuted matrix takes $O(N^2)$ time.
+
+For an ordered baseline $v$, define the discrete coordinate difference
+\begin{equation}
+ \Delta_{i,j}
+ =L\bigl(T(v^{(i\leftarrow j)});D_\pi\bigr)
+  -L\bigl(T(v);D_\pi\bigr),\qquad 0\leq j\leq2i.
+ \label{eq:discrete_gradient}
+\end{equation}
+There are $(N-1)^2$ valid coordinate entries, including unchanged coordinates and entries that can represent the same unrooted topology.
+This count is not a count of distinct SPR neighbors.
+General candidate values $j>i$ are allowed even though the baseline is ordered.
+After accepting such a move, the resulting tree is decoded and relabeled before the next ordered evaluation.
+
+\subsection{Quadratic-time coordinate evaluation}
+
+For two distinct vertices $u,w$, define $A(u,w)$ as the balanced average distance between the two components oriented away from the path joining $u$ and $w$.
+At an internal vertex, the two outward branches each receive weight $1/2$.
+At a leaf, the corresponding distribution is concentrated on that leaf.
+Consequently, when the component at $u$ has children $a,b$,
+\begin{equation}
+ A(u,w)=\tfrac12\{A(a,w)+A(b,w)\}.
+ \label{eq:bottom_up}
+\end{equation}
+The direction is important when one vertex is an ancestor of the other in a computational rooting.
+In that case, the component away from $w$ combines the sibling branch and the parent branch:
+\begin{equation}
+ A(u,w)=\tfrac12\{A(\operatorname{sib}_u(w),w)
+                         +A(\operatorname{parent}(u),w)\}.
+ \label{eq:top_down}
+\end{equation}
+At the degree-three computational root, the analogous average uses the two branches not containing $w$.
+Bottom-up and top-down passes construct the required table in $O(N^2)$ arithmetic operations.
+
+For a fixed pruned component, the standard BME SPR recurrence propagates score differences across regraft edges in $O(N)$ time~\cite{hordijk2005spr}.
+Each propagation step is an adjacent interchange of four directed components.
+Its score change is a linear combination of their balanced distances, with coefficient $1/4$.
+Successive steps accumulate the change relative to the original attachment.
+Phylo2Vec supplies the mapping from each valid coordinate value to one of these regraft edges.
+The explicit mapping, including the collapsed-root boundary, is in Appendix~\ref{sec:mapping}.
+
+\begin{proposition}[Cost and scope of a coordinate sweep]
+\label{prop:quadratic}
+Given an ordered baseline and its leaf permutation, all entries in
+Equation~\eqref{eq:discrete_gradient} can be computed in $O(N^2)$ time.
+In exact arithmetic, these entries equal the corresponding full-tree BME differences.
+\end{proposition}
+\begin{proof}
+The balanced-distance table costs $O(N^2)$.
+For each of $O(N)$ coordinates, pruning its associated component and traversing the two remaining half-trees visits $O(N)$ edges.
+The SPR recurrence evaluates the score at each edge, and the coordinate mapping selects the appropriate values without evaluating the candidate trees independently.
+The mapping costs at most $O(N)$ per row.
+The recurrence preserves the Pauplin score difference at each traversal step, so selecting a mapped edge gives Equation~\eqref{eq:discrete_gradient}.
+\end{proof}
+
+The proposition concerns the coordinate neighborhood of the current labeling.
+It does not assert that this neighborhood is the entire SPR neighborhood, or that coordinate descent finds a global BME optimum.
+
+\subsection{Exact reduction to a skeleton tree}
+\label{sec:condensation}
+
+Partition all $N$ leaves into $K\geq3$ fixed components $S_1,\ldots,S_K$.
+Each component has a fixed internal binary topology and a single attachment to the rest of the tree.
+A component can consist of one leaf.
+For a non-singleton component, let $r_a$ be the internal vertex adjacent to its attachment edge, and let $h_a(x)$ count the branching vertices from $r_a$ to leaf $x$, including $r_a$.
+For a singleton, set $h_a(x)=0$.
+Define its balanced profile by
+\begin{equation}
+ \omega_a(x)=2^{-h_a(x)},\qquad x\in S_a.
+ \label{eq:profile}
+\end{equation}
+
+\begin{lemma}[Profile normalization]
+\label{lem:normalization}
+For each component, $\sum_{x\in S_a}\omega_a(x)=1$.
+\end{lemma}
+\begin{proof}
+A singleton has weight one.
+At a binary root, every leaf weight in each child component is multiplied by $1/2$.
+Induction over the component therefore gives total mass
+$\tfrac12\cdot1+\tfrac12\cdot1=1$.
+\end{proof}
+
+Let $G$ be an unrooted binary skeleton with one leaf for each component.
+Construct $T_G$ by replacing skeleton leaf $a$ with $S_a$, retaining the attachment edge.
+Define a condensed distance matrix by
+\begin{equation}
+ \widetilde D_{ab}
+ =\sum_{x\in S_a}\sum_{y\in S_b}
+    \omega_a(x)\omega_b(y)D_{xy}\quad(a\ne b),
+ \qquad \widetilde D_{aa}=0.
+ \label{eq:condensed_D}
+\end{equation}
+This is an objective-level form of the fixed-clade reduction discussed by Haws et al.~\cite[Section~2.4]{haws2011optimality}.
+We include the proof to specify the weights and the scope of exactness needed by the algorithm.
+
+\begin{theorem}[BME decomposition over fixed components]
+\label{thm:clade_condense}
+There is a constant $C$, independent of the skeleton topology, such that
+\begin{equation}
+ L(T_G;D)=C+L(G;\widetilde D).
+ \label{eq:bme_condense_decomp}
+\end{equation}
+Consequently, for any two skeletons $G$ and $G'$,
+\begin{equation}
+ L(T_{G'};D)-L(T_G;D)
+ =L(G';\widetilde D)-L(G;\widetilde D).
+ \label{eq:condensed_delta}
+\end{equation}
+\end{theorem}
+\begin{proof}
+Separate the unordered leaf pairs into pairs within a component and pairs between components.
+For $x,y\in S_a$, the path stays inside $S_a$ and is unchanged by rearranging the skeleton.
+The sum of all such terms is
+\[
+ C=\sum_a\sum_{\substack{x<y\\x,y\in S_a}}
+      D_{xy}\,2^{-q_{T_G}(x,y)},
+\]
+which is independent of $G$.
+
+For $x\in S_a$ and $y\in S_b$ with $a\ne b$, the path contains the branching vertices inside $S_a$, those on the skeleton path, and those inside $S_b$.
+These sets of vertices are disjoint, giving
+\[
+ q_{T_G}(x,y)=h_a(x)+q_G(a,b)+h_b(y).
+\]
+Therefore its weight factors as
+$2^{-q_{T_G}(x,y)}=\omega_a(x)\,2^{-q_G(a,b)}\,\omega_b(y)$.
+Summing between-component terms gives
+\begin{align*}
+ \sum_{a<b}\sum_{\substack{x\in S_a\\y\in S_b}}
+ D_{xy}\,2^{-q_{T_G}(x,y)}
+ &=\sum_{a<b}2^{-q_G(a,b)}
+      \sum_{\substack{x\in S_a\\y\in S_b}}\omega_a(x)\omega_b(y)D_{xy}\\
+ &=L(G;\widetilde D).
+\end{align*}
+Adding the within-component constant proves Equation~\eqref{eq:bme_condense_decomp}.
+Subtracting two such decompositions cancels $C$ and proves Equation~\eqref{eq:condensed_delta}.
+\end{proof}
+
+Thus a skeleton evaluates exact changes in the full objective, even though its absolute score omits $C$.
+The theorem applies to every rearrangement preserving the chosen components, not only to SPR moves.
+It also applies to arbitrary fixed dissimilarities, including non-additive estimated distances.
+
+\begin{corollary}[A proper subtree window]
+\label{cor:outside}
+For a window attached to the rest of a binary tree by one edge, treat its entire complement as an additional component oriented away from that edge.
+If this component retains its full profile and internal topology, Equation~\eqref{eq:condensed_delta} applies to rearrangements of the window skeleton.
+\end{corollary}
+\begin{proof}
+Cutting the attachment edge produces two components.
+The endpoint in the complement has two outward branches unless the complement is a singleton.
+It therefore defines precisely a binary component of the type used in the theorem.
+Including it completes the partition of all leaves, so both within-window and window-to-complement contributions are included.
+\end{proof}
+
+The outside profile is determined by the current topology of the complement.
+It cannot in general be replaced by one representative leaf, by uniform weights, or by a profile left unchanged after another window has been rearranged.
+
+\subsection{Approximate proposals with full-profile acceptance}
+\label{sec:acceptance}
+
+Constructing $\widetilde D$ can be expensive when components contain many leaves.
+The sequence implementation therefore permits a cap on the number of profile entries used to propose skeleton moves.
+Unexpanded profile mass is assigned to representative leaves.
+This defines a surrogate matrix $\widetilde D^{\mathrm{cap}}$.
+Without a bound on distances within the omitted subcomponents, a fixed cap gives no uniform accuracy guarantee.
+In particular, a balanced component can retain substantial unresolved mass at every frontier entry.
+
+The surrogate selects a candidate skeleton $G'$.
+Acceptance then evaluates the full-profile distances for pairs affected by both the topology change and profile truncation.
+Uncapped pair distances can be reused.
+If $\mathcal P(G,G')=\{(a,b):a<b,\ q_G(a,b)\ne q_{G'}(a,b)\}$, the full change is
+\begin{equation}
+ \delta=\sum_{(a,b)\in\mathcal P(G,G')}
+   \left(2^{-q_{G'}(a,b)}-2^{-q_G(a,b)}\right)
+   \widetilde D_{ab}.
+ \label{eq:changed_pairs}
+\end{equation}
+Unchanged pairs contribute zero, and the within-component constant cancels.
+Theorem~\ref{thm:clade_condense} therefore identifies $\delta$ with the full-tree BME change.
+The cap can affect which proposals are found, but it is not used to determine the final acceptance score.
+
+Windows are committed sequentially.
+After a commit, affected ancestor summaries are updated and the next window's outside profile is reconstructed from the current tree.
+Node-disjoint windows need not have additive BME changes because both updates can alter the coefficients of distances between their leaves.
+For consecutive accepted trees $T^{(0)},\ldots,T^{(M)}$, exact arithmetic gives
+\begin{equation}
+ L(T^{(M)};D)-L(T^{(0)};D)
+ =\sum_{m=1}^M\bigl[L(T^{(m)};D)-L(T^{(m-1)};D)\bigr].
+ \label{eq:telescoping}
+\end{equation}
+If each increment is negative, so is the cumulative increment.
+This argument requires that each acceptance calculation uses the current tree, rather than a shared pre-update tree.
+
+In the implementation, changed-pair accumulation uses FP64 and the sequence minibatch path requires a computed improvement greater than $10^{-6}$.
+This is a numerical acceptance margin, not a proved bound on floating-point error.
+The mathematical equalities are exact in real arithmetic.
+Computed distances, profile weights, and reductions remain subject to rounding and, on sufficiently deep trees, underflow.
+Exactness here is relative to the specified distance matrix, not to unknown evolutionary distances.
+
+\subsection{Search strategy}
+\label{sec:optimizer}
+
+The full-tree CPU optimizer evaluates coordinate differences, ranks improving rows, and forms candidate batches using disjoint path corridors as a conflict filter.
+It then evaluates the combined candidate tree and backtracks to a smaller batch if the score does not improve.
+The acceptance decision uses the joint objective rather than the sum of individual predicted improvements.
+When the current coordinate neighborhood is exhausted, the optimizer changes the ordered labeling and searches again.
+Its full-tree configuration also scans remaining unrooted SPR moves before declaring SPR-local convergence.
+An optional restart stage applies random perturbations and resumes descent while retaining the best tree found.
+Only accepted descent updates and the retained best score are monotone.
+The perturbed working trajectory need not be.
+
+The minibatch implementation alternates skeletons at different scales.
+A global skeleton rearranges the backbone, local windows expose detailed structure, and overlapping or paired windows propose changes between regions.
+Each window follows four steps:
+\begin{enumerate}
+ \item Select fixed components from the current tree, including an oriented outside component for a proper subtree.
+ \item Construct their profiles and a condensed proposal matrix, applying a cap if configured.
+ \item Optimize the skeleton and evaluate its proposed change using Equation~\eqref{eq:changed_pairs}.
+ \item Commit an improving candidate, graft the components back, and update summaries before selecting or evaluating the next window.
+\end{enumerate}
+These steps preserve the objective being optimized under the assumptions above.
+They do not prove that a particular finite window schedule explores every tree or reaches every improving move.
+Nor does an infinite number of batches alone establish such a result without assumptions on which proposals can occur and be accepted.
+
+\subsection{Parallel evaluation and computational cost}
+\label{sec:parallel}
+
+Equation~\eqref{eq:bottom_up} has an independent recurrence for each fixed column.
+Assigning columns to threads lets neighboring threads access consecutive entries while following the same traversal order.
+The top-down correction for column $w$ follows its ancestor path.
+Depth-first entry intervals determine the next child without a traversal stack.
+Its total work over columns is $O(\sum_w\operatorname{depth}(w))$, bounded by $O(N^2)$ and reduced to $O(N\log N)$ for trees of logarithmic height.
+
+A full balanced-distance table stores approximately $4N^2$ entries.
+The column-tiled variant retains the internal-to-leaf block and reconstructs required internal rows on demand.
+This reduces that table to approximately $N^2$ entries, while the input matrix and other buffers still contribute to total memory.
+A row-wise reduction can return the best coordinate per row without storing the rectangular gradient output.
+Columns and SPR rows can also be distributed across GPUs.
+Appendix~\ref{sec:parallel_details} gives the dependency and workspace arguments.
+
+For a skeleton with $K$ leaves, a coordinate sweep costs $O(K^2)$ once its distances are available.
+This does not make arbitrary distance construction independent of $N$.
+Direct evaluation of one condensed pair can require $|S_a||S_b|$ original distances.
+Full profiles use $O(N)$ entries, and uncapped changed-pair refinement can dominate runtime for large component pairs.
+When $D_{xy}=\phi(x)^\top\psi(y)$ has a fixed-dimensional bilinear representation, weighted component embeddings give
+$\widetilde D_{ab}=(\sum_x\omega_a(x)\phi(x))^\top
+(\sum_y\omega_b(y)\psi(y))$.
+That shortcut is exact for the specified bilinear distance.
+It does not justify averaging embeddings before applying a nonlinear sequence-distance correction.
+
+\section{Experimental design}
+\label{sec:experiments}
+
+We distinguish four workloads.
+First, small-tree tests compare coordinate differences and condensed differences against independent evaluations of Equation~\eqref{eq:pauplin}.
+Second, CPU optimization experiments compare final scores and wall times from identical starting trees.
+Third, gradient benchmarks measure parallel sweep throughput, independently of convergence.
+Fourth, sequence benchmarks measure tree refinement from a shared starting topology.
+The large embedding-based scaling workload is distinct from sequence-distance refinement.
+
+The CPU comparison uses additive distances from trees whose branch lengths are uniform on $(0.05,0.55)$ and a noisy variant
+$D'_{xy}=D_{xy}\exp(0.15Z_{xy})$, with symmetric standard-normal $Z_{xy}$.
+There are respectively 20, 20, 10, 5, and 5 replicates at
+$N=20,50,100,150,200$ in each regime.
+The reference is the project's in-memory C implementation of the FastME BME-SPR algorithm.
+Agreement with the external FastME executable is assessed separately.
+A score tolerance of $10^{-9}$ defines wins, ties, and losses.
+Single-core timings are reported for Apple M5 and AMD Threadripper PRO 5995WX processors.
+
+GPU evaluation uses NVIDIA RTX A6000 and H100 devices, with additional CPU/Metal measurements in the supplement.
+The GPU gradient path uses FP32 working arrays in the reported comparisons, whereas independent score calculations and full-profile acceptance accumulation use FP64.
+The sequence comparisons use 64-thread FastME 2.1.6 and VeryFastTree 4.0.5~\cite{lefort2015fastme,pineiro2020veryfasttree}.
+VeryFastTree's minimum-evolution refinement is run without its likelihood-refinement phase.
+We report refinement time separately from starting-tree construction.
+Wrong-split counts measure inferred nontrivial splits absent from the reference tree.
+For binary trees on the same leaves, normalized RF distance is this count divided by $N-3$.
+
+Sequence data comprise controlled JC69 simulations and the RNASim benchmark associated with PASTA~\cite{mirarab2015pasta}.
+RNASim is simulated sequence data with a known reference tree.
+The reported alignments have 1,596 columns.
+The minibatch comparison uses gap-aware JC69 distances.
+Selected full-tree experiments also use the eigenvalue-based distance approach~\cite{penn2025eigen}, which changes the input objective and is identified separately.
+Minibatch timings include full-profile acceptance and sequential reconstruction of live outside profiles.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Agreement with independent objective calculations}
+
+Table~\ref{tab:validation} summarizes the reported numerical checks.
+The largest discrepancy in the CPU coordinate tests is $3.553\times10^{-14}$, and the condensation tests agree to $1.564\times10^{-13}$.
+These are observed absolute errors on the tested cases, not universal error bounds.
+Rooted-vector round trips recover all 1,000 tested vectors at $N=40$.
+Unrooted round trips preserve the split sets in a further 1,000 cases.
+Exhaustive rooted-tree enumeration at $N=4,\ldots,7$ checks 11,460 encodings.
+
+\begin{table}[tb]
+\centering
+\caption{Agreement with independent BME calculations. Errors are maximum absolute discrepancies over the stated tests.}
+\label{tab:validation}
+\small
+\begin{tabular}{@{}p{0.39\linewidth}p{0.32\linewidth}r@{}}
+\toprule
+Calculation & Test scope & Maximum error\\
+\midrule
+CPU coordinate differences & 36,000 changes, $N=20$ & $3.553\times10^{-14}$\\
+Ordered-tree enumeration & 28,488 changes, $N=4$--7 & $2.776\times10^{-15}$\\
+Relabeling, first orientation & 200 trees, $N=25$ & $1.776\times10^{-14}$\\
+Relabeling, reversed orientation & Same 200 trees & $2.665\times10^{-14}$\\
+Condensed SPR differences & 16,231 changes, $N=40$, $K=16$ & $1.564\times10^{-13}$\\
+FP32 CUDA gradient & Reported sizes $N=100$--4,000 & $1.11\times10^{-6}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Independent enumeration also identifies the scope of the coordinate neighborhood.
+On 30 random trees at each tested size from $N=8$ to $20$, a single ordered orientation covers approximately 27--33\% of distinct SPR neighbors.
+Two orientations together cover approximately 52--56\%.
+Neither constitutes an exhaustive SPR search.
+The full CPU optimizer's additional SPR scan is therefore material: independent enumeration found no improving SPR move in 90 returned trees at $N=10,16,24$.
+This observation concerns that tested configuration, not the minibatch variant.
+
+\subsection{CPU optimization}
+
+Both methods recover the reference topology in all 60 noiseless trials.
+On the 60 noisy trials, Phylo2Vec obtains two lower BME scores, 57 ties, and one higher score than the in-memory reference.
+Thus it matches or improves the reference objective in 119 of 120 cases overall.
+A better BME score need not imply a smaller RF distance when the input distances are noisy.
+For example, the $N=200$ noisy comparison has a lower mean reference RF error despite one BME-score win for Phylo2Vec.
+
+At $N=200$, the noiseless Apple M5 comparison requires 63.6 gradient evaluations on average, versus 211.0 reference SPR iterations.
+The corresponding mean times are 18.14 and 75.46~ms.
+Table~\ref{tab:cpu_summary} gives the largest-size timings for both processors.
+Supplementary Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} give results at all sizes.
+External FastME comparisons at the same five sizes produce identical final unrooted splits and BME differences below $10^{-8}$ in the reported checks.
+These checks support the reference implementation on those inputs without making the in-memory timings measurements of the external executable.
+
+\begin{table}[tb]
+\centering
+\caption{Single-core optimization at $N=200$. Times are mean $\pm$ standard deviation in milliseconds over five replicates.}
+\label{tab:cpu_summary}
+\small
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Processor & Distances & Reference & Phylo2Vec & Ratio\\
+\midrule
+Apple M5 & Additive & $75.46\pm2.42$ & $18.14\pm0.74$ & $4.16$\\
+Apple M5 & Noisy & $85.16\pm2.06$ & $24.67\pm2.79$ & $3.45$\\
+AMD 5995WX & Additive & $160.64\pm5.51$ & $27.96\pm1.18$ & $5.74$\\
+AMD 5995WX & Noisy & $181.97\pm4.30$ & $36.91\pm3.94$ & $4.93$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Gradient throughput and memory}
+
+At $N=4{,}000$, a reported full-gradient evaluation takes 6.219~ms on one H100, compared with 701.375~ms for its CPU reference.
+At $N=40{,}000$, distributing the full-table computation across eight H100s reduces time from 816.34 to 158.36~ms, a factor of 5.15.
+The SPR stage alone falls from 756.26 to 98.28~ms.
+Column tiling reduces storage at the cost of recomputation: the reported one-GPU memory requirement falls from 31,142 to 13,614~MB, while the eight-GPU tiled evaluation takes 1,032.83~ms at this size.
+Thus the reduced-memory variant is useful when capacity, rather than latency, is limiting.
+
+Distributed and streamed configurations extend a single full-tree sweep to $N=380{,}000$, taking 205.450~s with 72,946~MB reported per GPU on eight H100s.
+This is a sweep benchmark, not the time to infer a converged tree.
+For the embedding-based workload with $N=10{,}000{,}000$ and $K=20{,}000$, reported average condensation and gradient times are 10.20 and 48.57~ms per batch on eight H100s.
+Multiplying their sum by 667 batches gives the reported epoch estimate of 39.20~s.
+It excludes any additional search work not represented by those two timings and does not establish a sequence-refinement time at that scale.
+The complete scaling tables are in Appendix~\ref{sec:scaling_tables}.
+
+\subsection{Sequence-tree refinement}
+
+Table~\ref{tab:rnasim_summary} compares minibatch refinement with VeryFastTree refinement from the same initial topology.
+At $N=50{,}000$, the minibatch method returns 4,950 incorrect splits in 16.84~s, compared with 4,980 in 313.53~s.
+At $N=100{,}000$, the corresponding results are 8,802 in 104.45~s and 8,857 in 593.50~s.
+The refinement-time ratios are 18.6 and 5.7 respectively.
+These exclude the shared initialization, which takes 63.01 and 179.03~s.
+Adding that initialization to both methods gives approximately 4.72-fold and 2.73-fold ratios, rather than the refinement-only ratios.
+
+\begin{table}[tb]
+\centering
+\caption{RNASim refinement from a shared starting topology. VFT denotes 64-thread VeryFastTree minimum-evolution refinement. P2V denotes minibatch refinement with full-profile acceptance on one RTX A6000. Times exclude the shared initialization.}
+\label{tab:rnasim_summary}
+\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+$N$ & Initial & \multicolumn{2}{c}{Wrong splits} & \multicolumn{2}{c}{Refinement (s)} & Init. (s)\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+ & wrong splits & VFT & P2V & VFT & P2V & \\
+\midrule
+1,000 & 214 & 178 & 176 & 6.88 & 0.06 & 0.58\\
+5,000 & 890 & 703 & 696 & 33.38 & 0.68 & 3.40\\
+10,000 & 1,667 & 1,313 & 1,320 & 65.98 & 1.55 & 7.82\\
+50,000 & 6,729 & 4,980 & 4,950 & 313.53 & 16.84 & 63.01\\
+100,000 & 12,375 & 8,857 & 8,802 & 593.50 & 104.45 & 179.03\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The topological advantage is not uniform.
+At $N=10{,}000$, the minibatch result has 1,320 incorrect splits, compared with 1,313 for VeryFastTree.
+A full-tree run with eigenvalue-based distances reaches 1,309 in 4.57~s, but uses a different distance estimate.
+The full-tree JC69 run returns 1,320 in 3.71~s.
+These variants should therefore not be combined into a single claim of consistently better topological accuracy.
+
+At $N=1{,}000$, FastME applied to the GPU-computed JC69 distance matrix returns 177 incorrect splits in 21.68~s with its own BIONJ initialization.
+Its shared-start refinement returns 178 in 11.27~s.
+The corresponding full-tree GPU result is 176 in 0.01~s, and minibatch refinement returns 176 in 0.06~s.
+The experiments differ in initialization and timing scope, so the ratios between their raw elapsed times are not interchangeable.
+
+\section{Discussion}
+
+The component identity provides the mathematical basis for evaluating local skeleton changes against a global BME objective.
+The unchanged internal terms form a constant, and the remaining terms factor through balanced component profiles.
+This principle is established BME structure.
+Its role here is to make explicit which data a minibatch evaluator must preserve and to connect reduced skeleton optimization to Phylo2Vec coordinates and parallel execution.
+
+The distinction between objective evaluation and search is essential.
+The distance matrix may itself be estimated, the search may select only a small subset of candidates, and capped profiles may miss useful proposals.
+None of these facts contradicts an exact algebraic evaluation of a specified candidate using complete profiles.
+Conversely, a correct algebraic identity does not remove floating-point error or establish global convergence.
+Changing leaf labels enlarges the collection of coordinate neighborhoods available to the optimizer, but the tested two-orientation schedule alone is not an exhaustive SPR search.
+
+The main computational tradeoff is between reuse and reconstruction.
+Dense tables permit rapid sweeps but require quadratic memory.
+Column tiling trades memory for repeated arithmetic.
+Skeletons reduce the dimension of the optimization problem, but exact construction of their distances can retain a dependence on the full leaf set.
+This becomes particularly visible in nonlinear sequence-distance refinement and in candidates involving large condensed components.
+Bilinear embedding benchmarks therefore establish a different scaling regime from the sequence experiments.
+
+The empirical results support faster evaluation and competitive refinement on the tested instances.
+They do not establish an asymptotic bound on the number of optimization sweeps, statistical superiority across data-generating models, or a universal numerical error bound.
+The largest sequence comparisons have no reported replicate uncertainty.
+Further comparisons should use matched distance matrices, identical starting trees, explicit timing boundaries, and repeated runs, with the exact implementation revision attached to each result.
+
+\section{Conclusion}
+
+Phylo2Vec coordinates provide a structured interface to quadratic-time BME move evaluation.
+Balanced component profiles extend this evaluator to reduced skeletons while preserving the full-tree change for every allowed skeleton update.
+The resulting implementation combines parallel gradient evaluation with minibatch proposals, full-profile acceptance, and sequential maintenance of outside information.
+Its performance depends on both the skeleton size and the cost of constructing exact component distances.
+The mathematical identities establish what is evaluated, while the experiments characterize the speed and solution quality of the implemented search.
+
+\input{phylo2vec_bme_references}
+
+\clearpage
+\appendix
+\input{phylo2vec_bme_appendix}
+
+\end{document}

@@ -1,0 +1,7 @@
+{
+  "original_sha256": "96c09a101c51e9fa52f458041ddc838e697c78a9aebf0f40c9c2285da6645492",
+  "head": "ee9965ddcb36b1ff5b239b17e913e2223b546b75",
+  "source": "paper/phylo2vec_bme_paper.tex",
+  "date": "2026-11-03",
+  "benchmarks_rerun": false
+}

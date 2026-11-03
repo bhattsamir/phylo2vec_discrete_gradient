@@ -1,0 +1,52 @@
+{
+  "tab:bench_noiseless": {
+    "original_data_sha256": "149771c64fea00c87a8cb91ab2c641aac45ca15392af6a8a495a4166518fdc2e",
+    "original_rows": 5,
+    "destination": "phylo2vec_bme_cpu_tables.tex"
+  },
+  "tab:bench_noisy": {
+    "original_data_sha256": "96d436e1345b2f6b7f5522ae907e8ead2105f0926500d0af049836ffb7c075d3",
+    "original_rows": 5,
+    "destination": "phylo2vec_bme_cpu_tables.tex"
+  },
+  "tab:bench_gpu": {
+    "original_data_sha256": "ae12fe93475151e884f211556569205edfcdd996ad57f482999040d078a7ecb7",
+    "original_rows": 7,
+    "destination": "phylo2vec_bme_scaling_tables.tex"
+  },
+  "tab:cuda_a6000_verify": {
+    "original_data_sha256": "ec6d4d96af6a8c9443fe694a29e75bd5fc2a1c747b82334b19ac8ad137505ff1",
+    "original_rows": 6,
+    "destination": "phylo2vec_bme_scaling_tables.tex"
+  },
+  "tab:cuda_a6000_scaling": {
+    "original_data_sha256": "9f195ccd91fe470adb7aa4d2999d10f27c8e69de052fe598d6de961d6a988c72",
+    "original_rows": 6,
+    "destination": "phylo2vec_bme_scaling_tables.tex"
+  },
+  "tab:h100_scaling": {
+    "original_data_sha256": "608a31f311c88b835107cf3b568cc5e464247ae110c22bf70ab4dff6033c960d",
+    "original_rows": 8,
+    "destination": "phylo2vec_bme_scaling_tables.tex"
+  },
+  "tab:minibatch_scaling": {
+    "original_data_sha256": "32b97dd1dc2c919be4a161a217bc93d83de8b73968203c2321bfc6a59cc0c7db",
+    "original_rows": 3,
+    "destination": "phylo2vec_bme_scaling_tables.tex"
+  },
+  "tab:minibatch_recovery": {
+    "original_data_sha256": "e65c24e2145acec2bf725b30da66510ad3a46404924f4e6fe07507bb0edb1999",
+    "original_rows": 5,
+    "destination": "original.tex archive only, implementation provenance needs confirmation"
+  },
+  "tab:jc69_benchmark": {
+    "original_data_sha256": "45f99b8df88771060ab8044c09b2509434985c2508c6d02973f5a2b7dc329626",
+    "original_rows": 4,
+    "destination": "original.tex archive only, implementation provenance needs confirmation"
+  },
+  "tab:rnasim_benchmark": {
+    "original_data_sha256": "468fbdd2d4375753d3da509cedef42eb2e15b165a891b9bb29f132cf356fb444",
+    "original_rows": 5,
+    "destination": "appendix sequence-variant comparison, not an exact-distance-throughout benchmark"
+  }
+}
