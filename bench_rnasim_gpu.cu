@@ -371,12 +371,9 @@ __global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
         int32_t b_cur  = s_win_b[cur];
         int32_t lb_cur = s_win_lb[cur];
         int32_t la_cur = s_win_la[cur];
-        int32_t cap_a = 64;
+        int32_t cap_a = (n_pairs >= 4096) ? 64 : ((n_pairs >= 2048) ? 32 : 16);
         if (lb_cur <= 512) {
             cap_a = (n_pairs >= 2048) ? MAX_CAP_A : 64;
-        } else {
-            if (n_pairs <= 65536) cap_a = 16;
-            else if (n_pairs <= 131072) cap_a = 32;
         }
         int32_t m = 1;
         int32_t sum_a = la_cur;
@@ -2216,36 +2213,61 @@ static double optimize_skeleton_on_gpu(
                 std::vector<int32_t> refine_offsets;
                 {
                     const double chunk_leaf_pairs = 4194304.0;     /* target leaf pairs per block */
+                    const int64_t b_chunk_target = 6144;           /* ~6-8k leaf B-chunks sized for L2 cache */
                     const int64_t max_virtual = (int64_t)4 * K;    /* slots reserved by ensure_exact_prof_cap */
                     std::vector<int32_t> heavy_pid, heavy_small, heavy_large;
                     std::vector<int64_t> heavy_rows;
+                    std::vector<std::vector<int32_t>> b_split_pids((size_t)K);
+                    std::vector<int32_t> b_split_profs;
                     for (int32_t pid = 0; pid < n_pairs; ++pid) {
                         int32_t u = pair_a[pid], v = pair_b[pid];
                         int64_t lu = exact_prof_offsets[u + 1] - exact_prof_offsets[u];
                         int64_t lv = exact_prof_offsets[v + 1] - exact_prof_offsets[v];
+                        int32_t s = (lu <= lv) ? u : v;
+                        int32_t l = (lu <= lv) ? v : u;
                         int64_t ls = std::min(lu, lv), ll = std::max(lu, lv);
-                        if (ls >= 32 && (double)ls * (double)ll > 2.0 * chunk_leaf_pairs) {
+                        int64_t b_c = (ll > b_chunk_target) ? std::min((int64_t)16, (ll + b_chunk_target - 1) / b_chunk_target) : 1;
+                        int64_t b_rows = (b_c >= 2) ? ((((ll + b_c - 1) / b_c) + 63) & ~(int64_t)63) : ll;
+                        if (b_c >= 2 && (double)ls * (double)b_rows <= 2.0 * chunk_leaf_pairs) {
+                            if (b_split_pids[l].empty()) b_split_profs.push_back(l);
+                            b_split_pids[l].push_back(pid);
+                        } else if (ls >= 32 && (double)ls * (double)ll > 2.0 * chunk_leaf_pairs) {
                             int64_t rows = (int64_t)std::ceil(chunk_leaf_pairs / (double)ll);
                             rows = std::max((int64_t)16, ((rows + 15) / 16) * 16);
                             heavy_pid.push_back(pid);
-                            heavy_small.push_back((lu <= lv) ? u : v);
-                            heavy_large.push_back((lu <= lv) ? v : u);
+                            heavy_small.push_back(s);
+                            heavy_large.push_back(l);
                             heavy_rows.push_back(rows);
                         }
                     }
-                    int64_t slots = 0;
+                    int64_t b_slots = 0, b_extra_pairs = 0;
+                    for (int32_t l : b_split_profs) {
+                        int64_t ll = exact_prof_offsets[l + 1] - exact_prof_offsets[l];
+                        int64_t b_c = std::min((int64_t)16, (ll + b_chunk_target - 1) / b_chunk_target);
+                        int64_t b_rows = (((ll + b_c - 1) / b_c) + 63) & ~(int64_t)63;
+                        int64_t c = (ll + b_rows - 1) / b_rows;
+                        if (c >= 2) {
+                            b_slots += c + 1;
+                            b_extra_pairs += (c - 1) * (int64_t)b_split_pids[l].size();
+                        }
+                    }
+                    int64_t slots = 0, extra_pairs = 0;
                     for (int32_t pass = 0; pass < 64; ++pass) {
-                        slots = 0;
+                        slots = b_slots;
+                        extra_pairs = b_extra_pairs;
                         for (size_t h = 0; h < heavy_pid.size(); ++h) {
                             int32_t s = heavy_small[h];
                             int64_t ls = exact_prof_offsets[s + 1] - exact_prof_offsets[s];
                             int64_t c = (ls + heavy_rows[h] - 1) / heavy_rows[h];
-                            if (c >= 2) slots += c + 1;
+                            if (c >= 2) {
+                                slots += c + 1;
+                                extra_pairs += c - 1;
+                            }
                         }
                         if (slots <= max_virtual) break;
                         for (size_t h = 0; h < heavy_rows.size(); ++h) heavy_rows[h] *= 2;
                     }
-                    if (slots > 0 && slots <= max_virtual) {
+                    if (slots > 0 && slots <= max_virtual && (size_t)(n_pairs + extra_pairs) <= (size_t)K * (size_t)K / 2 + 16 + (size_t)4 * K) {
                         refine_offsets.assign(exact_prof_offsets, exact_prof_offsets + K + 1);
                         for (size_t h = 0; h < heavy_pid.size(); ++h) {
                             int32_t pid = heavy_pid[h], s = heavy_small[h], l = heavy_large[h];
@@ -2262,6 +2284,29 @@ static double optimize_skeleton_on_gpu(
                                 launch_a.push_back(base + (int32_t)j);
                                 launch_b.push_back(l);
                                 chunk_owner.push_back(pid);
+                            }
+                        }
+                        for (int32_t l : b_split_profs) {
+                            int64_t o0 = exact_prof_offsets[l], o1 = exact_prof_offsets[l + 1];
+                            int64_t ll = o1 - o0;
+                            int64_t b_c = std::min((int64_t)16, (ll + b_chunk_target - 1) / b_chunk_target);
+                            int64_t b_rows = (((ll + b_c - 1) / b_c) + 63) & ~(int64_t)63;
+                            int64_t c = (ll + b_rows - 1) / b_rows;
+                            if (c < 2) continue;
+                            int32_t base = (int32_t)refine_offsets.size();
+                            for (int64_t j = 0; j < c; ++j) refine_offsets.push_back((int32_t)(o0 + j * b_rows));
+                            refine_offsets.push_back((int32_t)o1);
+                            for (int32_t pid : b_split_pids[l]) {
+                                int32_t s_pid = (launch_a[pid] == l) ? launch_b[pid] : launch_a[pid];
+                                launch_a[pid] = s_pid;
+                                launch_b[pid] = base;
+                            }
+                            for (int64_t j = 1; j < c; ++j) {
+                                for (int32_t pid : b_split_pids[l]) {
+                                    launch_a.push_back(launch_a[pid]);
+                                    launch_b.push_back(base + (int32_t)j);
+                                    chunk_owner.push_back(pid);
+                                }
                             }
                         }
                     }
