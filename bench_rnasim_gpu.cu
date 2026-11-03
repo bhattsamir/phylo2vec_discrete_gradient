@@ -251,10 +251,11 @@ __global__ void k_build_real_seq_condensed_D(
 
 /* Block-parallel exact refinement of selected super-leaf pairs (a, b) using uncapped
  * dyadic profiles (d_exact_offsets, d_exact_leaves, d_exact_weights) and on-the-fly JC69
- * popcount distances. One 256-thread block evaluates one pair
- * (a, b) = (d_pair_a[blockIdx.x], d_pair_b[blockIdx.x]) in FP64, updating d_D_cond[a * K + b],
+ * popcount distances. Uses shared-memory staged, k-sliced, 4x4 register-tiled evaluation
+ * with adaptive A-tile heights (16, 32, 48, 64) and multi-pair packing across consecutive
+ * pairs sharing the same right-hand profile b, updating d_D_cond[a * K + b],
  * d_D_cond[b * K + a], and d_pair_exact_D[pid]. */
-__global__ void k_refine_real_seq_condensed_D_pairs(
+__global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
     int32_t K, int32_t W, int32_t n_pairs,
     const int32_t  * __restrict__ d_pair_a,
     const int32_t  * __restrict__ d_pair_b,
@@ -265,217 +266,409 @@ __global__ void k_refine_real_seq_condensed_D_pairs(
     float  * __restrict__ d_D_cond,
     double * __restrict__ d_pair_exact_D
 ) {
-    int32_t pid = blockIdx.x;
+    const int32_t tid = (int32_t)threadIdx.x;
+    const int32_t pid = (int32_t)blockIdx.x;
     if (pid >= n_pairs) return;
 
-    const int32_t base_pid = pid & ~15;
-    const int32_t b0 = d_pair_b[base_pid];
-    const int32_t off_b0 = d_exact_offsets[b0], end_b0 = d_exact_offsets[b0 + 1];
-    const int32_t len_b0 = end_b0 - off_b0;
-    int32_t batch_sz = 0;
-    if (5 * W == 125 && len_b0 > 1) {
-        int32_t max_k = n_pairs - base_pid;
-        if (max_k > 16) max_k = 16;
-        for (int32_t k = 0; k < max_k; ++k) {
-            int32_t ak = d_pair_a[base_pid + k];
-            int32_t bk = d_pair_b[base_pid + k];
-            int32_t lak = d_exact_offsets[ak + 1] - d_exact_offsets[ak];
-            if (bk == b0 && lak == 1) batch_sz++;
-            else break;
-        }
-    }
-    if (batch_sz >= 2 && pid < base_pid + batch_sz) {
-        if (pid != base_pid) return;
-        __shared__ uint64_t s_batch_seq_a[16][125];
-        __shared__ double s_wa[16];
-        for (int32_t idx = threadIdx.x; idx < batch_sz * 125; idx += blockDim.x) {
-            int32_t k = idx / 125;
-            int32_t w = idx % 125;
-            int32_t ak = d_pair_a[base_pid + k];
-            int32_t la = d_exact_leaves[d_exact_offsets[ak]];
-            s_batch_seq_a[k][w] = d_packed_seqs[(size_t)la * 125 + w];
-        }
-        if (threadIdx.x < (uint32_t)batch_sz) {
-            int32_t ak = d_pair_a[base_pid + threadIdx.x];
-            s_wa[threadIdx.x] = (double)d_exact_weights[d_exact_offsets[ak]];
-        }
-        __syncthreads();
+    constexpr int32_t BM = 64, BN = 64, TY = 16, TX = 16, RJ = 4;
+    constexpr int32_t SW = 25, NSL = 5, PA = BM + 1, PB = BN + 1;
+    constexpr int32_t MAX_CAP_A = 128;
 
-        double my_sums[16];
-        #pragma unroll
-        for (int32_t k = 0; k < 16; ++k) my_sums[k] = 0.0;
+    __shared__ uint64_t sA[SW * PA];
+    __shared__ uint64_t sB[SW * PB];
+    __shared__ int32_t  s_win_a[64];
+    __shared__ int32_t  s_win_b[64];
+    __shared__ int32_t  s_win_oa[64];
+    __shared__ int32_t  s_win_la[64];
+    __shared__ int32_t  s_win_ob[64];
+    __shared__ int32_t  s_win_lb[64];
+    __shared__ int32_t  s_pack_leaf_a[MAX_CAP_A];
+    __shared__ double   s_pack_wa[MAX_CAP_A];
+    __shared__ uint8_t  s_pack_pidx[MAX_CAP_A];
+    __shared__ double   s_pair_sum[64];
+    __shared__ int32_t  s_leaf_a[BM];
+    __shared__ double   s_wa[BM];
+    __shared__ int32_t  s_leaf_b[BN];
+    __shared__ double   s_wb[BN];
+    __shared__ double   s_row_sum[BM];
+    __shared__ int32_t  s_meta[6];
 
-        for (int32_t q = off_b0 + threadIdx.x; q < end_b0; q += blockDim.x) {
-            float wq = d_exact_weights[q];
-            if (wq == 0.0f) continue;
-            int32_t lb = d_exact_leaves[q];
-            const uint64_t *sy = d_packed_seqs + (size_t)lb * 125;
-            int32_t n_valid[16], n_match[16];
-            #pragma unroll
-            for (int32_t k = 0; k < 16; ++k) { n_valid[k] = 0; n_match[k] = 0; }
-            for (int32_t w = 0; w < 25; ++w) {
-                uint64_t sy0 = sy[0 * 25 + w];
-                uint64_t sy1 = sy[1 * 25 + w];
-                uint64_t sy2 = sy[2 * 25 + w];
-                uint64_t sy3 = sy[3 * 25 + w];
-                uint64_t sy4 = sy[4 * 25 + w];
-                for (int32_t k = 0; k < batch_sz; ++k) {
-                    n_valid[k] += __popcll(s_batch_seq_a[k][4 * 25 + w] & sy4);
-                    uint64_t m = (s_batch_seq_a[k][0 * 25 + w] & sy0)
-                               | (s_batch_seq_a[k][1 * 25 + w] & sy1)
-                               | (s_batch_seq_a[k][2 * 25 + w] & sy2)
-                               | (s_batch_seq_a[k][3 * 25 + w] & sy3);
-                    n_match[k] += __popcll(m);
+    if (W != 25) {
+        int32_t a = d_pair_a[pid];
+        int32_t b = d_pair_b[pid];
+        int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
+        int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
+        int32_t len_b = end_b - off_b;
+        int64_t total_ij = (int64_t)(end_a - off_a) * (int64_t)len_b;
+        double my_sum = 0.0;
+        for (int64_t idx = tid; idx < total_ij; idx += 256) {
+            int32_t p = off_a + (int32_t)(idx / len_b);
+            int32_t q = off_b + (int32_t)(idx % len_b);
+            float wp = d_exact_weights[p], wq = d_exact_weights[q];
+            if (wp == 0.0f || wq == 0.0f) continue;
+            int32_t lx = d_exact_leaves[p], ly = d_exact_leaves[q];
+            float d_jc = 0.0f;
+            if (lx != ly) {
+                const uint64_t *sx = d_packed_seqs + (size_t)lx * (5 * W);
+                const uint64_t *sy = d_packed_seqs + (size_t)ly * (5 * W);
+                int32_t n_valid = 0, n_match = 0;
+                #pragma unroll 1
+                for (int32_t w = 0; w < W; ++w) {
+                    n_valid += __popcll(sx[4 * W + w] & sy[4 * W + w]);
+                    n_match += __popcll((sx[0 * W + w] & sy[0 * W + w]) | (sx[1 * W + w] & sy[1 * W + w]) | (sx[2 * W + w] & sy[2 * W + w]) | (sx[3 * W + w] & sy[3 * W + w]));
                 }
-            }
-            for (int32_t k = 0; k < batch_sz; ++k) {
-                float d_jc = 1.5f;
-                if (n_valid[k] > 0) {
-                    float p = (float)(n_valid[k] - n_match[k]) / (float)n_valid[k];
-                    if (p >= 0.74f) p = 0.74f;
-                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
+                d_jc = 1.5f;
+                if (n_valid > 0) {
+                    float pf = (float)(n_valid - n_match) / (float)n_valid;
+                    if (pf >= 0.74f) pf = 0.74f;
+                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * pf);
                     if (d_jc < 0.0f) d_jc = 0.0f;
                 }
-                my_sums[k] += (s_wa[k] * (double)wq) * (double)d_jc;
             }
+            my_sum += ((double)wp * (double)wq) * (double)d_jc;
         }
-        __shared__ double s_red[256];
-        for (int32_t k = 0; k < batch_sz; ++k) {
-            s_red[threadIdx.x] = my_sums[k];
+        double *s_red = reinterpret_cast<double *>(sA);
+        s_red[tid] = my_sum;
+        __syncthreads();
+        for (int32_t s = 128; s > 0; s >>= 1) {
+            if (tid < s) s_red[tid] += s_red[tid + s];
             __syncthreads();
-            for (int32_t s = 128; s > 0; s >>= 1) {
-                if (threadIdx.x < s) s_red[threadIdx.x] += s_red[threadIdx.x + s];
-                __syncthreads();
+        }
+        if (tid == 0) {
+            if (d_pair_exact_D != NULL) d_pair_exact_D[pid] = s_red[0];
+            if (d_D_cond != NULL && a < K && b < K) {
+                float fv = (float)s_red[0];
+                d_D_cond[(size_t)a * K + b] = fv;
+                d_D_cond[(size_t)b * K + a] = fv;
             }
-            if (threadIdx.x == 0) {
-                double exact_val = s_red[0];
-                int32_t ak = d_pair_a[base_pid + k];
-                d_pair_exact_D[base_pid + k] = exact_val;
-                d_D_cond[(size_t)ak * K + b0] = (float)exact_val;
-                d_D_cond[(size_t)b0 * K + ak] = (float)exact_val;
-            }
-            __syncthreads();
         }
         return;
     }
 
-    int32_t a = d_pair_a[pid];
-    int32_t b = d_pair_b[pid];
-    int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
-    int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
-    int32_t len_a = end_a - off_a;
-    int32_t len_b = end_b - off_b;
-    if (len_a > len_b) {
-        int32_t to = off_a; off_a = off_b; off_b = to;
-        int32_t te = end_a; end_a = end_b; end_b = te;
-        int32_t tl = len_a; len_a = len_b; len_b = tl;
+    const int32_t ws = pid & ~63;
+    const int32_t we = (ws + 64 < n_pairs) ? (ws + 64) : n_pairs;
+    const int32_t wlen = we - ws;
+    if (tid < wlen) {
+        int32_t ak = d_pair_a[ws + tid];
+        int32_t bk = d_pair_b[ws + tid];
+        int32_t oa = d_exact_offsets[ak];
+        int32_t ea = d_exact_offsets[ak + 1];
+        int32_t ob = d_exact_offsets[bk];
+        int32_t eb = d_exact_offsets[bk + 1];
+        s_win_a[tid]  = ak;
+        s_win_b[tid]  = bk;
+        s_win_oa[tid] = oa;
+        s_win_la[tid] = ea - oa;
+        s_win_ob[tid] = ob;
+        s_win_lb[tid] = eb - ob;
     }
-
-    __shared__ uint64_t s_seq_a[256];
-    double my_sum = 0.0;
-    if (len_a == 1 && 5 * W <= 256) {
-        int32_t la = d_exact_leaves[off_a];
-        double wa = (double)d_exact_weights[off_a];
-        const uint64_t *sx = d_packed_seqs + (size_t)la * (5 * W);
-        if (threadIdx.x < (uint32_t)(5 * W)) {
-            s_seq_a[threadIdx.x] = sx[threadIdx.x];
-        }
-        __syncthreads();
-        if (wa != 0.0) {
-            for (int32_t q = off_b + threadIdx.x; q < end_b; q += blockDim.x) {
-                float wq = d_exact_weights[q];
-                if (wq == 0.0f) continue;
-                int32_t lb = d_exact_leaves[q];
-                const uint64_t *sy = d_packed_seqs + (size_t)lb * (5 * W);
-                int32_t n_valid = 0, n_match = 0;
-                #pragma unroll
-                for (int32_t w = 0; w < 25; ++w) {
-                    uint64_t v = s_seq_a[4 * 25 + w] & sy[4 * 25 + w];
-                    n_valid += __popcll(v);
-                    uint64_t m = (s_seq_a[0 * 25 + w] & sy[0 * 25 + w])
-                               | (s_seq_a[1 * 25 + w] & sy[1 * 25 + w])
-                               | (s_seq_a[2 * 25 + w] & sy[2 * 25 + w])
-                               | (s_seq_a[3 * 25 + w] & sy[3 * 25 + w]);
-                    n_match += __popcll(m);
-                }
-                float d_jc = 1.5f;
-                if (n_valid > 0) {
-                    float p = (float)(n_valid - n_match) / (float)n_valid;
-                    if (p >= 0.74f) p = 0.74f;
-                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
-                    if (d_jc < 0.0f) d_jc = 0.0f;
-                }
-                my_sum += (wa * (double)wq) * (double)d_jc;
-            }
-        }
-    } else {
-        __shared__ uint64_t s_tile_seq_a[16][125];
-        __shared__ double s_tile_wa[16];
-        for (int32_t p0 = off_a; p0 < end_a; p0 += 16) {
-            int32_t tile_a = end_a - p0;
-            if (tile_a > 16) tile_a = 16;
-            for (int32_t idx = threadIdx.x; idx < tile_a * 125; idx += blockDim.x) {
-                int32_t k = idx / 125;
-                int32_t w = idx % 125;
-                int32_t la = d_exact_leaves[p0 + k];
-                s_tile_seq_a[k][w] = d_packed_seqs[(size_t)la * 125 + w];
-            }
-            if (threadIdx.x < (uint32_t)tile_a) {
-                s_tile_wa[threadIdx.x] = (double)d_exact_weights[p0 + threadIdx.x];
-            }
-            __syncthreads();
-
-            for (int32_t q = off_b + threadIdx.x; q < end_b; q += blockDim.x) {
-                float wq = d_exact_weights[q];
-                if (wq == 0.0f) continue;
-                int32_t lb = d_exact_leaves[q];
-                const uint64_t *sy = d_packed_seqs + (size_t)lb * 125;
-                int32_t n_valid[16], n_match[16];
-                #pragma unroll
-                for (int32_t k = 0; k < 16; ++k) { n_valid[k] = 0; n_match[k] = 0; }
-                for (int32_t w = 0; w < 25; ++w) {
-                    uint64_t sy0 = sy[0 * 25 + w];
-                    uint64_t sy1 = sy[1 * 25 + w];
-                    uint64_t sy2 = sy[2 * 25 + w];
-                    uint64_t sy3 = sy[3 * 25 + w];
-                    uint64_t sy4 = sy[4 * 25 + w];
-                    for (int32_t k = 0; k < tile_a; ++k) {
-                        n_valid[k] += __popcll(s_tile_seq_a[k][4 * 25 + w] & sy4);
-                        uint64_t m = (s_tile_seq_a[k][0 * 25 + w] & sy0)
-                                   | (s_tile_seq_a[k][1 * 25 + w] & sy1)
-                                   | (s_tile_seq_a[k][2 * 25 + w] & sy2)
-                                   | (s_tile_seq_a[k][3 * 25 + w] & sy3);
-                        n_match[k] += __popcll(m);
-                    }
-                }
-                double dwq = (double)wq;
-                for (int32_t k = 0; k < tile_a; ++k) {
-                    if (s_tile_wa[k] == 0.0) continue;
-                    float d_jc = 1.5f;
-                    if (n_valid[k] > 0) {
-                        float p = (float)(n_valid[k] - n_match[k]) / (float)n_valid[k];
-                        if (p >= 0.74f) p = 0.74f;
-                        d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
-                        if (d_jc < 0.0f) d_jc = 0.0f;
-                    }
-                    my_sum += (s_tile_wa[k] * dwq) * (double)d_jc;
-                }
-            }
-            __syncthreads();
-        }
-    }
-    __shared__ double s_sum[256];
-    s_sum[threadIdx.x] = my_sum;
     __syncthreads();
-    for (int32_t s = 128; s > 0; s >>= 1) {
-        if (threadIdx.x < s) s_sum[threadIdx.x] += s_sum[threadIdx.x + s];
+
+    const int32_t my_idx = pid - ws;
+    int32_t lead_idx = my_idx, pack_m = 1, total_a = 0;
+    int32_t cur = 0;
+    while (cur < wlen) {
+        int32_t b_cur  = s_win_b[cur];
+        int32_t lb_cur = s_win_lb[cur];
+        int32_t la_cur = s_win_la[cur];
+        int32_t cap_a = 64;
+        if (lb_cur <= 512) {
+            cap_a = (n_pairs >= 2048) ? MAX_CAP_A : 64;
+        } else {
+            if (n_pairs <= 65536) cap_a = 16;
+            else if (n_pairs <= 131072) cap_a = 32;
+        }
+        int32_t m = 1;
+        int32_t sum_a = la_cur;
+        if (la_cur > 0 && la_cur <= lb_cur && la_cur < cap_a) {
+            while (cur + m < wlen) {
+                int32_t b_nxt  = s_win_b[cur + m];
+                int32_t la_nxt = s_win_la[cur + m];
+                if (b_nxt != b_cur || la_nxt <= 0 || la_nxt > lb_cur || sum_a + la_nxt > cap_a) break;
+                sum_a += la_nxt;
+                ++m;
+            }
+        }
+        if (my_idx >= cur && my_idx < cur + m) {
+            lead_idx = cur;
+            pack_m   = m;
+            total_a  = sum_a;
+            break;
+        }
+        cur += m;
+    }
+    if (my_idx != lead_idx) return;
+
+    int32_t off_a0 = s_win_oa[lead_idx];
+    int32_t len_a0 = s_win_la[lead_idx];
+    int32_t off_b0 = s_win_ob[lead_idx];
+    int32_t len_b0 = s_win_lb[lead_idx];
+    if (pack_m == 1) {
+        if (len_a0 > len_b0) {
+            int32_t t;
+            t = off_a0; off_a0 = off_b0; off_b0 = t;
+            t = len_a0; len_a0 = len_b0; len_b0 = t;
+        }
+        total_a = len_a0;
+    }
+    if (tid < pack_m) {
+        s_pair_sum[tid] = 0.0;
+    }
+    if (total_a <= 0 || len_b0 <= 0) {
+        if (tid < pack_m) {
+            int32_t gpid = ws + lead_idx + tid;
+            int32_t ak = s_win_a[lead_idx + tid];
+            int32_t bk = s_win_b[lead_idx + tid];
+            if (d_pair_exact_D != NULL) d_pair_exact_D[gpid] = 0.0;
+            if (d_D_cond != NULL && ak < K && bk < K) {
+                d_D_cond[(size_t)ak * K + bk] = 0.0f;
+                d_D_cond[(size_t)bk * K + ak] = 0.0f;
+            }
+        }
+        return;
+    }
+
+    if (tid == 0) {
+        s_meta[0] = lead_idx; s_meta[1] = pack_m; s_meta[2] = total_a;
+        s_meta[3] = off_a0;   s_meta[4] = off_b0; s_meta[5] = len_b0;
+    }
+    if (pack_m > 1 && tid < total_a) {
+        int32_t rem = tid;
+        int32_t p = 0;
+        while (p + 1 < pack_m) {
+            int32_t la_p = s_win_la[lead_idx + p];
+            if (rem < la_p) break;
+            rem -= la_p;
+            ++p;
+        }
+        int32_t src_idx = s_win_oa[lead_idx + p] + rem;
+        float w = d_exact_weights[src_idx];
+        s_pack_leaf_a[tid] = (w != 0.0f) ? d_exact_leaves[src_idx] : -1;
+        s_pack_wa[tid]     = (double)w;
+        s_pack_pidx[tid]   = (uint8_t)p;
+    }
+    __syncthreads();
+
+    const int32_t tx = tid & 15;
+    const int32_t ty = tid >> 4;
+
+#define NK_WL_STEP(RI, ASTRIDE, ABASE, wl) \
+    { \
+        uint64_t a_reg[RI], b_reg[RJ]; \
+        const int32_t kv = 20 + (wl); \
+        _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) a_reg[i] = sA[((ABASE) + kv) * (ASTRIDE) + ty + TY * i]; \
+        _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j)   b_reg[j] = sB[kv * PB + tx + TX * j]; \
+        _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) \
+                nv[i][j] += __popcll(a_reg[i] & b_reg[j]); \
+        uint64_t m_reg[RI][RJ]; \
+        _Pragma("unroll") for (int32_t c = 0; c < 4; ++c) { \
+            const int32_t kc = c * 5 + (wl); \
+            _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) a_reg[i] = sA[((ABASE) + kc) * (ASTRIDE) + ty + TY * i]; \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j)   b_reg[j] = sB[kc * PB + tx + TX * j]; \
+            _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) \
+                _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) \
+                    m_reg[i][j] = (c == 0) ? (a_reg[i] & b_reg[j]) : (m_reg[i][j] | (a_reg[i] & b_reg[j])); \
+        } \
+        _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) \
+                nm[i][j] += __popcll(m_reg[i][j]); \
+    }
+
+#define NK_RUN_ATILE_16() \
+    { \
+        double acc0 = 0.0; \
+        _Pragma("unroll 1") for (int32_t q0 = 0; q0 < s_meta[5]; q0 += BN) { \
+            const int32_t tile_b = (s_meta[5] - q0 < BN) ? (s_meta[5] - q0) : BN; \
+            __syncthreads(); \
+            if (tid < BN) { \
+                if (tid < tile_b) { \
+                    float w = d_exact_weights[s_meta[4] + q0 + tid]; \
+                    s_leaf_b[tid] = (w != 0.0f) ? d_exact_leaves[s_meta[4] + q0 + tid] : -1; \
+                    s_wb[tid]     = (double)w; \
+                } else { \
+                    s_leaf_b[tid] = -1; \
+                    s_wb[tid]     = 0.0; \
+                } \
+            } \
+            uint32_t nv[1][RJ], nm[1][RJ]; \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { nv[0][j] = 0u; nm[0][j] = 0u; } \
+            _Pragma("unroll 1") \
+            for (int32_t s = 0; s < NSL; ++s) { \
+                __syncthreads(); \
+                _Pragma("unroll 1") for (int32_t idx = tid; idx < 16 * SW; idx += 256) { \
+                    int32_t r = idx / SW; \
+                    int32_t k = idx - r * SW; \
+                    int32_t c = k / 5; \
+                    int32_t la = s_leaf_a[r]; \
+                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                } \
+                _Pragma("unroll 1") for (int32_t idx = tid; idx < BN * SW; idx += 256) { \
+                    int32_t r = idx / SW; \
+                    int32_t k = idx - r * SW; \
+                    int32_t c = k / 5; \
+                    int32_t lb = s_leaf_b[r]; \
+                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                } \
+                __syncthreads(); \
+                NK_WL_STEP(1, PA, 0, 0) \
+                NK_WL_STEP(1, PA, 0, 1) \
+                NK_WL_STEP(1, PA, 0, 2) \
+                NK_WL_STEP(1, PA, 0, 3) \
+                NK_WL_STEP(1, PA, 0, 4) \
+            } \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { \
+                const double wq = s_wb[tx + TX * j]; \
+                int32_t n_valid = (int32_t)nv[0][j]; \
+                int32_t n_match = (int32_t)nm[0][j]; \
+                float d_jc = 1.5f; \
+                if (n_valid > 0) { \
+                    float p = (float)(n_valid - n_match) / (float)n_valid; \
+                    if (p >= 0.74f) p = 0.74f; \
+                    d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p); \
+                    if (d_jc < 0.0f) d_jc = 0.0f; \
+                } \
+                acc0 += wq * (double)d_jc; \
+            } \
+        } \
+        _Pragma("unroll") for (int32_t offset = 8; offset > 0; offset >>= 1) { \
+            acc0 += __shfl_down_sync(0xffffffffu, acc0, offset); \
+        } \
+        if (tx == 0 && ty < tile_a) { \
+            s_row_sum[ty] = s_wa[ty] * acc0; \
+        } \
+    }
+
+#define NK_RUN_ATILE_64(RI) \
+    { \
+        double acc[RI]; \
+        _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) acc[i] = 0.0; \
+        _Pragma("unroll 1") for (int32_t q0 = 0; q0 < s_meta[5]; q0 += BN) { \
+            const int32_t tile_b = (s_meta[5] - q0 < BN) ? (s_meta[5] - q0) : BN; \
+            __syncthreads(); \
+            if (tid < BN) { \
+                if (tid < tile_b) { \
+                    float w = d_exact_weights[s_meta[4] + q0 + tid]; \
+                    s_leaf_b[tid] = (w != 0.0f) ? d_exact_leaves[s_meta[4] + q0 + tid] : -1; \
+                    s_wb[tid]     = (double)w; \
+                } else { \
+                    s_leaf_b[tid] = -1; \
+                    s_wb[tid]     = 0.0; \
+                } \
+            } \
+            uint32_t nv[RI][RJ], nm[RI][RJ]; \
+            _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) \
+                _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { nv[i][j] = 0u; nm[i][j] = 0u; } \
+            _Pragma("unroll 1") \
+            for (int32_t s = 0; s < NSL; ++s) { \
+                __syncthreads(); \
+                _Pragma("unroll 1") for (int32_t idx = tid; idx < (RI) * 16 * SW; idx += 256) { \
+                    int32_t r = idx / SW; \
+                    int32_t k = idx - r * SW; \
+                    int32_t c = k / 5; \
+                    int32_t la = s_leaf_a[r]; \
+                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                } \
+                _Pragma("unroll 1") for (int32_t idx = tid; idx < BN * SW; idx += 256) { \
+                    int32_t r = idx / SW; \
+                    int32_t k = idx - r * SW; \
+                    int32_t c = k / 5; \
+                    int32_t lb = s_leaf_b[r]; \
+                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                } \
+                __syncthreads(); \
+                NK_WL_STEP(RI, PA, 0, 0) \
+                NK_WL_STEP(RI, PA, 0, 1) \
+                NK_WL_STEP(RI, PA, 0, 2) \
+                NK_WL_STEP(RI, PA, 0, 3) \
+                NK_WL_STEP(RI, PA, 0, 4) \
+            } \
+            _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { \
+                const double wq = s_wb[tx + TX * j]; \
+                _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) { \
+                    int32_t n_valid = (int32_t)nv[i][j]; \
+                    int32_t n_match = (int32_t)nm[i][j]; \
+                    float d_jc = 1.5f; \
+                    if (n_valid > 0) { \
+                        float p = (float)(n_valid - n_match) / (float)n_valid; \
+                        if (p >= 0.74f) p = 0.74f; \
+                        d_jc = -0.75f * logf(1.0f - (4.0f / 3.0f) * p); \
+                        if (d_jc < 0.0f) d_jc = 0.0f; \
+                    } \
+                    acc[i] += wq * (double)d_jc; \
+                } \
+            } \
+        } \
+        _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) { \
+            double v = acc[i]; \
+            _Pragma("unroll") for (int32_t offset = 8; offset > 0; offset >>= 1) { \
+                v += __shfl_down_sync(0xffffffffu, v, offset); \
+            } \
+            int32_t r = ty + TY * i; \
+            if (tx == 0 && r < tile_a) { \
+                s_row_sum[r] = s_wa[r] * v; \
+            } \
+        } \
+    }
+
+    #pragma unroll 1
+    for (int32_t p0 = 0; p0 < s_meta[2]; p0 += BM) {
+        const int32_t tile_a = (s_meta[2] - p0 < BM) ? (s_meta[2] - p0) : BM;
+        if (tid < BM) {
+            if (tid < tile_a) {
+                if (s_meta[1] == 1) {
+                    float w = d_exact_weights[s_meta[3] + p0 + tid];
+                    s_leaf_a[tid] = (w != 0.0f) ? d_exact_leaves[s_meta[3] + p0 + tid] : -1;
+                    s_wa[tid]     = (double)w;
+                } else {
+                    s_leaf_a[tid] = s_pack_leaf_a[p0 + tid];
+                    s_wa[tid]     = s_pack_wa[p0 + tid];
+                }
+            } else {
+                s_leaf_a[tid] = -1;
+                s_wa[tid]     = 0.0;
+            }
+        }
+        __syncthreads();
+
+        if (tile_a <= 16) {
+            NK_RUN_ATILE_16()
+        } else if (tile_a <= 32) {
+            NK_RUN_ATILE_64(2)
+        } else if (tile_a <= 48) {
+            NK_RUN_ATILE_64(3)
+        } else {
+            NK_RUN_ATILE_64(4)
+        }
+        __syncthreads();
+
+        if (tid < s_meta[1]) {
+            double s = s_pair_sum[tid];
+            for (int32_t r = 0; r < tile_a; ++r) {
+                if (s_meta[1] == 1 || s_pack_pidx[p0 + r] == (uint8_t)tid) {
+                    s += s_row_sum[r];
+                }
+            }
+            s_pair_sum[tid] = s;
+        }
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        double exact_val = s_sum[0];
-        d_pair_exact_D[pid] = exact_val;
-        d_D_cond[(size_t)a * K + b] = (float)exact_val;
-        d_D_cond[(size_t)b * K + a] = (float)exact_val;
+
+#undef NK_RUN_ATILE_64
+#undef NK_RUN_ATILE_16
+#undef NK_WL_STEP
+
+    if (tid < s_meta[1]) {
+        int32_t gpid = (pid & ~63) + s_meta[0] + tid;
+        int32_t ak = s_win_a[s_meta[0] + tid];
+        int32_t bk = s_win_b[s_meta[0] + tid];
+        double exact_val = s_pair_sum[tid];
+        if (d_pair_exact_D != NULL) d_pair_exact_D[gpid] = exact_val;
+        if (d_D_cond != NULL && ak < K && bk < K) {
+            float fv = (float)exact_val;
+            d_D_cond[(size_t)ak * K + bk] = fv;
+            d_D_cond[(size_t)bk * K + ak] = fv;
+        }
     }
 }
 
