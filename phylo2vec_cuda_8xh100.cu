@@ -2186,10 +2186,12 @@ static int run_and_validate_cuda_pipeline(
     double max_err_smem = 0.0, max_err_gmem = 0.0, max_err_tiled = 0.0;
     int ok = 1;
     for (int32_t i = 1; i < n_pairs; ++i) {
-        /* Current coordinate delta must be strictly 0 */
-        if (fabsf(h_delta_smem[(size_t)i * max_cols + v[i]]) > 1e-6f ||
-            fabsf(h_delta_gmem[(size_t)i * max_cols + v[i]]) > 1e-6f ||
-            fabsf(h_delta_tiled[(size_t)i * max_cols + v[i]]) > 1e-6f) {
+        /* Current coordinate delta must be strictly 0 and finite */
+        float d_vi_s = h_delta_smem[(size_t)i * max_cols + v[i]];
+        float d_vi_g = h_delta_gmem[(size_t)i * max_cols + v[i]];
+        float d_vi_t = h_delta_tiled[(size_t)i * max_cols + v[i]];
+        if (!isfinite(d_vi_s) || !isfinite(d_vi_g) || !isfinite(d_vi_t) ||
+            fabsf(d_vi_s) > 1e-6f || fabsf(d_vi_g) > 1e-6f || fabsf(d_vi_t) > 1e-6f) {
             ok = 0;
         }
         float row_min = 0.0f;
@@ -2198,7 +2200,7 @@ static int run_and_validate_cuda_pipeline(
             double es = fabs((double)h_delta_smem[(size_t)i * max_cols + j] - ref);
             double eg = fabs((double)h_delta_gmem[(size_t)i * max_cols + j] - ref);
             double et = fabs((double)h_delta_tiled[(size_t)i * max_cols + j] - ref);
-            if (isnan(es) || isnan(eg) || isnan(et)) ok = 0;
+            if (!isfinite(es) || !isfinite(eg) || !isfinite(et)) ok = 0;
             if (es > max_err_smem) max_err_smem = es;
             if (eg > max_err_gmem) max_err_gmem = eg;
             if (et > max_err_tiled) max_err_tiled = et;
@@ -2206,7 +2208,19 @@ static int run_and_validate_cuda_pipeline(
                 row_min = h_delta_gmem[(size_t)i * max_cols + j];
             }
         }
-        if (fabsf(h_best_delta[i] - row_min) > 1e-6f) ok = 0;
+        float best_d = h_best_delta[i];
+        int32_t best_j = h_best_j[i];
+        if (!isfinite(best_d) || !isfinite(row_min) || fabsf(best_d - row_min) > 1e-6f) {
+            ok = 0;
+        }
+        if (best_j < 0 || best_j > 2 * i) {
+            ok = 0;
+        } else {
+            float chosen_val = h_delta_gmem[(size_t)i * max_cols + best_j];
+            if (!isfinite(chosen_val) || fabsf(chosen_val - row_min) > 1e-6f) {
+                ok = 0;
+            }
+        }
     }
 
     if (max_err_smem_out) *max_err_smem_out = max_err_smem;

@@ -405,6 +405,9 @@ def evaluate_spr_gradient_matrix(
 
 @nb.njit(fastmath=True)
 def calculate_discrete_gradient_numba(v: np.ndarray, D: np.ndarray) -> np.ndarray:
+    for i in range(len(v)):
+        if v[i] < 0 or v[i] > i:
+            raise ValueError("Invalid Phylo2Vec vector entries; required 0 <= v[i] <= i.")
     M = v_to_ancestry_matrix(v)
     v_map, destinations = get_moves_and_destinations_matrix(M)
     parent_u, adj_u, subdist, nd_u = build_unrooted_matrices_and_subdist(M, D)
@@ -460,6 +463,7 @@ class DiscreteGradient:
                     "-fPIC",
                     c_src,
                     "-lm",
+                    "-lpthread",
                     "-o",
                     dylib_path,
                 ]
@@ -531,9 +535,12 @@ class DiscreteGradient:
 
     @staticmethod
     def _validate_v(v: np.ndarray, cherry_first_only: bool = False) -> np.ndarray:
-        v_arr = np.ascontiguousarray(v, dtype=np.int64)
-        if v_arr.ndim != 1 or len(v_arr) < 3:
-            raise ValueError(f"Expected 1D Phylo2Vec vector of length N-1 >= 3, got shape {v_arr.shape}.")
+        v_raw = np.asarray(v)
+        if v_raw.ndim != 1 or len(v_raw) < 3:
+            raise ValueError(f"Expected 1D Phylo2Vec vector of length N-1 >= 3, got shape {v_raw.shape}.")
+        if np.issubdtype(v_raw.dtype, np.bool_) or not np.issubdtype(v_raw.dtype, np.integer):
+            raise ValueError(f"Expected integer dtype for Phylo2Vec vector v, got dtype {v_raw.dtype}.")
+        v_arr = np.ascontiguousarray(v_raw, dtype=np.int64)
         i_idx = np.arange(len(v_arr), dtype=np.int64)
         upper = i_idx if cherry_first_only else (2 * i_idx)
         if np.any(v_arr < 0) or np.any(v_arr > upper):
@@ -562,8 +569,11 @@ class DiscreteGradient:
         return self._c_lib
 
     def calculate_discrete_gradient(self, v: np.ndarray, D: np.ndarray) -> np.ndarray:
-        """Lower-triangular j < i discrete gradient (shape: (N-1, N-2))."""
-        v_arr, D_arr = self._validate_v_and_D(v, D, cherry_first_only=False)
+        """
+        Lower-triangular j < i discrete gradient for cherry-first Phylo2Vec vector v (0 <= v[k] <= k),
+        shape: (N-1, N-2). For general vectors with v[k] > k, first relabel via relabel_cherry_first().
+        """
+        v_arr, D_arr = self._validate_v_and_D(v, D, cherry_first_only=True)
         if self.backend == "c":
             n_leaves = D_arr.shape[0]
             n_pairs = n_leaves - 1

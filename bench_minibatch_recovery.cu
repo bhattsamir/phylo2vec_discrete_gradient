@@ -21,9 +21,17 @@
  *      a GPU kernel scans candidate clades C_c across the entire N-leaf tree and
  *      computes the cross-clade leaf affinity min_{x in C_a} (D(x, C_c) - D(x, sib(x)))
  *      to automatically pair C_a with its true evolutionary partner clade C_b.
- *   4. Exact Monotonic BME Length Verification (`k_compute_bme_length`):
- *      Every iteration computes the exact Pauplin BME length L(T) on the GPU and
- *      enforces strict monotonic descent with path-disjoint SPR move batching.
+ *   4. Condensed-Skeleton BME Search with Exact Full-Objective Acceptance Check:
+ *      Every inner iteration computes the Pauplin BME length L(\tilde{T}; \tilde{D}) of the
+ *      K-leaf condensed skeleton on the GPU (`k_compute_bme_length`) using the capped profile
+ *      surrogate \tilde{D} (`max_prof_leaves = 128`). Because a finite cap collapses unresolved
+ *      frontier subtrees onto single representative leaves (which is approximate when a clade has
+ *      size > max_prof_leaves, especially on balanced clades), the inner search proposals are
+ *      heuristic above the cap. Before accepting any candidate skeleton \tilde{T}_{best} != \tilde{T}_{init},
+ *      `optimize_skeleton_on_gpu` identifies all super-leaf pairs (a, b) whose topological distance
+ *      changed and where a or b was capped, evaluates their exact uncapped super-leaf distance on the
+ *      GPU (`k_refine_true_condensed_D_pairs`), and rejects any candidate topology whose exact
+ *      full-tree BME change \Delta L_{full} >= -1e-6.
  *
  * Compile & Run:
  *   nvcc -O3 -arch=sm_86 bench_minibatch_recovery.cu phylo2vec_fastme.c -o bench_minibatch_recovery
@@ -38,6 +46,7 @@
 #include <time.h>
 #include <float.h>
 #include <vector>
+#include <queue>
 #include <algorithm>
 #include <cuda_runtime.h>
 
@@ -458,10 +467,16 @@ __global__ void k_find_knn_partner_clade(
     if (threadIdx.x == 0) d_cand_score[c] = s_sum[0];
 }
 
-/* Build K x K condensed distance matrix purely from 4x4 representative leaf-pair queries */
+/* Build K x K condensed distance matrix from dyadic-weighted super-leaf profiles:
+ *   D_cond[a, b] = sum_{p in prof(a)} sum_{q in prof(b)} w_p * w_q * D(leaf_p, leaf_q).
+ * Each super-leaf profile is stored in CSR format (d_prof_offsets, d_prof_leaves, d_prof_weights)
+ * with nonnegative weights w_p summing to 1 (exact dyadic weights w_p = 2^{-depth(leaf_p)} when
+ * leaf_cnt <= max_prof_leaves or max_prof_leaves <= 0; approximate frontier-subtree collapse above cap). */
 __global__ void k_build_true_condensed_D(
     int32_t K,
-    const int32_t * __restrict__ d_rep4,
+    const int32_t * __restrict__ d_prof_offsets,
+    const int32_t * __restrict__ d_prof_leaves,
+    const float   * __restrict__ d_prof_weights,
     const int32_t * __restrict__ d_head,
     const int32_t * __restrict__ d_parent,
     const int32_t * __restrict__ d_depth,
@@ -476,42 +491,76 @@ __global__ void k_build_true_condensed_D(
         return;
     }
     if (a < b) {
-        int32_t r_a0 = d_rep4[4 * a + 0], r_a1 = d_rep4[4 * a + 1];
-        int32_t r_a2 = d_rep4[4 * a + 2], r_a3 = d_rep4[4 * a + 3];
-        int32_t r_b0 = d_rep4[4 * b + 0], r_b1 = d_rep4[4 * b + 1];
-        int32_t r_b2 = d_rep4[4 * b + 2], r_b3 = d_rep4[4 * b + 3];
-
+        int32_t off_a = d_prof_offsets[a], end_a = d_prof_offsets[a + 1];
+        int32_t off_b = d_prof_offsets[b], end_b = d_prof_offsets[b + 1];
         float d_val = 0.0f;
-        if (r_a0 == r_a3 && r_b0 == r_b3) {
-            d_val = dev_oracle_leaf_dist(r_a0, r_b0, d_head, d_parent, d_depth, d_dist_root);
-        } else if (r_a0 == r_a3) {
-            d_val = 0.25f * (
-                dev_oracle_leaf_dist(r_a0, r_b0, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a0, r_b1, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a0, r_b2, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a0, r_b3, d_head, d_parent, d_depth, d_dist_root)
-            );
-        } else if (r_b0 == r_b3) {
-            d_val = 0.25f * (
-                dev_oracle_leaf_dist(r_a0, r_b0, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a1, r_b0, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a2, r_b0, d_head, d_parent, d_depth, d_dist_root) +
-                dev_oracle_leaf_dist(r_a3, r_b0, d_head, d_parent, d_depth, d_dist_root)
-            );
-        } else {
-            int32_t ra[4] = {r_a0, r_a1, r_a2, r_a3};
-            int32_t rb[4] = {r_b0, r_b1, r_b2, r_b3};
-            #pragma unroll
-            for (int m1 = 0; m1 < 4; ++m1) {
-                #pragma unroll
-                for (int m2 = 0; m2 < 4; ++m2) {
-                    d_val += dev_oracle_leaf_dist(ra[m1], rb[m2], d_head, d_parent, d_depth, d_dist_root);
-                }
+        for (int32_t p = off_a; p < end_a; ++p) {
+            int32_t la = d_prof_leaves[p];
+            float wa = d_prof_weights[p];
+            float row_sum = 0.0f;
+            for (int32_t q = off_b; q < end_b; ++q) {
+                int32_t lb = d_prof_leaves[q];
+                float wb = d_prof_weights[q];
+                row_sum += wb * dev_oracle_leaf_dist(la, lb, d_head, d_parent, d_depth, d_dist_root);
             }
-            d_val *= (1.0f / 16.0f);
+            d_val += wa * row_sum;
         }
         d_D_cond[(size_t)a * K + b] = d_val;
         d_D_cond[(size_t)b * K + a] = d_val;
+    }
+}
+
+/* Block-parallel exact refinement of selected super-leaf pairs (a, b) using uncapped
+ * dyadic profiles (d_exact_offsets, d_exact_leaves, d_exact_weights).
+ * One 256-thread block evaluates one pair (a, b) = (d_pair_a[blockIdx.x], d_pair_b[blockIdx.x]),
+ * accumulating in FP64 across all (p, q) in prof_exact(a) x prof_exact(b) and writing
+ * the exact super-leaf distance to d_D_cond[a * K + b], d_D_cond[b * K + a], and d_pair_exact_D[pid]. */
+__global__ void k_refine_true_condensed_D_pairs(
+    int32_t K, int32_t n_pairs,
+    const int32_t * __restrict__ d_pair_a,
+    const int32_t * __restrict__ d_pair_b,
+    const int32_t * __restrict__ d_exact_offsets,
+    const int32_t * __restrict__ d_exact_leaves,
+    const float   * __restrict__ d_exact_weights,
+    const int32_t * __restrict__ d_head,
+    const int32_t * __restrict__ d_parent,
+    const int32_t * __restrict__ d_depth,
+    const float   * __restrict__ d_dist_root,
+    float  * __restrict__ d_D_cond,
+    double * __restrict__ d_pair_exact_D
+) {
+    int32_t pid = blockIdx.x;
+    if (pid >= n_pairs) return;
+    int32_t a = d_pair_a[pid];
+    int32_t b = d_pair_b[pid];
+    int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
+    int32_t off_b = d_exact_offsets[b], end_b = d_exact_offsets[b + 1];
+    int32_t len_a = end_a - off_a;
+    int32_t len_b = end_b - off_b;
+    int64_t total_pq = (int64_t)len_a * (int64_t)len_b;
+
+    double my_sum = 0.0;
+    for (int64_t idx = threadIdx.x; idx < total_pq; idx += blockDim.x) {
+        int32_t p = off_a + (int32_t)(idx / len_b);
+        int32_t q = off_b + (int32_t)(idx % len_b);
+        int32_t la = d_exact_leaves[p];
+        int32_t lb = d_exact_leaves[q];
+        double w = (double)d_exact_weights[p] * (double)d_exact_weights[q];
+        double d = (double)dev_oracle_leaf_dist(la, lb, d_head, d_parent, d_depth, d_dist_root);
+        my_sum += w * d;
+    }
+    __shared__ double s_sum[256];
+    s_sum[threadIdx.x] = my_sum;
+    __syncthreads();
+    for (int32_t s = 128; s > 0; s >>= 1) {
+        if (threadIdx.x < s) s_sum[threadIdx.x] += s_sum[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double exact_val = s_sum[0];
+        d_pair_exact_D[pid] = exact_val;
+        d_D_cond[(size_t)a * K + b] = (float)exact_val;
+        d_D_cond[(size_t)b * K + a] = (float)exact_val;
     }
 }
 
@@ -564,9 +613,7 @@ __global__ void k_bottom_up_internals(
     if (v >= root_u) return;
     for (int32_t u = N; u < root_u; ++u) {
         int32_t c1 = c1_r[u], c2 = c2_r[u];
-        float val = 0.5f * (subdist[(size_t)c1 * M + v] + subdist[(size_t)c2 * M + v]);
-        subdist[(size_t)u * M + v] = val;
-        subdist[(size_t)v * M + u] = val;
+        subdist[(size_t)u * M + v] = 0.5f * (subdist[(size_t)c1 * M + v] + subdist[(size_t)c2 * M + v]);
     }
 }
 
@@ -966,7 +1013,13 @@ __global__ void k_spr_rows_top1(
             else other1 = nb_node;
         }
     }
-    if (other0 == -1) return;
+    if (other0 == -1) {
+        if (threadIdx.x == 0) {
+            best_delta_out[i] = 1e30f;
+            best_j_out[i]     = -1;
+        }
+        return;
+    }
 
     dev_run_parallel_spr_dfs(
         tree_root, parent, other0, other1, n_leaves, n_nodes_u,
@@ -1021,18 +1074,34 @@ __global__ void k_spr_rows_top1(
  * ============================================================================ */
 struct MinibatchGPUWorkspace {
     int32_t max_K;
-    float *d_D_cond, *d_subdist, *d_nd_u, *d_row_tmp, *d_best_delta;
-    int32_t *d_rep4, *d_perm, *d_c1_r, *d_c2_r, *d_m_lmin, *d_v_map, *d_next_k;
+    int32_t max_prof_leaves;
+    size_t exact_prof_cap;
+    size_t pair_cap;
+    float *d_D_cond, *d_subdist, *d_nd_u, *d_row_tmp, *d_best_delta, *d_prof_weights, *d_exact_weights;
+    int32_t *d_prof_offsets, *d_prof_leaves, *d_exact_offsets, *d_exact_leaves, *d_pair_a, *d_pair_b;
+    int32_t *d_perm, *d_c1_r, *d_c2_r, *d_m_lmin, *d_v_map, *d_next_k;
     int32_t *d_parent_u, *d_sub_size, *d_tin, *d_adj_u, *d_best_j;
     int64_t *d_v_curr;
-    double *d_curr_L;
+    double *d_curr_L, *d_pair_exact_D;
 
     void init(int32_t K_max) {
         max_K = K_max;
+        max_prof_leaves = 128;
         int32_t M_max = 2 * K_max - 2;
         int32_t R_max = 2 * K_max - 1;
+        size_t prof_cap = std::max((size_t)128 * (size_t)K_max, (size_t)2048);
+        exact_prof_cap = std::max(prof_cap, (size_t)16384);
+        pair_cap = (size_t)K_max * (size_t)K_max / 2 + 16;
         CUDA_CHECK(cudaSetDevice(0));
-        CUDA_CHECK(cudaMalloc(&d_rep4, (size_t)K_max * 4 * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_prof_offsets, (size_t)(K_max + 1) * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_prof_leaves,  prof_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_prof_weights, prof_cap * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_exact_offsets, (size_t)(K_max + 1) * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_pair_a,       pair_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_pair_b,       pair_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&d_pair_exact_D, pair_cap * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_perm, (size_t)K_max * sizeof(int32_t)));
         CUDA_CHECK(cudaMalloc(&d_D_cond, (size_t)K_max * K_max * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_subdist, (size_t)M_max * M_max * sizeof(float)));
@@ -1055,9 +1124,23 @@ struct MinibatchGPUWorkspace {
         CUDA_CHECK(cudaFuncSetAttribute(k_spr_rows_top1, cudaFuncAttributeMaxDynamicSharedMemorySize, 90112));
     }
 
+    void ensure_exact_prof_cap(size_t needed) {
+        if (needed > exact_prof_cap) {
+            CUDA_CHECK(cudaSetDevice(0));
+            cudaFree(d_exact_leaves);
+            cudaFree(d_exact_weights);
+            exact_prof_cap = needed + 4096;
+            CUDA_CHECK(cudaMalloc(&d_exact_leaves,  exact_prof_cap * sizeof(int32_t)));
+            CUDA_CHECK(cudaMalloc(&d_exact_weights, exact_prof_cap * sizeof(float)));
+        }
+    }
+
     void destroy() {
         CUDA_CHECK(cudaSetDevice(0));
-        cudaFree(d_rep4); cudaFree(d_perm); cudaFree(d_D_cond);
+        cudaFree(d_prof_offsets); cudaFree(d_prof_leaves); cudaFree(d_prof_weights);
+        cudaFree(d_exact_offsets); cudaFree(d_exact_leaves); cudaFree(d_exact_weights);
+        cudaFree(d_pair_a); cudaFree(d_pair_b); cudaFree(d_pair_exact_D);
+        cudaFree(d_perm); cudaFree(d_D_cond);
         cudaFree(d_subdist); cudaFree(d_nd_u); cudaFree(d_row_tmp);
         cudaFree(d_best_delta); cudaFree(d_best_j); cudaFree(d_v_curr); cudaFree(d_curr_L);
         cudaFree(d_c1_r); cudaFree(d_c2_r); cudaFree(d_m_lmin);
@@ -1073,8 +1156,7 @@ static void compute_tree_summaries_blind(
     std::vector<int32_t> &ord,
     std::vector<int32_t> &curr_parent,
     std::vector<int32_t> &leaf_cnt,
-    std::vector<int32_t> &node_rep0,
-    std::vector<int32_t> &node_rep4
+    std::vector<int32_t> &node_rep0
 ) {
     const int32_t n_nodes_r = 2 * N - 1;
     const int32_t root_r = n_nodes_r - 1;
@@ -1082,7 +1164,7 @@ static void compute_tree_summaries_blind(
     curr_parent.assign(n_nodes_r, -1);
     leaf_cnt.assign(n_nodes_r, 1);
     node_rep0.resize(n_nodes_r);
-    node_rep4.resize((size_t)n_nodes_r * 4);
+    std::vector<int32_t> min_depth(n_nodes_r, 0);
 
     int32_t ord_len = 0;
     ord[ord_len++] = root_r;
@@ -1097,20 +1179,103 @@ static void compute_tree_summaries_blind(
 
     for (int32_t x = 0; x < N; ++x) {
         node_rep0[x] = x;
-        node_rep4[4 * x + 0] = x;
-        node_rep4[4 * x + 1] = x;
-        node_rep4[4 * x + 2] = x;
-        node_rep4[4 * x + 3] = x;
     }
     for (int32_t idx = ord_len - 1; idx >= 0; --idx) {
         int32_t u = ord[idx];
         int32_t b0 = c1_r[u], b1 = c2_r[u];
         leaf_cnt[u] = leaf_cnt[b0] + leaf_cnt[b1];
-        node_rep0[u] = node_rep0[b0];
-        node_rep4[4 * u + 0] = node_rep4[4 * b0 + 0];
-        node_rep4[4 * u + 1] = node_rep4[4 * b0 + 2];
-        node_rep4[4 * u + 2] = node_rep4[4 * b1 + 0];
-        node_rep4[4 * u + 3] = node_rep4[4 * b1 + 2];
+        if (min_depth[b0] <= min_depth[b1]) {
+            min_depth[u] = 1 + min_depth[b0];
+            node_rep0[u] = node_rep0[b0];
+        } else {
+            min_depth[u] = 1 + min_depth[b1];
+            node_rep0[u] = node_rep0[b1];
+        }
+    }
+}
+
+/* Compute the dyadic leaf-weight profile w(x) = 2^{-depth_u(x)} for a rooted clade u.
+ * Expands internal nodes in best-first order (highest weight w = 2^{-d} first).
+ * When max_prof_leaves <= 0 or leaf_cnt[u] <= max_prof_leaves (for balanced, unbalanced,
+ * or caterpillar clades alike), all leaves in u are emitted with their exact dyadic weights.
+ * When max_prof_leaves > 0 and leaf_cnt[u] > max_prof_leaves, expansion stops at max_prof_leaves
+ * entries and each remaining frontier subtree in the priority queue collapses its mass onto a
+ * single representative leaf node_rep0[top.u] (an approximation that can retain substantial
+ * collapsed mass on balanced clades of size > max_prof_leaves). */
+static void compute_clade_dyadic_profile(
+    int32_t u, int32_t N,
+    const int32_t *c1_r, const int32_t *c2_r,
+    const int32_t *node_rep0,
+    int32_t max_prof_leaves,
+    std::vector<int32_t> &prof_leaves_out,
+    std::vector<float> &prof_weights_out
+) {
+    if (u < N) {
+        prof_leaves_out.push_back(u);
+        prof_weights_out.push_back(1.0f);
+        return;
+    }
+    if (max_prof_leaves < 0) {
+        struct StackEntry { int32_t u; double weight; };
+        std::vector<StackEntry> st;
+        st.reserve(64);
+        st.push_back({u, 1.0});
+        while (!st.empty()) {
+            StackEntry top = st.back();
+            st.pop_back();
+            int32_t b0 = c1_r[top.u], b1 = c2_r[top.u];
+            double hw = 0.5 * top.weight;
+            if (b1 < N) {
+                prof_leaves_out.push_back(b1);
+                prof_weights_out.push_back((float)hw);
+            } else {
+                st.push_back({b1, hw});
+            }
+            if (b0 < N) {
+                prof_leaves_out.push_back(b0);
+                prof_weights_out.push_back((float)hw);
+            } else {
+                st.push_back({b0, hw});
+            }
+        }
+        return;
+    }
+    struct WeightedNode {
+        double weight;
+        int32_t u;
+        bool operator<(const WeightedNode &o) const {
+            if (weight != o.weight) return weight < o.weight;
+            return u > o.u;
+        }
+    };
+    std::priority_queue<WeightedNode> pq;
+    pq.push({1.0, u});
+    int32_t start_leaves = (int32_t)prof_leaves_out.size();
+    while (!pq.empty()) {
+        int32_t curr_total = ((int32_t)prof_leaves_out.size() - start_leaves) + (int32_t)pq.size();
+        if (max_prof_leaves > 0 && curr_total >= max_prof_leaves) break;
+        WeightedNode top = pq.top();
+        pq.pop();
+        int32_t b0 = c1_r[top.u], b1 = c2_r[top.u];
+        double hw = 0.5 * top.weight;
+        if (b0 < N) {
+            prof_leaves_out.push_back(b0);
+            prof_weights_out.push_back((float)hw);
+        } else {
+            pq.push({hw, b0});
+        }
+        if (b1 < N) {
+            prof_leaves_out.push_back(b1);
+            prof_weights_out.push_back((float)hw);
+        } else {
+            pq.push({hw, b1});
+        }
+    }
+    while (!pq.empty()) {
+        WeightedNode top = pq.top();
+        pq.pop();
+        prof_leaves_out.push_back(node_rep0[top.u]);
+        prof_weights_out.push_back((float)top.weight);
     }
 }
 
@@ -1245,25 +1410,91 @@ static void extract_active_skeleton(
     *out_skel_id = -1 - last_ret;
 }
 
-/* Optimize one K-leaf skeleton on GPU with exact path-disjoint SPR batching and monotonic BME length check */
+/* Compute all-pairs unrooted topological edge distances dist_out[a * K + b]
+ * between original super-leaves a, b in {0, ..., K-1} for skeleton (v_cf, perm)
+ * in O(K^2) time by visiting each leaf pair once at its rooted LCA. */
+static void compute_skeleton_leaf_dists(
+    const int64_t *v_cf, const int32_t *perm, int32_t K,
+    std::vector<int32_t> &dist_out
+) {
+    const int32_t R_sk = 2 * K - 1;
+    const int32_t root_r = R_sk - 1;
+    std::vector<int32_t> c1(R_sk), c2(R_sk), uf(R_sk);
+    for (int32_t x = 0; x < K; ++x) uf[x] = x;
+    for (int32_t k = 0; k < K - 1; ++k) {
+        int32_t i = K - 2 - k;
+        int32_t m = K + k;
+        int32_t x = (int32_t)v_cf[i];
+        int32_t y = i + 1;
+        c1[m] = uf[y];
+        c2[m] = uf[x];
+        uf[x] = m;
+    }
+    std::vector<int32_t> depth(R_sk, 0);
+    for (int32_t u = root_r; u >= K; --u) {
+        depth[c1[u]] = depth[u] + 1;
+        depth[c2[u]] = depth[u] + 1;
+    }
+    dist_out.assign((size_t)K * K, 0);
+    std::vector<std::vector<int32_t>> sub_leaves(R_sk);
+    for (int32_t x = 0; x < K; ++x) sub_leaves[x].push_back(x);
+    for (int32_t u = K; u <= root_r; ++u) {
+        int32_t b0 = c1[u], b1 = c2[u];
+        const auto &L0 = sub_leaves[b0];
+        const auto &L1 = sub_leaves[b1];
+        int32_t sub = (u == root_r) ? 1 : (2 * depth[u]);
+        for (int32_t x : L0) {
+            int32_t ox = perm[x];
+            int32_t dx = depth[x] - sub;
+            for (int32_t y : L1) {
+                int32_t oy = perm[y];
+                int32_t d = dx + depth[y];
+                dist_out[(size_t)ox * K + oy] = d;
+                dist_out[(size_t)oy * K + ox] = d;
+            }
+        }
+        if (u < root_r) {
+            auto &Lu = sub_leaves[u];
+            Lu.reserve(L0.size() + L1.size());
+            Lu.insert(Lu.end(), L0.begin(), L0.end());
+            Lu.insert(Lu.end(), L1.begin(), L1.end());
+            std::vector<int32_t>().swap(sub_leaves[b0]);
+            std::vector<int32_t>().swap(sub_leaves[b1]);
+        }
+    }
+}
+
+/* Optimize one K-leaf skeleton on GPU with path-disjoint SPR batching, monotonic condensed-skeleton
+ * BME check, and (when exact_prof_* is supplied) an exact full-objective GPU acceptance check on
+ * all changed super-leaf pairs involving capped clades. */
 static double optimize_skeleton_on_gpu(
     int32_t K, int32_t max_iters,
-    const int32_t *orig_rep4,
+    const int32_t *prof_offsets,
+    const int32_t *prof_leaves,
+    const float *prof_weights,
     const TrueTreeHLD &oracle,
     MinibatchGPUWorkspace &gpu_ws,
     std::vector<int64_t> &v_cf,
-    std::vector<int32_t> &perm
+    std::vector<int32_t> &perm,
+    const int32_t *exact_prof_offsets = NULL,
+    const int32_t *exact_prof_leaves = NULL,
+    const float *exact_prof_weights = NULL
 ) {
     const int32_t M_sk = 2 * K - 2;
     const int32_t R_sk = 2 * K - 1;
     const int32_t root_u_sk = M_sk - 1;
+    const std::vector<int64_t> init_v_cf = v_cf;
+    const std::vector<int32_t> init_perm = perm;
 
     /* Build K x K condensed D ONCE in original super-leaf order */
-    CUDA_CHECK(cudaMemcpy(gpu_ws.d_rep4, orig_rep4, (size_t)4 * K * sizeof(int32_t), cudaMemcpyHostToDevice));
+    const int32_t total_prof = prof_offsets[K];
+    CUDA_CHECK(cudaMemcpy(gpu_ws.d_prof_offsets, prof_offsets, (size_t)(K + 1) * sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(gpu_ws.d_prof_leaves, prof_leaves, (size_t)total_prof * sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(gpu_ws.d_prof_weights, prof_weights, (size_t)total_prof * sizeof(float), cudaMemcpyHostToDevice));
     dim3 blk2d(16, 16);
     dim3 grd2d((K + 15) / 16, (K + 15) / 16);
     k_build_true_condensed_D<<<grd2d, blk2d>>>(
-        K, gpu_ws.d_rep4,
+        K, gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights,
         oracle.d_head, oracle.d_parent, oracle.d_depth, oracle.d_dist_root,
         gpu_ws.d_D_cond
     );
@@ -1460,6 +1691,101 @@ static double optimize_skeleton_on_gpu(
         for (int32_t a = 0; a < K; ++a) new_perm[a] = perm[step_perm[a]];
         perm = new_perm;
     }
+
+    if (best_L >= init_L - 1e-6) {
+        v_cf = init_v_cf;
+        perm = init_perm;
+        return 0.0;
+    }
+
+    if (exact_prof_offsets != NULL && exact_prof_leaves != NULL && exact_prof_weights != NULL) {
+        std::vector<uint8_t> is_capped(K, 0);
+        bool any_capped = false;
+        for (int32_t a = 0; a < K; ++a) {
+            int32_t cap_len = prof_offsets[a + 1] - prof_offsets[a];
+            int32_t ex_len  = exact_prof_offsets[a + 1] - exact_prof_offsets[a];
+            if (ex_len != cap_len) {
+                is_capped[a] = 1;
+                any_capped = true;
+            }
+        }
+        if (any_capped) {
+            std::vector<int32_t> dist_init, dist_best;
+            compute_skeleton_leaf_dists(init_v_cf.data(), init_perm.data(), K, dist_init);
+            compute_skeleton_leaf_dists(best_v_cf.data(), best_perm.data(), K, dist_best);
+
+            std::vector<int32_t> pair_a, pair_b;
+            std::vector<int32_t> uncap_a, uncap_b;
+            for (int32_t a = 0; a < K; ++a) {
+                for (int32_t b = a + 1; b < K; ++b) {
+                    int32_t db = dist_best[(size_t)a * K + b];
+                    int32_t di = dist_init[(size_t)a * K + b];
+                    if (db != di) {
+                        if (is_capped[a] || is_capped[b]) {
+                            pair_a.push_back(a);
+                            pair_b.push_back(b);
+                        } else {
+                            uncap_a.push_back(a);
+                            uncap_b.push_back(b);
+                        }
+                    }
+                }
+            }
+            if (pair_a.empty() && uncap_a.empty()) {
+                v_cf = init_v_cf;
+                perm = init_perm;
+                return 0.0;
+            }
+
+            std::vector<double> h_pair_exact_D(pair_a.size(), 0.0);
+            if (!pair_a.empty()) {
+                int32_t n_pairs = (int32_t)pair_a.size();
+                int32_t total_exact_prof = exact_prof_offsets[K];
+                gpu_ws.ensure_exact_prof_cap((size_t)total_exact_prof);
+                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_offsets, exact_prof_offsets, (size_t)(K + 1) * sizeof(int32_t), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_leaves,  exact_prof_leaves,  (size_t)total_exact_prof * sizeof(int32_t), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(gpu_ws.d_exact_weights, exact_prof_weights, (size_t)total_exact_prof * sizeof(float), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(gpu_ws.d_pair_a, pair_a.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(gpu_ws.d_pair_b, pair_b.data(), (size_t)n_pairs * sizeof(int32_t), cudaMemcpyHostToDevice));
+
+                k_refine_true_condensed_D_pairs<<<n_pairs, 256>>>(
+                    K, n_pairs, gpu_ws.d_pair_a, gpu_ws.d_pair_b,
+                    gpu_ws.d_exact_offsets, gpu_ws.d_exact_leaves, gpu_ws.d_exact_weights,
+                    oracle.d_head, oracle.d_parent, oracle.d_depth, oracle.d_dist_root,
+                    gpu_ws.d_D_cond, gpu_ws.d_pair_exact_D
+                );
+                CUDA_CHECK(cudaMemcpy(h_pair_exact_D.data(), gpu_ws.d_pair_exact_D, (size_t)n_pairs * sizeof(double), cudaMemcpyDeviceToHost));
+            }
+
+            std::vector<float> h_D_cond;
+            if (!uncap_a.empty()) {
+                h_D_cond.resize((size_t)K * K);
+                CUDA_CHECK(cudaMemcpy(h_D_cond.data(), gpu_ws.d_D_cond, (size_t)K * K * sizeof(float), cudaMemcpyDeviceToHost));
+            }
+
+            double exact_delta_L = 0.0;
+            for (size_t pid = 0; pid < pair_a.size(); ++pid) {
+                int32_t a = pair_a[pid], b = pair_b[pid];
+                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
+                exact_delta_L += w_diff * h_pair_exact_D[pid];
+            }
+            for (size_t uid = 0; uid < uncap_a.size(); ++uid) {
+                int32_t a = uncap_a[uid], b = uncap_b[uid];
+                double w_diff = ldexp(1.0, 1 - dist_best[(size_t)a * K + b]) - ldexp(1.0, 1 - dist_init[(size_t)a * K + b]);
+                exact_delta_L += w_diff * (double)h_D_cond[(size_t)a * K + b];
+            }
+
+            if (exact_delta_L >= -1e-6) {
+                v_cf = init_v_cf;
+                perm = init_perm;
+                return 0.0;
+            }
+            v_cf = best_v_cf;
+            perm = best_perm;
+            return exact_delta_L;
+        }
+    }
+
     v_cf = best_v_cf;
     perm = best_perm;
     return best_L - init_L;
@@ -1519,8 +1845,8 @@ int main(void) {
         std::vector<int32_t> curr_c1(n_nodes_r), curr_c2(n_nodes_r);
         int64_t init_hamming = 0, init_rf_wrong = 0;
         {
-            std::vector<int32_t> ord, par, leaf_cnt, rep0, rep4;
-            compute_tree_summaries_blind(true_c1.data(), true_c2.data(), N, ord, par, leaf_cnt, rep0, rep4);
+            std::vector<int32_t> ord, par, leaf_cnt, rep0;
+            compute_tree_summaries_blind(true_c1.data(), true_c2.data(), N, ord, par, leaf_cnt, rep0);
 
             int32_t n_Windows = 8;
             std::vector<int32_t> win_clade_roots;
@@ -1592,10 +1918,10 @@ int main(void) {
         double total_delta_L = 0.0;
         int32_t avg_K = 0, K_count = 0;
 
-        std::vector<int32_t> ord, curr_parent, leaf_cnt, node_rep0, node_rep4;
+        std::vector<int32_t> ord, curr_parent, leaf_cnt, node_rep0;
         compute_tree_summaries_blind(
             curr_c1.data(), curr_c2.data(), N,
-            ord, curr_parent, leaf_cnt, node_rep0, node_rep4
+            ord, curr_parent, leaf_cnt, node_rep0
         );
 
         /* Step 5a: Blindly scan all N-2 internal edges on GPU for 4-point quartet violations */
@@ -1646,13 +1972,44 @@ int main(void) {
                 sk_c2[K + s] = (r_raw >= 0) ? r_raw : (K + (-1 - r_raw));
             }
 
-            std::vector<int32_t> orig_rep4(4 * K);
+            std::vector<int32_t> prof_offsets(K + 1, 0);
+            std::vector<int32_t> prof_leaves;
+            std::vector<float> prof_weights;
+            prof_leaves.reserve((size_t)K * 4);
+            prof_weights.reserve((size_t)K * 4);
+            bool need_exact_prof = false;
             for (int32_t a = 0; a < K; ++a) {
-                int32_t ru = super_roots[a];
-                orig_rep4[4 * a + 0] = node_rep4[4 * ru + 0];
-                orig_rep4[4 * a + 1] = node_rep4[4 * ru + 1];
-                orig_rep4[4 * a + 2] = node_rep4[4 * ru + 2];
-                orig_rep4[4 * a + 3] = node_rep4[4 * ru + 3];
+                prof_offsets[a] = (int32_t)prof_leaves.size();
+                compute_clade_dyadic_profile(
+                    super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                    node_rep0.data(), gpu_ws.max_prof_leaves, prof_leaves, prof_weights
+                );
+                if (gpu_ws.max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > gpu_ws.max_prof_leaves) {
+                    need_exact_prof = true;
+                }
+            }
+            prof_offsets[K] = (int32_t)prof_leaves.size();
+
+            std::vector<int32_t> exact_prof_offsets;
+            std::vector<int32_t> exact_prof_leaves;
+            std::vector<float> exact_prof_weights;
+            if (need_exact_prof) {
+                exact_prof_offsets.resize(K + 1, 0);
+                exact_prof_leaves.reserve((size_t)N);
+                exact_prof_weights.reserve((size_t)N);
+                for (int32_t a = 0; a < K; ++a) {
+                    exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
+                    if (leaf_cnt[super_roots[a]] <= gpu_ws.max_prof_leaves) {
+                        exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
+                        exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
+                    } else {
+                        compute_clade_dyadic_profile(
+                            super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                            node_rep0.data(), -1, exact_prof_leaves, exact_prof_weights
+                        );
+                    }
+                }
+                exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
             }
 
             std::vector<int64_t> v_sk(K - 1), v_cf(K - 1);
@@ -1660,7 +2017,15 @@ int main(void) {
             encode_rooted_to_v_c(sk_c1.data(), sk_c2.data(), K, v_sk.data());
             relabel_cherry_first_c(v_sk.data(), K, 0, v_cf.data(), perm.data());
 
-            total_delta_L += optimize_skeleton_on_gpu(K, 60, orig_rep4.data(), oracle, gpu_ws, v_cf, perm);
+            double dL = optimize_skeleton_on_gpu(
+                K, 60, prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+                oracle, gpu_ws, v_cf, perm,
+                need_exact_prof ? exact_prof_offsets.data() : NULL,
+                need_exact_prof ? exact_prof_leaves.data() : NULL,
+                need_exact_prof ? exact_prof_weights.data() : NULL
+            );
+            if (dL == 0.0) continue;
+            total_delta_L += dL;
 
             int32_t R_sk = 2 * K - 1;
             std::vector<int32_t> new_sk_c1(R_sk), new_sk_c2(R_sk);
@@ -1676,7 +2041,7 @@ int main(void) {
             }
             compute_tree_summaries_blind(
                 curr_c1.data(), curr_c2.data(), N,
-                ord, curr_parent, leaf_cnt, node_rep0, node_rep4
+                ord, curr_parent, leaf_cnt, node_rep0
             );
         }
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -1748,8 +2113,8 @@ int main(void) {
         std::vector<int32_t> init_c1(n_nodes_r), init_c2(n_nodes_r);
         int64_t init_rf_wrong = 0;
         {
-            std::vector<int32_t> ord, par, leaf_cnt, rep0, rep4;
-            compute_tree_summaries_blind(true_c1.data(), true_c2.data(), N, ord, par, leaf_cnt, rep0, rep4);
+            std::vector<int32_t> ord, par, leaf_cnt, rep0;
+            compute_tree_summaries_blind(true_c1.data(), true_c2.data(), N, ord, par, leaf_cnt, rep0);
 
             int32_t n_Windows = 8;
             std::vector<int32_t> win_clade_roots;
@@ -1821,10 +2186,10 @@ int main(void) {
         int64_t final_rf_mode[2] = {init_rf_wrong, init_rf_wrong};
         for (int32_t mode = 0; mode < 2; ++mode) {
             std::vector<int32_t> curr_c1 = init_c1, curr_c2 = init_c2;
-            std::vector<int32_t> ord, curr_parent, leaf_cnt, node_rep0, node_rep4;
+            std::vector<int32_t> ord, curr_parent, leaf_cnt, node_rep0;
             compute_tree_summaries_blind(
                 curr_c1.data(), curr_c2.data(), N,
-                ord, curr_parent, leaf_cnt, node_rep0, node_rep4
+                ord, curr_parent, leaf_cnt, node_rep0
             );
 
             /* Blindly discover all clades with quartet violations */
@@ -1962,13 +2327,44 @@ int main(void) {
                     sk_c2[K + s] = (r_raw >= 0) ? r_raw : (K + (-1 - r_raw));
                 }
 
-                std::vector<int32_t> orig_rep4(4 * K);
+                std::vector<int32_t> prof_offsets(K + 1, 0);
+                std::vector<int32_t> prof_leaves;
+                std::vector<float> prof_weights;
+                prof_leaves.reserve((size_t)K * 4);
+                prof_weights.reserve((size_t)K * 4);
+                bool need_exact_prof = false;
                 for (int32_t a = 0; a < K; ++a) {
-                    int32_t ru = super_roots[a];
-                    orig_rep4[4 * a + 0] = node_rep4[4 * ru + 0];
-                    orig_rep4[4 * a + 1] = node_rep4[4 * ru + 1];
-                    orig_rep4[4 * a + 2] = node_rep4[4 * ru + 2];
-                    orig_rep4[4 * a + 3] = node_rep4[4 * ru + 3];
+                    prof_offsets[a] = (int32_t)prof_leaves.size();
+                    compute_clade_dyadic_profile(
+                        super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                        node_rep0.data(), gpu_ws.max_prof_leaves, prof_leaves, prof_weights
+                    );
+                    if (gpu_ws.max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > gpu_ws.max_prof_leaves) {
+                        need_exact_prof = true;
+                    }
+                }
+                prof_offsets[K] = (int32_t)prof_leaves.size();
+
+                std::vector<int32_t> exact_prof_offsets;
+                std::vector<int32_t> exact_prof_leaves;
+                std::vector<float> exact_prof_weights;
+                if (need_exact_prof) {
+                    exact_prof_offsets.resize(K + 1, 0);
+                    exact_prof_leaves.reserve((size_t)N);
+                    exact_prof_weights.reserve((size_t)N);
+                    for (int32_t a = 0; a < K; ++a) {
+                        exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
+                        if (leaf_cnt[super_roots[a]] <= gpu_ws.max_prof_leaves) {
+                            exact_prof_leaves.insert(exact_prof_leaves.end(), prof_leaves.begin() + prof_offsets[a], prof_leaves.begin() + prof_offsets[a + 1]);
+                            exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
+                        } else {
+                            compute_clade_dyadic_profile(
+                                super_roots[a], N, curr_c1.data(), curr_c2.data(),
+                                node_rep0.data(), -1, exact_prof_leaves, exact_prof_weights
+                            );
+                        }
+                    }
+                    exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
                 }
 
                 std::vector<int64_t> v_sk(K - 1), v_cf(K - 1);
@@ -1976,7 +2372,14 @@ int main(void) {
                 encode_rooted_to_v_c(sk_c1.data(), sk_c2.data(), K, v_sk.data());
                 relabel_cherry_first_c(v_sk.data(), K, 0, v_cf.data(), perm.data());
 
-                optimize_skeleton_on_gpu(K, 60, orig_rep4.data(), oracle, gpu_ws, v_cf, perm);
+                double dL = optimize_skeleton_on_gpu(
+                    K, 60, prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
+                    oracle, gpu_ws, v_cf, perm,
+                    need_exact_prof ? exact_prof_offsets.data() : NULL,
+                    need_exact_prof ? exact_prof_leaves.data() : NULL,
+                    need_exact_prof ? exact_prof_weights.data() : NULL
+                );
+                if (dL == 0.0) continue;
 
                 int32_t R_sk = 2 * K - 1;
                 std::vector<int32_t> new_sk_c1(R_sk), new_sk_c2(R_sk);
@@ -1991,7 +2394,7 @@ int main(void) {
                 }
                 compute_tree_summaries_blind(
                     curr_c1.data(), curr_c2.data(), N,
-                    ord, curr_parent, leaf_cnt, node_rep0, node_rep4
+                    ord, curr_parent, leaf_cnt, node_rep0
                 );
             }
             compute_xor_splits_o_n(curr_c1.data(), curr_c2.data(), N, leaf_hashes.data(), splits_curr);

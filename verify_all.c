@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 
 /*
  * Strict Verification Suite for Phylo2Vec Discrete Gradient & BME Optimizer
@@ -260,6 +261,40 @@ static int validate_gradient_matrix(
     }
     *max_err_out = max_err;
     return (max_err <= tol) ? 1 : 0;
+}
+
+typedef struct {
+    int32_t N;
+    int64_t v[32];
+    double D[32 * 32];
+    double ref_grad[32 * 64];
+    double ref_L;
+    int ok;
+} ThreadCheckTask;
+
+static void *thread_check_worker(void *arg) {
+    ThreadCheckTask *tk = (ThreadCheckTask *)arg;
+    int32_t N = tk->N;
+    int32_t n_pairs = N - 1;
+    int32_t max_cols = 2 * n_pairs - 1;
+    double grad[32 * 64];
+    int64_t v_opt[32];
+    for (int rep = 0; rep < 25; ++rep) {
+        memset(grad, 0, sizeof(grad));
+        calculate_discrete_gradient_full_c(tk->v, tk->D, N, grad);
+        for (int32_t k = 0; k < n_pairs * max_cols; ++k) {
+            if (!is_finite_double(grad[k]) || fabs(grad[k] - tk->ref_grad[k]) > 1e-12) {
+                tk->ok = 0;
+                break;
+            }
+        }
+        int32_t ne = 0; double ms = 0.0;
+        double L = optimize_phylo2vec_bme_c(tk->v, tk->D, N, v_opt, &ne, &ms);
+        if (!is_finite_double(L) || fabs(L - tk->ref_L) > 1e-11) {
+            tk->ok = 0;
+        }
+    }
+    return NULL;
 }
 
 int main(void) {
@@ -843,6 +878,252 @@ int main(void) {
         printf("       Max error between condensed N_eff gradient and full N-leaf Pauplin BME: %.3e\n\n",
                max_mb_grad_err);
         if (!test8_ok) all_passed = 0;
+    }
+
+    /* TEST 9: Non-Cherry-First Guard, Multi-Threaded Workspace Isolation, & Optimizer Tree-Score Consistency */
+    {
+        int test9_ok = 1;
+
+        /* 9a. Non-cherry-first vectors must be cleanly rejected with zeroed output */
+        {
+            const int32_t N = 5;
+            int64_t v_non_cf[4] = {0, 0, 3, 2};
+            double D5[25] = {0};
+            for (int32_t i = 0; i < N; ++i)
+                for (int32_t j = 0; j < N; ++j)
+                    D5[i * N + j] = (i == j) ? 0.0 : (double)(i + j + 1);
+            double d_lt[12], d_full[28];
+            for (int32_t k = 0; k < 12; ++k) d_lt[k] = 99.0;
+            for (int32_t k = 0; k < 28; ++k) d_full[k] = 99.0;
+            calculate_discrete_gradient_c(v_non_cf, D5, N, d_lt);
+            calculate_discrete_gradient_full_c(v_non_cf, D5, N, d_full);
+            for (int32_t k = 0; k < 12; ++k) if (d_lt[k] != 0.0) test9_ok = 0;
+            for (int32_t k = 0; k < 28; ++k) if (d_full[k] != 0.0) test9_ok = 0;
+        }
+
+        /* 9b. Multi-threaded workspace isolation across 8 concurrent pthreads */
+        ThreadCheckTask tasks[8];
+        pthread_t threads[8];
+        for (int t = 0; t < 8; ++t) {
+            int32_t N = 8 + 2 * t;
+            int32_t n_pairs = N - 1;
+            tasks[t].N = N;
+            tasks[t].ok = 1;
+            for (int32_t i = 0; i < n_pairs; ++i) {
+                tasks[t].v[i] = (int64_t)(xorshift32() % (uint32_t)(i + 1));
+            }
+            for (int32_t i = 0; i < N; ++i) {
+                tasks[t].D[i * N + i] = 0.0;
+                for (int32_t j = i + 1; j < N; ++j) {
+                    double d = 0.25 + 2.5 * rand_uniform();
+                    tasks[t].D[i * N + j] = tasks[t].D[j * N + i] = d;
+                }
+            }
+            memset(tasks[t].ref_grad, 0, sizeof(tasks[t].ref_grad));
+            calculate_discrete_gradient_full_c(tasks[t].v, tasks[t].D, N, tasks[t].ref_grad);
+            int64_t v_opt[32];
+            int32_t ne = 0; double ms = 0.0;
+            tasks[t].ref_L = optimize_phylo2vec_bme_c(tasks[t].v, tasks[t].D, N, v_opt, &ne, &ms);
+            double exact_L = brute_force_pauplin_bme_length(v_opt, tasks[t].D, N, NULL);
+            if (!is_finite_double(tasks[t].ref_L) || fabs(tasks[t].ref_L - exact_L) > 1e-11) {
+                test9_ok = 0;
+            }
+        }
+        for (int t = 0; t < 8; ++t) {
+            if (pthread_create(&threads[t], NULL, thread_check_worker, &tasks[t]) != 0) test9_ok = 0;
+        }
+        for (int t = 0; t < 8; ++t) {
+            pthread_join(threads[t], NULL);
+            if (!tasks[t].ok) test9_ok = 0;
+        }
+
+        /* 9c. Unbalanced 9-leaf caterpillar clade condensation counterexamples (N=17 additive & N=14 metric) */
+        {
+            const int32_t N17 = 17;
+            double D17[17 * 17] = {0};
+            for (int32_t i = 0; i < N17; ++i) {
+                int in_s_i = (i == 0 || i == 10 || i == 13);
+                for (int32_t j = i + 1; j < N17; ++j) {
+                    int in_s_j = (j == 0 || j == 10 || j == 13);
+                    double d = 2.0 + (in_s_i != in_s_j ? 1.0 : 0.0);
+                    D17[i * N17 + j] = D17[j * N17 + i] = d;
+                }
+            }
+            /* Build before = ((A, 9), (10, G)) and after = ((A, 10), (9, G)) where A=0..8 caterpillar, G=11..16 caterpillar */
+            int32_t c1_17[33], c2_17[33];
+            int32_t id = N17;
+            int32_t rA = 0;
+            for (int32_t x = 1; x < 9; ++x) { c1_17[id] = rA; c2_17[id] = x; rA = id++; }
+            int32_t rG = id++; c1_17[rG] = 11; c2_17[rG] = 12;
+            for (int32_t x = 13; x < 17; ++x) { c1_17[id] = rG; c2_17[id] = x; rG = id++; }
+            int32_t u_left = id++;  c1_17[u_left] = rA; c2_17[u_left] = 9;
+            int32_t u_right = id++; c1_17[u_right] = 10; c2_17[u_right] = rG;
+            int32_t root17 = id++;  c1_17[root17] = u_left; c2_17[root17] = u_right;
+
+            int64_t v_bef[16], v_aft[16];
+            encode_rooted_to_v_c(c1_17, c2_17, N17, v_bef);
+            c2_17[u_left] = 10; c1_17[u_right] = 9;
+            encode_rooted_to_v_c(c1_17, c2_17, N17, v_aft);
+
+            double L_bef = brute_force_pauplin_bme_length(v_bef, D17, N17, NULL);
+            double L_aft = brute_force_pauplin_bme_length(v_aft, D17, N17, NULL);
+            double full_chg17 = L_aft - L_bef;
+            if (fabs(full_chg17 - 0.029296875) > 1e-12) test9_ok = 0;
+
+            /* Condense only clade A (which in decoded tree from v_bef has root node 2*N17 - 2 - (8 - 1) = 25) */
+            int32_t dec_c1[33], dec_c2[33];
+            decode_v_to_trees(v_bef, N17, dec_c1, dec_c2, NULL);
+            uint8_t is_cond17[33] = {0};
+            for (int32_t u = N17; u < 2 * N17 - 1; ++u) {
+                if ((dec_c1[u] == 8 || dec_c2[u] == 8) && (dec_c1[u] >= N17 || dec_c2[u] >= N17)) {
+                    /* Check if this node's subtree has 9 leaves 0..8 */
+                    is_cond17[u] = 1;
+                    break;
+                }
+            }
+            int32_t n_eff = 0, super_map[33], leaf_to_super[33];
+            int64_t v_eff[16], v_eff_aft[16];
+            double omega[33], D_eff[17 * 17];
+            condense_tree_bme_c(v_bef, D17, N17, is_cond17, &n_eff, v_eff, super_map, leaf_to_super, omega, D_eff);
+            if (n_eff != 9) test9_ok = 0;
+            /* Expected exact dyadic weights for 9-leaf caterpillar A: 0:1/256, 1:1/256, 2:1/128, ..., 8:1/2 */
+            double exp_w[9] = {1.0/256.0, 1.0/256.0, 1.0/128.0, 1.0/64.0, 1.0/32.0, 1.0/16.0, 1.0/8.0, 1.0/4.0, 1.0/2.0};
+            for (int32_t l = 0; l < 9; ++l) {
+                if (fabs(omega[l] - exp_w[l]) > 1e-15) test9_ok = 0;
+            }
+            /* Condense v_aft with the same clade A and verify condensed BME change equals +0.029296875 */
+            int32_t n_eff2 = 0, super_map2[33], leaf_to_super2[33];
+            double omega2[33], D_eff2[17 * 17];
+            condense_tree_bme_c(v_aft, D17, N17, is_cond17, &n_eff2, v_eff_aft, super_map2, leaf_to_super2, omega2, D_eff2);
+            double L_cond_bef = brute_force_pauplin_bme_length(v_eff, D_eff, n_eff, NULL);
+            double L_cond_aft = brute_force_pauplin_bme_length(v_eff_aft, D_eff2, n_eff2, NULL);
+            double cond_chg17 = L_cond_aft - L_cond_bef;
+            if (fabs(cond_chg17 - 0.029296875) > 1e-12 || fabs(cond_chg17 - full_chg17) > 1e-12) test9_ok = 0;
+        }
+
+        /* 9d. Balanced-clade frontier-collapse counterexample vs exact uncapped condensation (N=22, 16-leaf balanced clade A) */
+        {
+            const int32_t N22 = 22;
+            double D22[22 * 22] = {0};
+            /* 4 frontier representatives {0, 4, 8, 12} of 16-leaf balanced clade A, plus C=17, 18, 19 */
+            for (int32_t i = 0; i < N22; ++i) {
+                int in_s_i = (i == 0 || i == 4 || i == 8 || i == 12 || i == 17 || i == 18 || i == 19);
+                for (int32_t j = i + 1; j < N22; ++j) {
+                    int in_s_j = (j == 0 || j == 4 || j == 8 || j == 12 || j == 17 || j == 18 || j == 19);
+                    D22[i * N22 + j] = D22[j * N22 + i] = 2.0 + (in_s_i != in_s_j ? 1.0 : 0.0);
+                }
+            }
+            int32_t c1_22[43], c2_22[43];
+            int32_t id = N22;
+            int32_t lvl1[8], lvl2[4], lvl3[2];
+            for (int32_t k = 0; k < 8; ++k) { lvl1[k] = id++; c1_22[lvl1[k]] = 2 * k; c2_22[lvl1[k]] = 2 * k + 1; }
+            for (int32_t k = 0; k < 4; ++k) { lvl2[k] = id++; c1_22[lvl2[k]] = lvl1[2 * k]; c2_22[lvl2[k]] = lvl1[2 * k + 1]; }
+            for (int32_t k = 0; k < 2; ++k) { lvl3[k] = id++; c1_22[lvl3[k]] = lvl2[2 * k]; c2_22[lvl3[k]] = lvl2[2 * k + 1]; }
+            int32_t rA = id++; c1_22[rA] = lvl3[0]; c2_22[rA] = lvl3[1];
+            int32_t g0 = id++; c1_22[g0] = 18; c2_22[g0] = 19;
+            int32_t g1 = id++; c1_22[g1] = 20; c2_22[g1] = 21;
+            int32_t rG = id++; c1_22[rG] = g0; c2_22[rG] = g1;
+            int32_t u_left = id++;  c1_22[u_left] = rA; c2_22[u_left] = 16;
+            int32_t u_right = id++; c1_22[u_right] = 17; c2_22[u_right] = rG;
+            int32_t root22 = id++;  c1_22[root22] = u_left; c2_22[root22] = u_right;
+
+            int64_t v_bef22[21], v_aft22[21];
+            encode_rooted_to_v_c(c1_22, c2_22, N22, v_bef22);
+            c2_22[u_left] = 17; c1_22[u_right] = 16;
+            encode_rooted_to_v_c(c1_22, c2_22, N22, v_aft22);
+
+            double L_bef22 = brute_force_pauplin_bme_length(v_bef22, D22, N22, NULL);
+            double L_aft22 = brute_force_pauplin_bme_length(v_aft22, D22, N22, NULL);
+            double full_chg22 = L_aft22 - L_bef22;
+            /* True fraction of A in S is 4/16 = 1/4, so true full-tree change is 0.5 * (1/2 - 1/4) = +0.125 */
+            if (fabs(full_chg22 - 0.125) > 1e-12) test9_ok = 0;
+
+            int32_t dec_c1[43], dec_c2[43], sub_cnt[43];
+            decode_v_to_trees(v_bef22, N22, dec_c1, dec_c2, NULL);
+            for (int32_t x = 0; x < N22; ++x) sub_cnt[x] = 1;
+            uint8_t is_cond22[43] = {0};
+            for (int32_t u = N22; u < 2 * N22 - 1; ++u) {
+                sub_cnt[u] = sub_cnt[dec_c1[u]] + sub_cnt[dec_c2[u]];
+                if (sub_cnt[u] == 16) { is_cond22[u] = 1; break; }
+            }
+            int32_t n_eff = 0, n_eff2 = 0, super_map[43], leaf_to_super[43], super_map2[43], leaf_to_super2[43];
+            int64_t v_eff[21], v_eff_aft[21];
+            double omega[43], omega2[43], D_eff[22 * 22], D_eff2[22 * 22];
+            condense_tree_bme_c(v_bef22, D22, N22, is_cond22, &n_eff, v_eff, super_map, leaf_to_super, omega, D_eff);
+            condense_tree_bme_c(v_aft22, D22, N22, is_cond22, &n_eff2, v_eff_aft, super_map2, leaf_to_super2, omega2, D_eff2);
+            if (n_eff != 7 || n_eff2 != 7) test9_ok = 0;
+            for (int32_t l = 0; l < 16; ++l) {
+                if (fabs(omega[l] - (1.0 / 16.0)) > 1e-15) test9_ok = 0;
+            }
+            double cond_chg22 = brute_force_pauplin_bme_length(v_eff_aft, D_eff2, n_eff2, NULL)
+                              - brute_force_pauplin_bme_length(v_eff, D_eff, n_eff, NULL);
+            if (fabs(cond_chg22 - 0.125) > 1e-12 || fabs(cond_chg22 - full_chg22) > 1e-12) test9_ok = 0;
+        }
+
+        /* 9e. Cross-window wave interaction counterexample: frozen outside profiles vs sequential live rebuilding */
+        {
+            const int32_t N10 = 10;
+            const double D10[10 * 10] = {
+                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
+                0.504357635974884, 0.0, 1.263672113418579, 0.6325551271438599, 1.4168076515197754, 0.4012994170188904, 0.504357635974884, 0.504357635974884, 0.504357635974884, 0.504357635974884,
+                0.9801226854324341, 1.263672113418579, 0.0, 0.5590892434120178, 0.4197118878364563, 1.9408228397369385, 0.9801226854324341, 0.9801226854324341, 0.9801226854324341, 0.9801226854324341,
+                0.2683122754096985, 0.6325551271438599, 0.5590892434120178, 0.0, 0.7123850584030151, 1.0403475761413574, 0.2683122754096985, 0.2683122754096985, 0.2683122754096985, 0.2683122754096985,
+                0.6683472394943237, 1.4168076515197754, 0.4197118878364563, 0.7123850584030151, 0.0, 3.23811674118042, 0.6683472394943237, 0.6683472394943237, 0.6683472394943237, 0.6683472394943237,
+                0.9506180286407471, 0.4012994170188904, 1.9408228397369385, 1.0403475761413574, 3.23811674118042, 0.0, 0.9506180286407471, 0.9506180286407471, 0.9506180286407471, 0.9506180286407471,
+                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.504357635974884, 0.9801226854324341, 0.2683122754096985, 0.6683472394943237, 0.9506180286407471, 0.0, 0.0, 0.0, 0.0
+            };
+            /* Build T0 (A=((0,1),2), B=((3,4),5)), TA (A=((0,2),1), B=((3,4),5)),
+             * TB (A=((0,1),2), B=((3,5),4)), TAB (A=((0,2),1), B=((3,5),4)) */
+            double L_states[4];
+            for (int state = 0; state < 4; ++state) {
+                int32_t c1[19], c2[19];
+                int32_t id = N10;
+                int32_t a_in = id++;
+                c1[a_in] = 0; c2[a_in] = (state & 1) ? 2 : 1;
+                int32_t uA = id++;
+                c1[uA] = a_in; c2[uA] = (state & 1) ? 1 : 2;
+                int32_t b_in = id++;
+                c1[b_in] = 3; c2[b_in] = (state & 2) ? 5 : 4;
+                int32_t uB = id++;
+                c1[uB] = b_in; c2[uB] = (state & 2) ? 4 : 5;
+                int32_t cur = id++;
+                c1[cur] = uA; c2[cur] = uB;
+                for (int32_t g = 6; g < 10; ++g) {
+                    int32_t nxt = id++;
+                    c1[nxt] = cur; c2[nxt] = g;
+                    cur = nxt;
+                }
+                int64_t v10[9];
+                encode_rooted_to_v_c(c1, c2, N10, v10);
+                L_states[state] = brute_force_pauplin_bme_length(v10, D10, N10, NULL);
+            }
+            double dA_init = L_states[1] - L_states[0];
+            double dB_init = L_states[2] - L_states[0];
+            double d_joint = L_states[3] - L_states[0];
+            double dA_after_B = L_states[3] - L_states[2];
+            double dB_after_A = L_states[3] - L_states[1];
+            double interaction = 0.0;
+            const double dp[3] = {0.0, 0.25, -0.25};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    interaction += 0.5 * dp[i] * D10[i * 10 + (3 + j)] * dp[j];
+
+            if (fabs(dA_init - (-0.0032945312559604645)) > 1e-12) test9_ok = 0;
+            if (fabs(dB_init - (-0.025448983535170555)) > 1e-12) test9_ok = 0;
+            if (fabs((dA_init + dB_init) - (-0.02874351479113102)) > 1e-12) test9_ok = 0;
+            if (fabs(d_joint - 0.050525834783911705) > 1e-12) test9_ok = 0;
+            if (fabs(interaction - 0.07926934957504272) > 1e-12) test9_ok = 0;
+            if (fabs(d_joint - (dA_init + dB_init + interaction)) > 1e-12) test9_ok = 0;
+            /* Under sequential outside-profile rebuilding, only the first window is accepted and the second is rejected (+0.07597 / +0.05382 >= -1e-6) */
+            if (!(dA_after_B > 0.075 && dB_after_A > 0.053)) test9_ok = 0;
+        }
+
+        printf("[%s] Test 9: Non-Cherry-First Guard, 8-Thread Workspace Isolation, & Clade/Wave Exactness\n\n",
+               test9_ok ? "PASS" : "FAIL");
+        if (!test9_ok) all_passed = 0;
     }
 
     if (!all_passed) {

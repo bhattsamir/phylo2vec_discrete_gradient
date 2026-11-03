@@ -46,28 +46,33 @@ def pack_sequences_bits(seqs_list):
     """
     Pack N aligned sequences of length L=1596 into 25 uint64 words per channel:
     [N, 5, 25] uint64 where channels are: 0=A, 1=C, 2=G, 3=T/U, 4=valid(A|C|G|T).
+    Vectorized in batches of 4096 sequences for high speed.
     """
     N = len(seqs_list)
     L = len(seqs_list[0])
     W = (L + 63) // 64
     packed = np.zeros((N, 5, W), dtype=np.uint64)
-    for i, s in enumerate(seqs_list):
-        arr = np.frombuffer(s.upper().encode('ascii'), dtype=np.uint8)
+    batch_sz = 4096
+    for b_start in range(0, N, batch_sz):
+        b_end = min(N, b_start + batch_sz)
+        b_len = b_end - b_start
+        raw_bytes = "".join(s.upper() for s in seqs_list[b_start:b_end]).encode('ascii')
+        arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(b_len, L)
         for w in range(W):
             start = w * 64
             end = min(L, start + 64)
-            chunk = arr[start:end]
-            shifts = np.arange(end - start, dtype=np.uint64)
+            chunk = arr[:, start:end]
+            shifts = np.arange(end - start, dtype=np.uint64)[None, :]
             is_A = (chunk == ord('A')).astype(np.uint64)
             is_C = (chunk == ord('C')).astype(np.uint64)
             is_G = (chunk == ord('G')).astype(np.uint64)
             is_T = ((chunk == ord('T')) | (chunk == ord('U'))).astype(np.uint64)
             is_V = is_A | is_C | is_G | is_T
-            packed[i, 0, w] = np.bitwise_or.reduce(is_A << shifts)
-            packed[i, 1, w] = np.bitwise_or.reduce(is_C << shifts)
-            packed[i, 2, w] = np.bitwise_or.reduce(is_G << shifts)
-            packed[i, 3, w] = np.bitwise_or.reduce(is_T << shifts)
-            packed[i, 4, w] = np.bitwise_or.reduce(is_V << shifts)
+            packed[b_start:b_end, 0, w] = np.bitwise_or.reduce(is_A << shifts, axis=1)
+            packed[b_start:b_end, 1, w] = np.bitwise_or.reduce(is_C << shifts, axis=1)
+            packed[b_start:b_end, 2, w] = np.bitwise_or.reduce(is_G << shifts, axis=1)
+            packed[b_start:b_end, 3, w] = np.bitwise_or.reduce(is_T << shifts, axis=1)
+            packed[b_start:b_end, 4, w] = np.bitwise_or.reduce(is_V << shifts, axis=1)
     return packed, L, W
 
 if __name__ == "__main__":
@@ -78,8 +83,12 @@ if __name__ == "__main__":
         ch_full, nm_full, ln_full, rt_full = parse_newick_iterative(f.read().strip())
     all_leaves = [nm for ch, nm in zip(ch_full, nm_full) if not ch]
 
-    # Also prepare N = 50000
-    for N in [1000, 5000, 10000, 50000]:
+    target_sizes = [int(x) for x in sys.argv[1:]] if len(sys.argv) > 1 else [1000, 5000, 10000, 50000, 100000]
+    for N in target_sizes:
+        bin_path = os.path.join(base_dir, f"rnasim_{N}.bin")
+        if os.path.exists(bin_path):
+            print(f"Already exists: {bin_path} ({os.path.getsize(bin_path)/1e6:.2f} MB)")
+            continue
         rng = random.Random(42)
         subset = rng.sample(all_leaves, N)
         keep_set = set(subset)
@@ -127,11 +136,11 @@ if __name__ == "__main__":
         if not os.path.exists(init_nwk_path):
             t0 = time.time()
             subprocess.run([vft_bin, "-nt", "-nome", "-noml", "-nosupport", "-threads", "64", "-quiet", "-out", init_nwk_path, sub_fa], check=True)
-            print(f"Generated VFT-InitNJ for N={N} in {time.time()-t0:.2f}s")
+            print(f"Generated VFT-InitNJ for N={N} in {time.time()-t0:.2f}s", flush=True)
         if not os.path.exists(me_nwk_path):
             t0 = time.time()
             subprocess.run([vft_bin, "-nt", "-fastest", "-noml", "-nosupport", "-threads", "64", "-quiet", "-out", me_nwk_path, sub_fa], check=True)
-            print(f"Generated VFT-ME for N={N} in {time.time()-t0:.2f}s")
+            print(f"Generated VFT-ME for N={N} in {time.time()-t0:.2f}s", flush=True)
 
         leaf_to_id = {name: i for i, name in enumerate(subset)}
         seqs_list = [seqs_map[name] for name in subset]

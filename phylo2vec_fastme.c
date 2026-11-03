@@ -23,18 +23,57 @@ extern "C" {
  *   /usr/bin/clang -O3 -march=native -ffast-math -shared -fPIC phylo2vec_fastme.c -o libphylo2vec_fastme.dylib
  */
 
-static int32_t *g_iwork = NULL;
-static double *g_dwork = NULL;
-static int32_t g_cap_leaves = 0;
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 
-static int ensure_workspace(int32_t n_leaves) {
-    if (n_leaves < 4 || n_leaves > 100000) return -1;
-    if (n_leaves <= g_cap_leaves && g_iwork != NULL && g_dwork != NULL) return 0;
+#if defined(_MSC_VER)
+#define P2V_THREAD_LOCAL __declspec(thread)
+#elif defined(__cplusplus)
+#define P2V_THREAD_LOCAL thread_local
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__)
+#define P2V_THREAD_LOCAL _Thread_local
+#else
+#define P2V_THREAD_LOCAL __thread
+#endif
+
+static P2V_THREAD_LOCAL int32_t *g_iwork = NULL;
+static P2V_THREAD_LOCAL double *g_dwork = NULL;
+static P2V_THREAD_LOCAL int32_t g_cap_leaves = 0;
+
+void free_phylo2vec_workspace_c(void) {
     free(g_iwork);
     free(g_dwork);
     g_iwork = NULL;
     g_dwork = NULL;
     g_cap_leaves = 0;
+}
+
+#if !defined(_WIN32)
+static pthread_key_t g_tls_cleanup_key;
+static pthread_once_t g_tls_key_once = PTHREAD_ONCE_INIT;
+
+static void tls_workspace_destructor(void *unused) {
+    (void)unused;
+    free_phylo2vec_workspace_c();
+}
+
+static void init_tls_key(void) {
+    pthread_key_create(&g_tls_cleanup_key, tls_workspace_destructor);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((destructor))
+static void cleanup_main_thread_workspace(void) {
+    free_phylo2vec_workspace_c();
+}
+#endif
+#endif
+
+static int ensure_workspace(int32_t n_leaves) {
+    if (n_leaves < 4 || n_leaves > 100000) return -1;
+    if (n_leaves <= g_cap_leaves && g_iwork != NULL && g_dwork != NULL) return 0;
+    free_phylo2vec_workspace_c();
 
     size_t nl = (size_t)n_leaves;
     size_t n_pairs = nl - 1;
@@ -62,13 +101,14 @@ static int ensure_workspace(int32_t n_leaves) {
     g_iwork = (int32_t *)malloc(i_count * sizeof(int32_t));
     g_dwork = (double *)malloc(d_count * sizeof(double));
     if (!g_iwork || !g_dwork) {
-        free(g_iwork);
-        free(g_dwork);
-        g_iwork = NULL;
-        g_dwork = NULL;
+        free_phylo2vec_workspace_c();
         return -1;
     }
     g_cap_leaves = n_leaves;
+#if !defined(_WIN32)
+    pthread_once(&g_tls_key_once, init_tls_key);
+    pthread_setspecific(g_tls_cleanup_key, (void *)1);
+#endif
     return 0;
 }
 
@@ -349,7 +389,7 @@ static inline void decode_v_to_pairs_fast(
 }
 
 /* ============================================================================
- * 1. Lower-Triangular (j < i) Discrete Gradient (backward-compatible)
+ * 1. Lower-Triangular (j < i) Discrete Gradient (cherry-first 0 <= v[i] <= i)
  * ============================================================================ */
 void calculate_discrete_gradient_c(
     const int64_t * restrict v,
@@ -357,308 +397,21 @@ void calculate_discrete_gradient_c(
     int32_t n_leaves,
     double * restrict delta_out
 ) {
-    if (ensure_workspace(n_leaves) != 0) return;
-
+    if (n_leaves < 4 || !v || !D || !delta_out) return;
     const int32_t n_pairs = n_leaves - 1;
-    const int32_t n_nodes_r = 2 * n_leaves - 1;
-    const int32_t n_nodes_u = 2 * n_leaves - 2;
-    const int32_t root_u = n_nodes_u - 1;
-
-    int32_t *ptr = g_iwork;
-    int32_t *pairs = ptr; ptr += 2 * n_pairs;
-    int32_t *child1_r = ptr; ptr += n_nodes_r;
-    int32_t *child2_r = ptr; ptr += n_nodes_r;
-    int32_t *parents_uf = ptr; ptr += n_nodes_r;
-    int32_t *min_leaf = ptr; ptr += n_nodes_r;
-    int32_t *v_map = ptr; ptr += n_leaves;
-    int32_t *destinations = ptr; ptr += (size_t)n_pairs * n_leaves;
-    int32_t *parent_u = ptr; ptr += n_nodes_u;
-    int32_t *sub_size = ptr; ptr += n_nodes_u;
-    int32_t *tin = ptr; ptr += n_nodes_u;
-    int32_t *dfs_order = ptr; ptr += n_nodes_u;
-    int32_t *adj_u = ptr; ptr += (size_t)n_nodes_u * 3;
-
-    double *dptr = g_dwork;
-    double *subdist = dptr; dptr += (size_t)n_nodes_u * n_nodes_u;
-    double *nd_u = dptr; dptr += (size_t)n_nodes_u * 3;
-    double *edge_delta = dptr; dptr += n_nodes_u;
-
-    int32_t is_cf = 1;
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        if (v[i] > i) { is_cf = 0; break; }
-    }
-    if (is_cf) {
-        for (int32_t x = 0; x < n_leaves; ++x) {
-            parents_uf[x] = x;
-            min_leaf[x] = x;
-        }
-        for (int32_t k = 0; k < n_pairs; ++k) {
-            int32_t i = n_pairs - 1 - k;
-            int32_t m = n_leaves + k;
-            int32_t x = (int32_t)v[i];
-            int32_t y = i + 1;
-            int32_t c1 = parents_uf[y];
-            int32_t c2 = parents_uf[x];
-            child1_r[m] = c1;
-            child2_r[m] = c2;
-            min_leaf[m] = x;
-            v_map[y] = c1;
-            parents_uf[x] = m;
-        }
-    } else {
-        decode_v_to_pairs_fast(v, n_pairs, pairs);
-
-        for (int32_t i = 0; i < n_nodes_r; ++i) {
-            parents_uf[i] = i;
-            min_leaf[i] = i;
-        }
-        int32_t next_parent = n_leaves;
-        for (int32_t i = 0; i < n_pairs; ++i) {
-            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-            child1_r[next_parent] = p2;
-            child2_r[next_parent] = p1;
-            parents_uf[p1] = next_parent;
-            parents_uf[p2] = next_parent;
-            next_parent++;
-        }
-
-        for (int32_t i = 1; i < n_pairs; ++i) {
-            int32_t *row_d = &destinations[i * n_leaves];
-            for (int32_t j = 0; j < i; ++j) row_d[j] = j;
-        }
-        for (int32_t m = n_leaves; m < n_nodes_r; ++m) {
-            int32_t c1 = child1_r[m], c2 = child2_r[m];
-            int32_t ml1 = min_leaf[c1], ml2 = min_leaf[c2];
-            int32_t l_min, l_max;
-            if (ml1 < ml2) {
-                l_min = ml1; l_max = ml2; v_map[l_max] = c2;
-            } else {
-                l_min = ml2; l_max = ml1; v_map[l_max] = c1;
-            }
-            min_leaf[m] = l_min;
-            if (m < n_nodes_r - 1) {
-                for (int32_t n_idx = l_min + 1; n_idx < l_max; ++n_idx) {
-                    destinations[n_idx * n_leaves + l_min] = m;
-                }
-            }
-        }
-    }
-
-    int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
-    int32_t other_root_child = (rc1 < rc2) ? rc1 : rc2;
-    int32_t root_u_c0 = child1_r[root_u];
-    int32_t root_u_c1 = child2_r[root_u];
-    int32_t root_u_c2 = other_root_child;
-
-    for (int32_t u = 0; u < n_leaves; ++u) sub_size[u] = 1;
-    for (int32_t u = n_leaves; u < root_u; ++u) {
-        int32_t c1 = child1_r[u], c2 = child2_r[u];
-        parent_u[c1] = u; parent_u[c2] = u;
-        sub_size[u] = 1 + sub_size[c1] + sub_size[c2];
-        adj_u[3 * u + 0] = c1; adj_u[3 * u + 1] = c2;
-    }
-    parent_u[root_u_c0] = root_u;
-    parent_u[root_u_c1] = root_u;
-    parent_u[root_u_c2] = root_u;
-    parent_u[root_u] = -1;
-
-    for (int32_t u = 0; u < n_leaves; ++u) {
-        adj_u[3 * u + 0] = parent_u[u];
-        adj_u[3 * u + 1] = -1;
-        adj_u[3 * u + 2] = -1;
-    }
-    for (int32_t u = n_leaves; u < root_u; ++u) adj_u[3 * u + 2] = parent_u[u];
-    adj_u[3 * root_u + 0] = root_u_c0;
-    adj_u[3 * root_u + 1] = root_u_c1;
-    adj_u[3 * root_u + 2] = root_u_c2;
-
-    tin[root_u] = 0;
-    tin[root_u_c0] = 1;
-    tin[root_u_c1] = 1 + sub_size[root_u_c0];
-    tin[root_u_c2] = 1 + sub_size[root_u_c0] + sub_size[root_u_c1];
-    for (int32_t u = root_u - 1; u >= n_leaves; --u) {
-        int32_t c1 = child1_r[u], c2 = child2_r[u];
-        tin[c1] = tin[u] + 1;
-        tin[c2] = tin[u] + 1 + sub_size[c1];
-    }
-    for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
-
-    for (int32_t i = 0; i < n_leaves; ++i) {
-        memcpy(&subdist[i * n_nodes_u], &D[i * n_leaves], (size_t)n_leaves * sizeof(double));
-    }
-    for (int32_t u = n_leaves; u < root_u; ++u) {
-        const double * restrict row_c1 = &subdist[child1_r[u] * n_nodes_u];
-        const double * restrict row_c2 = &subdist[child2_r[u] * n_nodes_u];
-        double * restrict row_u = &subdist[u * n_nodes_u];
-        for (int32_t v_node = 0; v_node < u; ++v_node) {
-            row_u[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
-        }
-        for (int32_t v_node = 0; v_node < u; ++v_node) {
-            subdist[v_node * n_nodes_u + u] = row_u[v_node];
-        }
-    }
-    {
-        const double * restrict row_c0 = &subdist[root_u_c0 * n_nodes_u];
-        const double * restrict row_c1 = &subdist[root_u_c1 * n_nodes_u];
-        const double * restrict row_c2 = &subdist[root_u_c2 * n_nodes_u];
-        double * restrict row_r = &subdist[root_u * n_nodes_u];
-        int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
-        for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            row_r[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
-        }
-        int32_t end1 = tin[root_u_c1] + sub_size[root_u_c1];
-        for (int32_t idx = tin[root_u_c1]; idx < end1; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c2[v_node]);
-        }
-        int32_t end2 = tin[root_u_c2] + sub_size[root_u_c2];
-        for (int32_t idx = tin[root_u_c2]; idx < end2; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c1[v_node]);
-        }
-        for (int32_t v_node = 0; v_node < root_u; ++v_node) {
-            subdist[v_node * n_nodes_u + root_u] = row_r[v_node];
-        }
-    }
-    for (int32_t p = root_u - 1; p >= n_leaves; --p) {
-        int32_t g = parent_u[p];
-        int32_t c1 = child1_r[p], c2 = child2_r[p];
-        const double * restrict row_c1 = &subdist[c1 * n_nodes_u];
-        const double * restrict row_c2 = &subdist[c2 * n_nodes_u];
-        const double * restrict row_g = &subdist[g * n_nodes_u];
-        double * restrict row_p = &subdist[p * n_nodes_u];
-
-        int32_t end1 = tin[c1] + sub_size[c1];
-        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            row_p[v_node] = 0.5 * (row_c2[v_node] + row_g[v_node]);
-        }
-        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            subdist[v_node * n_nodes_u + p] = row_p[v_node];
-        }
-        int32_t end2 = tin[c2] + sub_size[c2];
-        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            row_p[v_node] = 0.5 * (row_c1[v_node] + row_g[v_node]);
-        }
-        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
-            int32_t v_node = dfs_order[idx];
-            subdist[v_node * n_nodes_u + p] = row_p[v_node];
-        }
-    }
-    for (int32_t i = 0; i < n_nodes_u; ++i) subdist[i * n_nodes_u + i] = 0.0;
-
-    for (int32_t u = n_leaves; u <= root_u; ++u) {
-        int32_t n0 = adj_u[3 * u + 0];
-        int32_t n1 = adj_u[3 * u + 1];
-        int32_t n2 = adj_u[3 * u + 2];
-        nd_u[3 * u + 0] = subdist[n1 * n_nodes_u + n2];
-        nd_u[3 * u + 1] = subdist[n0 * n_nodes_u + n2];
-        nd_u[3 * u + 2] = subdist[n0 * n_nodes_u + n1];
-    }
-
     const int32_t max_cols = n_pairs - 1;
-    memset(delta_out, 0, (size_t)(n_pairs * max_cols) * sizeof(double));
+    memset(delta_out, 0, (size_t)n_pairs * (size_t)max_cols * sizeof(double));
 
-    if (is_cf) {
-        int32_t * restrict dest_row = destinations;
-        for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
-        for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
-            int32_t tree_root = v_map[v_index];
-            int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
-            const double * restrict row_root = &subdist[tree_root * n_nodes_u];
-
-            int32_t other0 = -1, other1 = -1;
-            for (int32_t k = 0; k < 3; ++k) {
-                int32_t nb_node = adj_u[3 * parent + k];
-                if (nb_node != -1 && nb_node != tree_root) {
-                    if (other0 == -1) other0 = nb_node;
-                    else other1 = nb_node;
-                }
-            }
-            if (other0 != -1) {
-                edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
-                edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
-                edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
-
-                run_half_tree_dfs(
-                    other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                    row_root, &subdist[other1 * n_nodes_u], edge_delta
-                );
-                run_half_tree_dfs(
-                    other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                    row_root, &subdist[other0 * n_nodes_u], edge_delta
-                );
-
-                int32_t row_idx = v_index - 1;
-                double * restrict out_row = &delta_out[(size_t)row_idx * max_cols];
-                for (int32_t j = 0; j < row_idx; ++j) {
-                    out_row[j] = edge_delta[dest_row[j]];
-                }
-            }
-            int32_t m_active = n_leaves + (n_leaves - 1 - v_index);
-            dest_row[min_leaf[m_active]] = m_active;
-        }
-    } else {
-        for (int32_t v_index = 2; v_index < n_leaves; ++v_index) {
-            int32_t tree_root = v_map[v_index];
-            int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
-            const double * restrict row_root = &subdist[tree_root * n_nodes_u];
-
-            int32_t other0 = -1, other1 = -1;
-            for (int32_t k = 0; k < 3; ++k) {
-                int32_t nb_node = adj_u[3 * parent + k];
-                if (nb_node != -1 && nb_node != tree_root) {
-                    if (other0 == -1) other0 = nb_node;
-                    else other1 = nb_node;
-                }
-            }
-            if (other0 == -1) continue;
-
-            for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
-
-            run_half_tree_dfs(
-                other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                row_root, &subdist[other1 * n_nodes_u], edge_delta
-            );
-            run_half_tree_dfs(
-                other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                row_root, &subdist[other0 * n_nodes_u], edge_delta
-            );
-
-            int32_t row_idx = v_index - 1;
-            double * restrict out_row = &delta_out[(size_t)row_idx * max_cols];
-            const int32_t * restrict dest_row = &destinations[row_idx * n_leaves];
-            for (int32_t j = 0; j < row_idx; ++j) {
-                out_row[j] = edge_delta[dest_row[j]];
-            }
-        }
+    for (int32_t i = 0; i < n_pairs; ++i) {
+        if (v[i] < 0 || v[i] > i) return;
     }
-}
-
-/* ============================================================================
- * 2. Full 0 <= j <= 2i Discrete Gradient (shape: (N-1) x (2N-3))
- * ============================================================================ */
-void calculate_discrete_gradient_full_c(
-    const int64_t * restrict v,
-    const double * restrict D,
-    int32_t n_leaves,
-    double * restrict delta_full_out
-) {
     if (ensure_workspace(n_leaves) != 0) return;
 
-    const int32_t n_pairs = n_leaves - 1;
     const int32_t n_nodes_r = 2 * n_leaves - 1;
     const int32_t n_nodes_u = 2 * n_leaves - 2;
     const int32_t root_u = n_nodes_u - 1;
-    const int32_t max_cols = 2 * n_pairs - 1;
 
     int32_t *ptr = g_iwork;
-    int32_t *pairs = ptr; ptr += 2 * n_pairs;
     int32_t *child1_r = ptr; ptr += n_nodes_r;
     int32_t *child2_r = ptr; ptr += n_nodes_r;
     int32_t *parents_uf = ptr; ptr += n_nodes_r;
@@ -676,51 +429,22 @@ void calculate_discrete_gradient_full_c(
     double *nd_u = dptr; dptr += (size_t)n_nodes_u * 3;
     double *edge_delta = dptr; dptr += n_nodes_u;
 
-    int32_t is_cf = 1;
-    for (int32_t i = 1; i < n_pairs; ++i) {
-        if (v[i] > i) { is_cf = 0; break; }
+    for (int32_t x = 0; x < n_leaves; ++x) {
+        parents_uf[x] = x;
+        min_leaf[x] = x;
     }
-    if (is_cf) {
-        for (int32_t x = 0; x < n_leaves; ++x) {
-            parents_uf[x] = x;
-            min_leaf[x] = x;
-        }
-        for (int32_t k = 0; k < n_pairs; ++k) {
-            int32_t i = n_pairs - 1 - k;
-            int32_t m = n_leaves + k;
-            int32_t x = (int32_t)v[i];
-            int32_t y = i + 1;
-            int32_t c1 = parents_uf[y];
-            int32_t c2 = parents_uf[x];
-            child1_r[m] = c1;
-            child2_r[m] = c2;
-            min_leaf[m] = x;
-            v_map[y] = c1;
-            parents_uf[x] = m;
-        }
-    } else {
-        decode_v_to_pairs_fast(v, n_pairs, pairs);
-        for (int32_t i = 0; i < n_nodes_r; ++i) {
-            parents_uf[i] = i;
-            min_leaf[i] = i;
-        }
-        int32_t next_parent = n_leaves;
-        for (int32_t i = 0; i < n_pairs; ++i) {
-            int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
-            while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
-            while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
-            child1_r[next_parent] = p2;
-            child2_r[next_parent] = p1;
-            int32_t ml1 = min_leaf[p2], ml2 = min_leaf[p1];
-            if (ml1 < ml2) {
-                min_leaf[next_parent] = ml1; v_map[ml2] = p1;
-            } else {
-                min_leaf[next_parent] = ml2; v_map[ml1] = p2;
-            }
-            parents_uf[p1] = next_parent;
-            parents_uf[p2] = next_parent;
-            next_parent++;
-        }
+    for (int32_t k = 0; k < n_pairs; ++k) {
+        int32_t i = n_pairs - 1 - k;
+        int32_t m = n_leaves + k;
+        int32_t x = (int32_t)v[i];
+        int32_t y = i + 1;
+        int32_t c1 = parents_uf[y];
+        int32_t c2 = parents_uf[x];
+        child1_r[m] = c1;
+        child2_r[m] = c2;
+        min_leaf[m] = x;
+        v_map[y] = c1;
+        parents_uf[x] = m;
     }
 
     int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
@@ -763,24 +487,24 @@ void calculate_discrete_gradient_full_c(
     for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
 
     for (int32_t i = 0; i < n_leaves; ++i) {
-        memcpy(&subdist[i * n_nodes_u], &D[i * n_leaves], (size_t)n_leaves * sizeof(double));
+        memcpy(&subdist[(size_t)i * n_nodes_u], &D[(size_t)i * n_leaves], (size_t)n_leaves * sizeof(double));
     }
     for (int32_t u = n_leaves; u < root_u; ++u) {
-        const double * restrict row_c1 = &subdist[child1_r[u] * n_nodes_u];
-        const double * restrict row_c2 = &subdist[child2_r[u] * n_nodes_u];
-        double * restrict row_u = &subdist[u * n_nodes_u];
+        const double * restrict row_c1 = &subdist[(size_t)child1_r[u] * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)child2_r[u] * n_nodes_u];
+        double * restrict row_u = &subdist[(size_t)u * n_nodes_u];
         for (int32_t v_node = 0; v_node < u; ++v_node) {
             row_u[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
         }
         for (int32_t v_node = 0; v_node < u; ++v_node) {
-            subdist[v_node * n_nodes_u + u] = row_u[v_node];
+            subdist[(size_t)v_node * n_nodes_u + u] = row_u[v_node];
         }
     }
     {
-        const double * restrict row_c0 = &subdist[root_u_c0 * n_nodes_u];
-        const double * restrict row_c1 = &subdist[root_u_c1 * n_nodes_u];
-        const double * restrict row_c2 = &subdist[root_u_c2 * n_nodes_u];
-        double * restrict row_r = &subdist[root_u * n_nodes_u];
+        const double * restrict row_c0 = &subdist[(size_t)root_u_c0 * n_nodes_u];
+        const double * restrict row_c1 = &subdist[(size_t)root_u_c1 * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)root_u_c2 * n_nodes_u];
+        double * restrict row_r = &subdist[(size_t)root_u * n_nodes_u];
         int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
         for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
             int32_t v_node = dfs_order[idx];
@@ -797,16 +521,16 @@ void calculate_discrete_gradient_full_c(
             row_r[v_node] = 0.5 * (row_c0[v_node] + row_c1[v_node]);
         }
         for (int32_t v_node = 0; v_node < root_u; ++v_node) {
-            subdist[v_node * n_nodes_u + root_u] = row_r[v_node];
+            subdist[(size_t)v_node * n_nodes_u + root_u] = row_r[v_node];
         }
     }
     for (int32_t p = root_u - 1; p >= n_leaves; --p) {
         int32_t g = parent_u[p];
         int32_t c1 = child1_r[p], c2 = child2_r[p];
-        const double * restrict row_c1 = &subdist[c1 * n_nodes_u];
-        const double * restrict row_c2 = &subdist[c2 * n_nodes_u];
-        const double * restrict row_g = &subdist[g * n_nodes_u];
-        double * restrict row_p = &subdist[p * n_nodes_u];
+        const double * restrict row_c1 = &subdist[(size_t)c1 * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
+        const double * restrict row_g = &subdist[(size_t)g * n_nodes_u];
+        double * restrict row_p = &subdist[(size_t)p * n_nodes_u];
 
         int32_t end1 = tin[c1] + sub_size[c1];
         for (int32_t idx = tin[c1]; idx < end1; ++idx) {
@@ -815,7 +539,7 @@ void calculate_discrete_gradient_full_c(
         }
         for (int32_t idx = tin[c1]; idx < end1; ++idx) {
             int32_t v_node = dfs_order[idx];
-            subdist[v_node * n_nodes_u + p] = row_p[v_node];
+            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
         }
         int32_t end2 = tin[c2] + sub_size[c2];
         for (int32_t idx = tin[c2]; idx < end2; ++idx) {
@@ -824,27 +548,25 @@ void calculate_discrete_gradient_full_c(
         }
         for (int32_t idx = tin[c2]; idx < end2; ++idx) {
             int32_t v_node = dfs_order[idx];
-            subdist[v_node * n_nodes_u + p] = row_p[v_node];
+            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
         }
     }
-    for (int32_t i = 0; i < n_nodes_u; ++i) subdist[i * n_nodes_u + i] = 0.0;
+    for (int32_t i = 0; i < n_nodes_u; ++i) subdist[(size_t)i * n_nodes_u + i] = 0.0;
 
     for (int32_t u = n_leaves; u <= root_u; ++u) {
         int32_t n0 = adj_u[3 * u + 0];
         int32_t n1 = adj_u[3 * u + 1];
         int32_t n2 = adj_u[3 * u + 2];
-        nd_u[3 * u + 0] = subdist[n1 * n_nodes_u + n2];
-        nd_u[3 * u + 1] = subdist[n0 * n_nodes_u + n2];
-        nd_u[3 * u + 2] = subdist[n0 * n_nodes_u + n1];
+        nd_u[3 * u + 0] = subdist[(size_t)n1 * n_nodes_u + n2];
+        nd_u[3 * u + 1] = subdist[(size_t)n0 * n_nodes_u + n2];
+        nd_u[3 * u + 2] = subdist[(size_t)n0 * n_nodes_u + n1];
     }
 
-    memset(delta_full_out, 0, (size_t)(n_pairs * max_cols) * sizeof(double));
     for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
-
     for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
         int32_t tree_root = v_map[v_index];
         int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
-        const double * restrict row_root = &subdist[tree_root * n_nodes_u];
+        const double * restrict row_root = &subdist[(size_t)tree_root * n_nodes_u];
 
         int32_t other0 = -1, other1 = -1;
         for (int32_t k = 0; k < 3; ++k) {
@@ -861,11 +583,225 @@ void calculate_discrete_gradient_full_c(
 
             run_half_tree_dfs(
                 other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                row_root, &subdist[other1 * n_nodes_u], edge_delta
+                row_root, &subdist[(size_t)other1 * n_nodes_u], edge_delta
             );
             run_half_tree_dfs(
                 other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
-                row_root, &subdist[other0 * n_nodes_u], edge_delta
+                row_root, &subdist[(size_t)other0 * n_nodes_u], edge_delta
+            );
+
+            int32_t row_idx = v_index - 1;
+            double * restrict out_row = &delta_out[(size_t)row_idx * max_cols];
+            for (int32_t j = 0; j < row_idx; ++j) {
+                out_row[j] = edge_delta[dest_row[j]];
+            }
+        }
+        int32_t m_active = n_leaves + (n_leaves - 1 - v_index);
+        dest_row[min_leaf[m_active]] = m_active;
+    }
+}
+
+/* ============================================================================
+ * 2. Full 0 <= j <= 2i Discrete Gradient (shape: (N-1) x (2N-3), cherry-first 0 <= v[i] <= i)
+ * ============================================================================ */
+void calculate_discrete_gradient_full_c(
+    const int64_t * restrict v,
+    const double * restrict D,
+    int32_t n_leaves,
+    double * restrict delta_full_out
+) {
+    if (n_leaves < 4 || !v || !D || !delta_full_out) return;
+    const int32_t n_pairs = n_leaves - 1;
+    const int32_t max_cols = 2 * n_pairs - 1;
+    memset(delta_full_out, 0, (size_t)n_pairs * (size_t)max_cols * sizeof(double));
+
+    for (int32_t i = 0; i < n_pairs; ++i) {
+        if (v[i] < 0 || v[i] > i) return;
+    }
+    if (ensure_workspace(n_leaves) != 0) return;
+
+    const int32_t n_nodes_r = 2 * n_leaves - 1;
+    const int32_t n_nodes_u = 2 * n_leaves - 2;
+    const int32_t root_u = n_nodes_u - 1;
+
+    int32_t *ptr = g_iwork;
+    int32_t *child1_r = ptr; ptr += n_nodes_r;
+    int32_t *child2_r = ptr; ptr += n_nodes_r;
+    int32_t *parents_uf = ptr; ptr += n_nodes_r;
+    int32_t *min_leaf = ptr; ptr += n_nodes_r;
+    int32_t *v_map = ptr; ptr += n_leaves;
+    int32_t *dest_row = ptr; ptr += n_leaves;
+    int32_t *parent_u = ptr; ptr += n_nodes_u;
+    int32_t *sub_size = ptr; ptr += n_nodes_u;
+    int32_t *tin = ptr; ptr += n_nodes_u;
+    int32_t *dfs_order = ptr; ptr += n_nodes_u;
+    int32_t *adj_u = ptr; ptr += (size_t)n_nodes_u * 3;
+
+    double *dptr = g_dwork;
+    double *subdist = dptr; dptr += (size_t)n_nodes_u * n_nodes_u;
+    double *nd_u = dptr; dptr += (size_t)n_nodes_u * 3;
+    double *edge_delta = dptr; dptr += n_nodes_u;
+
+    for (int32_t x = 0; x < n_leaves; ++x) {
+        parents_uf[x] = x;
+        min_leaf[x] = x;
+    }
+    for (int32_t k = 0; k < n_pairs; ++k) {
+        int32_t i = n_pairs - 1 - k;
+        int32_t m = n_leaves + k;
+        int32_t x = (int32_t)v[i];
+        int32_t y = i + 1;
+        int32_t c1 = parents_uf[y];
+        int32_t c2 = parents_uf[x];
+        child1_r[m] = c1;
+        child2_r[m] = c2;
+        min_leaf[m] = x;
+        v_map[y] = c1;
+        parents_uf[x] = m;
+    }
+
+    int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
+    int32_t other_root_child = (rc1 < rc2) ? rc1 : rc2;
+    int32_t root_u_c0 = child1_r[root_u];
+    int32_t root_u_c1 = child2_r[root_u];
+    int32_t root_u_c2 = other_root_child;
+
+    for (int32_t u = 0; u < n_leaves; ++u) sub_size[u] = 1;
+    for (int32_t u = n_leaves; u < root_u; ++u) {
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        parent_u[c1] = u; parent_u[c2] = u;
+        sub_size[u] = 1 + sub_size[c1] + sub_size[c2];
+        adj_u[3 * u + 0] = c1; adj_u[3 * u + 1] = c2;
+    }
+    parent_u[root_u_c0] = root_u;
+    parent_u[root_u_c1] = root_u;
+    parent_u[root_u_c2] = root_u;
+    parent_u[root_u] = -1;
+
+    for (int32_t u = 0; u < n_leaves; ++u) {
+        adj_u[3 * u + 0] = parent_u[u];
+        adj_u[3 * u + 1] = -1;
+        adj_u[3 * u + 2] = -1;
+    }
+    for (int32_t u = n_leaves; u < root_u; ++u) adj_u[3 * u + 2] = parent_u[u];
+    adj_u[3 * root_u + 0] = root_u_c0;
+    adj_u[3 * root_u + 1] = root_u_c1;
+    adj_u[3 * root_u + 2] = root_u_c2;
+
+    tin[root_u] = 0;
+    tin[root_u_c0] = 1;
+    tin[root_u_c1] = 1 + sub_size[root_u_c0];
+    tin[root_u_c2] = 1 + sub_size[root_u_c0] + sub_size[root_u_c1];
+    for (int32_t u = root_u - 1; u >= n_leaves; --u) {
+        int32_t c1 = child1_r[u], c2 = child2_r[u];
+        tin[c1] = tin[u] + 1;
+        tin[c2] = tin[u] + 1 + sub_size[c1];
+    }
+    for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
+
+    for (int32_t i = 0; i < n_leaves; ++i) {
+        memcpy(&subdist[(size_t)i * n_nodes_u], &D[(size_t)i * n_leaves], (size_t)n_leaves * sizeof(double));
+    }
+    for (int32_t u = n_leaves; u < root_u; ++u) {
+        const double * restrict row_c1 = &subdist[(size_t)child1_r[u] * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)child2_r[u] * n_nodes_u];
+        double * restrict row_u = &subdist[(size_t)u * n_nodes_u];
+        for (int32_t v_node = 0; v_node < u; ++v_node) {
+            row_u[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
+        }
+        for (int32_t v_node = 0; v_node < u; ++v_node) {
+            subdist[(size_t)v_node * n_nodes_u + u] = row_u[v_node];
+        }
+    }
+    {
+        const double * restrict row_c0 = &subdist[(size_t)root_u_c0 * n_nodes_u];
+        const double * restrict row_c1 = &subdist[(size_t)root_u_c1 * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)root_u_c2 * n_nodes_u];
+        double * restrict row_r = &subdist[(size_t)root_u * n_nodes_u];
+        int32_t end0 = tin[root_u_c0] + sub_size[root_u_c0];
+        for (int32_t idx = tin[root_u_c0]; idx < end0; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            row_r[v_node] = 0.5 * (row_c1[v_node] + row_c2[v_node]);
+        }
+        int32_t end1 = tin[root_u_c1] + sub_size[root_u_c1];
+        for (int32_t idx = tin[root_u_c1]; idx < end1; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c2[v_node]);
+        }
+        int32_t end2 = tin[root_u_c2] + sub_size[root_u_c2];
+        for (int32_t idx = tin[root_u_c2]; idx < end2; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            row_r[v_node] = 0.5 * (row_c0[v_node] + row_c1[v_node]);
+        }
+        for (int32_t v_node = 0; v_node < root_u; ++v_node) {
+            subdist[(size_t)v_node * n_nodes_u + root_u] = row_r[v_node];
+        }
+    }
+    for (int32_t p = root_u - 1; p >= n_leaves; --p) {
+        int32_t g = parent_u[p];
+        int32_t c1 = child1_r[p], c2 = child2_r[p];
+        const double * restrict row_c1 = &subdist[(size_t)c1 * n_nodes_u];
+        const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
+        const double * restrict row_g = &subdist[(size_t)g * n_nodes_u];
+        double * restrict row_p = &subdist[(size_t)p * n_nodes_u];
+
+        int32_t end1 = tin[c1] + sub_size[c1];
+        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            row_p[v_node] = 0.5 * (row_c2[v_node] + row_g[v_node]);
+        }
+        for (int32_t idx = tin[c1]; idx < end1; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+        }
+        int32_t end2 = tin[c2] + sub_size[c2];
+        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            row_p[v_node] = 0.5 * (row_c1[v_node] + row_g[v_node]);
+        }
+        for (int32_t idx = tin[c2]; idx < end2; ++idx) {
+            int32_t v_node = dfs_order[idx];
+            subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
+        }
+    }
+    for (int32_t i = 0; i < n_nodes_u; ++i) subdist[(size_t)i * n_nodes_u + i] = 0.0;
+
+    for (int32_t u = n_leaves; u <= root_u; ++u) {
+        int32_t n0 = adj_u[3 * u + 0];
+        int32_t n1 = adj_u[3 * u + 1];
+        int32_t n2 = adj_u[3 * u + 2];
+        nd_u[3 * u + 0] = subdist[(size_t)n1 * n_nodes_u + n2];
+        nd_u[3 * u + 1] = subdist[(size_t)n0 * n_nodes_u + n2];
+        nd_u[3 * u + 2] = subdist[(size_t)n0 * n_nodes_u + n1];
+    }
+
+    for (int32_t j = 0; j < n_leaves; ++j) dest_row[j] = j;
+
+    for (int32_t v_index = n_leaves - 1; v_index >= 2; --v_index) {
+        int32_t tree_root = v_map[v_index];
+        int32_t parent = (tree_root == root_u) ? other_root_child : parent_u[tree_root];
+        const double * restrict row_root = &subdist[(size_t)tree_root * n_nodes_u];
+
+        int32_t other0 = -1, other1 = -1;
+        for (int32_t k = 0; k < 3; ++k) {
+            int32_t nb_node = adj_u[3 * parent + k];
+            if (nb_node != -1 && nb_node != tree_root) {
+                if (other0 == -1) other0 = nb_node;
+                else other1 = nb_node;
+            }
+        }
+        if (other0 != -1) {
+            edge_delta[(parent_u[tree_root] == parent) ? tree_root : parent] = 0.0;
+            edge_delta[(parent_u[other0]    == parent) ? other0    : parent] = 0.0;
+            edge_delta[(parent_u[other1]    == parent) ? other1    : parent] = 0.0;
+
+            run_half_tree_dfs(
+                other0, other1, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[(size_t)other1 * n_nodes_u], edge_delta
+            );
+            run_half_tree_dfs(
+                other1, other0, parent, n_leaves, n_nodes_u, adj_u, parent_u, sub_size, nd_u,
+                row_root, &subdist[(size_t)other0 * n_nodes_u], edge_delta
             );
 
             int32_t i = v_index - 1;
@@ -1407,7 +1343,7 @@ double optimize_fastme_bme_c(
         for (int32_t u = 0; u < n_nodes_u; ++u) dfs_order[tin[u]] = u;
 
         for (int32_t i = 0; i < n_leaves; ++i) {
-            memcpy(&subdist[i * n_nodes_u], &D[i * n_leaves], (size_t)n_leaves * sizeof(double));
+            memcpy(&subdist[(size_t)i * n_nodes_u], &D[(size_t)i * n_leaves], (size_t)n_leaves * sizeof(double));
         }
         for (int32_t idx = ord_len - 1; idx >= 1; --idx) {
             int32_t u = q_prev[idx];
@@ -1431,10 +1367,10 @@ double optimize_fastme_bme_c(
             }
         }
         {
-            const double * restrict row_c0 = &subdist[r_c0 * n_nodes_u];
-            const double * restrict row_c1 = &subdist[r_c1 * n_nodes_u];
-            const double * restrict row_c2 = &subdist[r_c2 * n_nodes_u];
-            double * restrict row_r = &subdist[root_u * n_nodes_u];
+            const double * restrict row_c0 = &subdist[(size_t)r_c0 * n_nodes_u];
+            const double * restrict row_c1 = &subdist[(size_t)r_c1 * n_nodes_u];
+            const double * restrict row_c2 = &subdist[(size_t)r_c2 * n_nodes_u];
+            double * restrict row_r = &subdist[(size_t)root_u * n_nodes_u];
             int32_t end0 = tin[r_c0] + sub_size[r_c0];
             for (int32_t idx = tin[r_c0]; idx < end0; ++idx) {
                 int32_t v_node = dfs_order[idx];
@@ -1451,7 +1387,7 @@ double optimize_fastme_bme_c(
                 row_r[v_node] = 0.5 * (row_c0[v_node] + row_c1[v_node]);
             }
             for (int32_t v_node = 0; v_node < root_u; ++v_node) {
-                subdist[v_node * n_nodes_u + root_u] = row_r[v_node];
+                subdist[(size_t)v_node * n_nodes_u + root_u] = row_r[v_node];
             }
         }
         for (int32_t idx = 1; idx < ord_len; ++idx) {
@@ -1459,10 +1395,10 @@ double optimize_fastme_bme_c(
             if (p < n_leaves) continue;
             int32_t g = parent_u[p];
             int32_t c1 = child1_r[p], c2 = child2_r[p];
-            const double * restrict row_c1 = &subdist[c1 * n_nodes_u];
-            const double * restrict row_c2 = &subdist[c2 * n_nodes_u];
-            const double * restrict row_g = &subdist[g * n_nodes_u];
-            double * restrict row_p = &subdist[p * n_nodes_u];
+            const double * restrict row_c1 = &subdist[(size_t)c1 * n_nodes_u];
+            const double * restrict row_c2 = &subdist[(size_t)c2 * n_nodes_u];
+            const double * restrict row_g = &subdist[(size_t)g * n_nodes_u];
+            double * restrict row_p = &subdist[(size_t)p * n_nodes_u];
             int32_t end1 = tin[c1] + sub_size[c1];
             for (int32_t i = tin[c1]; i < end1; ++i) {
                 int32_t v_node = dfs_order[i];
@@ -1470,7 +1406,7 @@ double optimize_fastme_bme_c(
             }
             for (int32_t i = tin[c1]; i < end1; ++i) {
                 int32_t v_node = dfs_order[i];
-                subdist[v_node * n_nodes_u + p] = row_p[v_node];
+                subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
             }
             int32_t end2 = tin[c2] + sub_size[c2];
             for (int32_t i = tin[c2]; i < end2; ++i) {
@@ -1479,23 +1415,23 @@ double optimize_fastme_bme_c(
             }
             for (int32_t i = tin[c2]; i < end2; ++i) {
                 int32_t v_node = dfs_order[i];
-                subdist[v_node * n_nodes_u + p] = row_p[v_node];
+                subdist[(size_t)v_node * n_nodes_u + p] = row_p[v_node];
             }
         }
-        for (int32_t i = 0; i < n_nodes_u; ++i) subdist[i * n_nodes_u + i] = 0.0;
+        for (int32_t i = 0; i < n_nodes_u; ++i) subdist[(size_t)i * n_nodes_u + i] = 0.0;
 
         for (int32_t u = n_leaves; u <= root_u; ++u) {
             int32_t n0 = adj_out[3 * u + 0];
             int32_t n1 = adj_out[3 * u + 1];
             int32_t n2 = adj_out[3 * u + 2];
-            nd_u[3 * u + 0] = subdist[n1 * n_nodes_u + n2];
-            nd_u[3 * u + 1] = subdist[n0 * n_nodes_u + n2];
-            nd_u[3 * u + 2] = subdist[n0 * n_nodes_u + n1];
+            nd_u[3 * u + 0] = subdist[(size_t)n1 * n_nodes_u + n2];
+            nd_u[3 * u + 1] = subdist[(size_t)n0 * n_nodes_u + n2];
+            nd_u[3 * u + 2] = subdist[(size_t)n0 * n_nodes_u + n1];
         }
 
         curr_L = 0.0;
         for (int32_t x = 0; x < n_leaves; ++x) {
-            curr_L += subdist[x * n_nodes_u + parent_u[x]];
+            curr_L += subdist[(size_t)x * n_nodes_u + parent_u[x]];
         }
         curr_L *= 0.5;
         double eps_tol = 1e-12 * ((curr_L >= 0.0 ? curr_L : -curr_L) + 1.0);
@@ -1514,8 +1450,8 @@ double optimize_fastme_bme_c(
                 }
             }
             for (int32_t u = 0; u < root_u; ++u) edge_delta[u] = 0.0;
-            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta);
-            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[u_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[(size_t)u_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta);
 
             for (int32_t dest_u = 0; dest_u < root_u; ++dest_u) {
                 if (edge_delta[dest_u] < best_delta) {
@@ -1531,8 +1467,8 @@ double optimize_fastme_bme_c(
             int32_t anchor = u;
             int32_t other0 = child1_r[u], other1 = child2_r[u];
             for (int32_t w = 0; w < root_u; ++w) edge_delta[w] = 0.0;
-            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other1 * n_nodes_u], edge_delta);
-            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[p_prune * n_nodes_u], &subdist[other0 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other0, other1, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other1 * n_nodes_u], edge_delta);
+            run_half_tree_dfs(other1, other0, anchor, n_leaves, n_nodes_u, adj_out, parent_u, sub_size, nd_u, &subdist[(size_t)p_prune * n_nodes_u], &subdist[(size_t)other0 * n_nodes_u], edge_delta);
 
             int32_t end_u = tin[u] + sub_size[u];
             for (int32_t idx = tin[u] + 1; idx < end_u; ++idx) {
@@ -1650,6 +1586,7 @@ double optimize_phylo2vec_bme_c(
     int32_t has_saved_best = 0;
     int32_t flipped_already = 0;
     int32_t escape_attempts = 0;
+    int32_t adj_synced = 0;
 
     for (int32_t iter = 0; iter < 500; ++iter) {
         int32_t has_gt_i = 0;
@@ -1830,6 +1767,7 @@ double optimize_phylo2vec_bme_c(
         }
         curr_L *= 0.5;
         n_evals++;
+        adj_synced = 1;
         double eps_tol = 1e-12 * ((curr_L >= 0.0 ? curr_L : -curr_L) + 1.0);
 
         int32_t n_imp = 0, n_near = 0;
@@ -2023,12 +1961,15 @@ double optimize_phylo2vec_bme_c(
                 v_pi[best_r] = row_best_j[best_r];
                 curr_L += single_best_gain;
             }
+            adj_synced = 0;
             continue;
         }
 
         if (best_vmap_prune != -1) {
             apply_unrooted_spr(adj_u, best_vmap_prune, best_vmap_anchor, best_vmap_dest, parent_u[best_vmap_dest]);
             encode_unrooted_to_v_c(adj_u, n_leaves, v_pi);
+            curr_L += best_vmap_extra_delta;
+            adj_synced = 1;
             flipped_already = 0;
             continue;
         }
@@ -2037,6 +1978,7 @@ double optimize_phylo2vec_bme_c(
             flipped_already = 1;
             relabel_from_rooted_tree(child1_r, child2_r, min_leaf, n_leaves, 1, v_pi, perm, relabel_scratch);
             perm_dirty = 1;
+            adj_synced = 0;
             continue;
         }
 
@@ -2091,6 +2033,8 @@ double optimize_phylo2vec_bme_c(
         if (best_prune != -1) {
             apply_unrooted_spr(adj_u, best_prune, best_anchor, best_dest_u, parent_u[best_dest_u]);
             encode_unrooted_to_v_c(adj_u, n_leaves, v_pi);
+            curr_L += best_rem_delta;
+            adj_synced = 1;
             flipped_already = 0;
             continue;
         }
@@ -2102,7 +2046,7 @@ double optimize_phylo2vec_bme_c(
             has_saved_best = 1;
         }
 
-        if (n_near >= 2 && escape_attempts < 2) {
+        if (n_near >= 2 && escape_attempts < 2 && iter + 1 < 500) {
             escape_attempts++;
             for (int32_t a = 0; a < n_near / 2; ++a) {
                 int32_t tr = near_rows[a]; near_rows[a] = near_rows[n_near - 1 - a]; near_rows[n_near - 1 - a] = tr;
@@ -2127,6 +2071,7 @@ double optimize_phylo2vec_bme_c(
             if (idx1 < n_near && near_val[0] + near_val[idx1] < 0.02) {
                 v_pi[near_rows[0]] = near_j[0];
                 v_pi[near_rows[idx1]] = near_j[idx1];
+                adj_synced = 0;
                 flipped_already = 0;
                 continue;
             }
@@ -2136,8 +2081,82 @@ double optimize_phylo2vec_bme_c(
             curr_L = best_saved_L;
             memcpy(adj_u, saved_adj, (size_t)(3 * n_nodes_u) * sizeof(int32_t));
             memcpy(perm, saved_perm, (size_t)n_leaves * sizeof(int32_t));
+            adj_synced = 1;
         }
         break;
+    }
+
+    if (!adj_synced) {
+        int32_t has_gt_i = 0;
+        for (int32_t i = 1; i < n_pairs; ++i) {
+            if (v_pi[i] > i) { has_gt_i = 1; break; }
+        }
+        if (!has_gt_i) {
+            for (int32_t x = 0; x < n_leaves; ++x) parents_uf[x] = x;
+            for (int32_t k = 0; k < n_pairs; ++k) {
+                int32_t i = n_pairs - 1 - k;
+                int32_t m = n_leaves + k;
+                int32_t x = (int32_t)v_pi[i];
+                int32_t y = i + 1;
+                child1_r[m] = parents_uf[y];
+                child2_r[m] = parents_uf[x];
+                parents_uf[x] = m;
+            }
+        } else {
+            decode_v_to_pairs_fast(v_pi, n_pairs, pairs);
+            for (int32_t i = 0; i < n_nodes_r; ++i) parents_uf[i] = i;
+            int32_t next_parent = n_leaves;
+            for (int32_t i = 0; i < n_pairs; ++i) {
+                int32_t p1 = pairs[2 * i], p2 = pairs[2 * i + 1];
+                while (parents_uf[p1] != p1) { parents_uf[p1] = parents_uf[parents_uf[p1]]; p1 = parents_uf[p1]; }
+                while (parents_uf[p2] != p2) { parents_uf[p2] = parents_uf[parents_uf[p2]]; p2 = parents_uf[p2]; }
+                child1_r[next_parent] = p2;
+                child2_r[next_parent] = p1;
+                parents_uf[p1] = next_parent;
+                parents_uf[p2] = next_parent;
+                next_parent++;
+            }
+        }
+        int32_t rc1 = child1_r[n_nodes_r - 1], rc2 = child2_r[n_nodes_r - 1];
+        int32_t other_root_child = (rc1 < rc2) ? rc1 : rc2;
+        int32_t root_u_c0 = child1_r[root_u];
+        int32_t root_u_c1 = child2_r[root_u];
+        int32_t root_u_c2 = other_root_child;
+        for (int32_t u = n_leaves; u < root_u; ++u) {
+            int32_t c1 = child1_r[u], c2 = child2_r[u];
+            parent_u[c1] = u; parent_u[c2] = u;
+            adj_u[3 * u + 0] = c1; adj_u[3 * u + 1] = c2;
+        }
+        parent_u[root_u_c0] = root_u;
+        parent_u[root_u_c1] = root_u;
+        parent_u[root_u_c2] = root_u;
+        parent_u[root_u] = -1;
+        for (int32_t u = 0; u < n_leaves; ++u) {
+            adj_u[3 * u + 0] = parent_u[u];
+            adj_u[3 * u + 1] = -1;
+            adj_u[3 * u + 2] = -1;
+        }
+        for (int32_t u = n_leaves; u < root_u; ++u) adj_u[3 * u + 2] = parent_u[u];
+        adj_u[3 * root_u + 0] = root_u_c0;
+        adj_u[3 * root_u + 1] = root_u_c1;
+        adj_u[3 * root_u + 2] = root_u_c2;
+
+        if (perm_dirty) {
+            for (int32_t i = 0; i < n_leaves; ++i) {
+                const double * restrict d_row = &D[(size_t)perm[i] * n_leaves];
+                double * restrict dp_row = &D_perm[(size_t)i * n_leaves];
+                for (int32_t j = 0; j < n_leaves; ++j) {
+                    dp_row[j] = d_row[perm[j]];
+                }
+            }
+            perm_dirty = 0;
+        }
+        curr_L = evaluate_bme_length_fast(v_pi, D_perm, n_leaves, eval_iwork, eval_dwork);
+        if (has_saved_best && best_saved_L < curr_L) {
+            curr_L = best_saved_L;
+            memcpy(adj_u, saved_adj, (size_t)(3 * n_nodes_u) * sizeof(int32_t));
+            memcpy(perm, saved_perm, (size_t)n_leaves * sizeof(int32_t));
+        }
     }
 
     for (int32_t u = 0; u < n_nodes_u; ++u) {
@@ -2510,6 +2529,7 @@ double optimize_phylo2vec_bme_minibatch_c(
     uint8_t *is_cond = (uint8_t *)malloc((size_t)n_nodes_r * sizeof(uint8_t));
     int64_t *v_eff = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
     int64_t *v_eff_opt = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
+    int64_t *v_tmp = (int64_t *)malloc((size_t)n_pairs * sizeof(int64_t));
     int32_t *super_map = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
     int32_t *leaf_to_super = (int32_t *)malloc((size_t)n_leaves * sizeof(int32_t));
     double *omega = (double *)malloc((size_t)n_leaves * sizeof(double));
@@ -2522,14 +2542,15 @@ double optimize_phylo2vec_bme_minibatch_c(
         int32_t evals = 0;
         double ms = 0.0;
         optimize_phylo2vec_bme_c(v_eff, D_eff, n_eff, v_eff_opt, &evals, &ms);
-        expand_condensed_tree_to_v_c(v_out, n_leaves, v_eff_opt, n_eff, super_map, v_out);
+        memcpy(v_tmp, v_out, (size_t)n_pairs * sizeof(int64_t));
+        expand_condensed_tree_to_v_c(v_tmp, n_leaves, v_eff_opt, n_eff, super_map, v_out);
     }
 
     if (ensure_workspace(n_leaves) != 0) return -1.0;
     double final_L = evaluate_bme_length_fast(v_out, D, n_leaves, g_iwork, g_dwork);
 
     free(D_eff); free(omega); free(leaf_to_super); free(super_map);
-    free(v_eff_opt); free(v_eff); free(is_cond);
+    free(v_tmp); free(v_eff_opt); free(v_eff); free(is_cond);
     return final_L;
 }
 
