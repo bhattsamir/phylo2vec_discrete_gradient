@@ -1,7 +1,7 @@
 # Handoff for Neil Scheidwasser: Qwen-14B Weight Phylogeny, Mechanistic Circuit Discovery & Clade-Surgical Model Merging
 
 **Date**: November 4, 2026  
-**Code & Logs Directory**: [`qwen_tree_surgery/`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/)  
+**Code & Logs Directory**: [`qwen_tree_surgery/`](qwen_tree_surgery/)  
 **Cached Checkpoints & Binary Trees (Local Scratch)**: `/tmp/qwen_tree_exp/`
 
 ---
@@ -43,7 +43,7 @@ $$\text{MLP}_l(x) = W_{\text{down}}^{(l)} \Big( \text{SiLU}\big(W_{\text{gate}}^
 where $W_{\text{gate}}^{(l)}, W_{\text{up}}^{(l)} \in \mathbb{R}^{13824 \times 5120}$ and $W_{\text{down}}^{(l)} \in \mathbb{R}^{5120 \times 13824}$.
 - **Taxon $i \in \{0, \dots, 13823\}$**: corresponds to the $i$-th intermediate neuron, whose functional unit across the three matrices is the coupled triple:
   $$\mathcal{N}_{l,i} = \Big( W_{\text{gate}}^{(l)}[i, :],\; W_{\text{up}}^{(l)}[i, :],\; W_{\text{down}}^{(l)}[:, i] \Big)$$
-- **Base Phylogeny $T_{\text{Base}}^{(l)}$**: Using the $L_2$-normalized output write-vectors $\hat{w}_i^{(l,\text{Base})} = W_{\text{down}}^{(l,\text{Base})}[:, i] / \|W_{\text{down}}^{(l,\text{Base})}[:, i]\|_2 \in \mathbb{S}^{5119}$ and pairwise cosine distance $D_{\text{Base}}(i, j) = 1 - \langle \hat{w}_i^{(l,\text{Base})}, \hat{w}_j^{(l,\text{Base})} \rangle$, we reconstruct the rooted binary BME tree $T_{\text{Base}}^{(l)}$ (`13,824` leaves, `27,647` nodes) via GPU hierarchical NJ + 20-pass minibatch BME discrete-gradient refinement ([`qwen_clade_export_gpu.cu`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/qwen_clade_export_gpu.cu)).
+- **Base Phylogeny $T_{\text{Base}}^{(l)}$**: Using the $L_2$-normalized output write-vectors $\hat{w}_i^{(l,\text{Base})} = W_{\text{down}}^{(l,\text{Base})}[:, i] / \|W_{\text{down}}^{(l,\text{Base})}[:, i]\|_2 \in \mathbb{S}^{5119}$ and pairwise cosine distance $D_{\text{Base}}(i, j) = 1 - \langle \hat{w}_i^{(l,\text{Base})}, \hat{w}_j^{(l,\text{Base})} \rangle$, we reconstruct the rooted binary BME tree $T_{\text{Base}}^{(l)}$ (`13,824` leaves, `27,647` nodes) via GPU hierarchical NJ + 20-pass minibatch BME discrete-gradient refinement ([`qwen_clade_export_gpu.cu`](qwen_tree_surgery/qwen_clade_export_gpu.cu)).
 - **Monophyletic Clade Partition**: We partition $T_{\text{Base}}^{(l)}$ top-down from the root, stopping whenever an internal node $u$ has $|L(u)| \le 192$ leaves. Across all 48 layers, this yields **`6,171` monophyletic clades** ($\approx 128.6$ clades per layer, mean size $\approx 107.5$ neurons).
 
 ### Step 2: Why the 4-Point Quartet Score Beats Euclidean Drift ($L_2$ / Cosine)
@@ -75,7 +75,7 @@ $$S_M(c) = \underbrace{\frac{1}{|L(u_c)|} \sum_{v \in T(u_c)} \Delta m_M(v)}_{\t
 ## 3. Complete Empirical Results
 
 ### Experiment A: Topological Conservation & Ultra-Sparse SPR Rewiring Across Qwen-14B
-*(Source: [`qwen_tree_surgery/qwen_tree_gpu.cu`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/qwen_tree_gpu.cu), logged in [`qwen_tree_surgery/results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/results.log))*
+*(Source: [`qwen_tree_surgery/qwen_tree_gpu.cu`](qwen_tree_surgery/qwen_tree_gpu.cu), logged in [`qwen_tree_surgery/results.log`](qwen_tree_surgery/results.log))*
 
 | Matrix / Layer Scope | Taxa $N$ | Tree Build Time | `Coder-14B` Mean $\cos$ | `Coder-14B` $\text{RF}_{\text{norm}}$ | `Coder-14B` Conserved Splits | `R1-Distill` Mean $\cos$ | `R1-Distill` $\text{RF}_{\text{norm}}$ | `R1-Distill` Conserved Splits |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -87,7 +87,7 @@ $$S_M(c) = \underbrace{\frac{1}{|L(u_c)|} \sum_{v \in T(u_c)} \Delta m_M(v)}_{\t
 ---
 
 ### Experiment B: 48-Layer Clade Knock-Out (`15%` Budget & Ultra-Sparse `Top 5, 10, 25, 50, 100` Clades)
-*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/competitors_results.log))*
+*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](qwen_tree_surgery/competitors_results.log))*
 
 #### B.1. 15% Clade Knock-Out on `Qwen2.5-Coder-14B` (`~925 / 6,171` clades reverted to Base)
 
@@ -109,7 +109,7 @@ $$S_M(c) = \underbrace{\frac{1}{|L(u_c)|} \sum_{v \in T(u_c)} \Delta m_M(v)}_{\t
 ---
 
 ### Experiment C: Global & Per-Layer Stratified Retention vs. Competitors (`85%`, `70%`, `50%` Kept)
-*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/competitors_results.log))*
+*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](qwen_tree_surgery/competitors_results.log))*
 
 To ensure a 100% fair comparison where cross-layer norm differences cannot bias any baseline, **Table 3** forces **every single layer `L00–L47` to keep the exact same $k\%$ neuron budget**:
 
@@ -129,7 +129,7 @@ To ensure a 100% fair comparison where cross-layer norm differences cannot bias 
 ---
 
 ### Experiment D: Cross-Specialist Model Merging vs. `TIES-Merging`, `Spherical k-Means`, & `Frobenius-Diff`
-*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/competitors_results.log))*
+*(Sources: [`qwen_tree_surgery/definitive_proof_results.log`](qwen_tree_surgery/definitive_proof_results.log) and [`qwen_tree_surgery/competitors_results.log`](qwen_tree_surgery/competitors_results.log))*
 
 We graft `DeepSeek-R1-Distill-Qwen-14B` reasoning task vectors into `Qwen2.5-Coder-14B` and evaluate both **Code preservation** (`Code KL(Coder || Merged)` and live Python execution `Pass@1`) and **Reasoning transfer** (`R1 Native CoT Perplexity` and `KL(R1 || Merged)`):
 
@@ -168,20 +168,20 @@ We graft `DeepSeek-R1-Distill-Qwen-14B` reasoning task vectors into `Qwen2.5-Cod
 
 ## 5. File Map & Reproduction Guide
 
-All source code and logs are tracked in [`qwen_tree_surgery/`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/):
+All source code and logs are tracked in [`qwen_tree_surgery/`](qwen_tree_surgery/):
 
 | File | Description |
 | :--- | :--- |
-| [`qwen_tree_surgery/qwen_tree_gpu.cu`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/qwen_tree_gpu.cu) | Standalone CUDA BME tree builder & SPR rewiring analyzer for 13 sampled MLP layers (`13,824`), Vocabulary (`152,064`), All-Attention (`245,760`), and Full 48-Layer MLP (`663,552`). |
-| [`qwen_tree_surgery/qwen_clade_export_gpu.cu`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/qwen_clade_export_gpu.cu) | Reconstructs all 48 Base MLP trees (`48 x 13,824`), evolves them to `Coder-14B` and `R1-Distill-14B` via GPU SPR, partitions into `6,171` monophyletic clades, and exports `/tmp/qwen_tree_exp/clade_scores_48L.bin` in `72s`. |
-| [`qwen_tree_surgery/eval_clade_surgery.py`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/eval_clade_surgery.py) | Initial 48-layer clade knock-out (`15%`, `25%`), `50%` retention, and task-vector clade grafting evaluation script. |
-| [`qwen_tree_surgery/eval_definitive_proof.py`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/eval_definitive_proof.py) | Multi-budget knock-out (`10%, 15%, 20%`), retention curve (`85%, 70%, 50%`), and native R1 CoT task-vector grafting (`15%, 25%, 35%`) benchmark. |
-| [`qwen_tree_surgery/eval_competitors_and_top_clades.py`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/eval_competitors_and_top_clades.py) | Ultra-sparse exact clade knock-out (`Top 5, 10, 25, 50, 100` clades) + head-to-head competitor suite (`Spherical k-Means`, `TIES-Merging`, `DARE`, `3-Matrix Frobenius Norm`, `Cosine Drift`). |
-| [`qwen_tree_surgery/download_full_3models.py`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/download_full_3models.py) | Downloads full 48-layer checkpoints (`Base`, `Coder`, `R1`) into `/tmp/qwen_tree_exp/checkpoints/` and exports `.bf16` MLP matrices. |
-| [`qwen_tree_surgery/results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/results.log) | Full output of `qwen_tree_gpu` across all 48 layers, vocabulary (`152k`), attention (`245k`), and full MLP (`663k`). |
-| [`qwen_tree_surgery/clade_surgery_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/clade_surgery_results.log) | Output of `eval_clade_surgery.py`. |
-| [`qwen_tree_surgery/definitive_proof_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/definitive_proof_results.log) | Output of `eval_definitive_proof.py`. |
-| [`qwen_tree_surgery/competitors_results.log`](file:///home/sjbhatt/phylo2vec_discrete_gradient/qwen_tree_surgery/competitors_results.log) | Output of `eval_competitors_and_top_clades.py` (Tables 1–4). |
+| [`qwen_tree_surgery/qwen_tree_gpu.cu`](qwen_tree_surgery/qwen_tree_gpu.cu) | Standalone CUDA BME tree builder & SPR rewiring analyzer for 13 sampled MLP layers (`13,824`), Vocabulary (`152,064`), All-Attention (`245,760`), and Full 48-Layer MLP (`663,552`). |
+| [`qwen_tree_surgery/qwen_clade_export_gpu.cu`](qwen_tree_surgery/qwen_clade_export_gpu.cu) | Reconstructs all 48 Base MLP trees (`48 x 13,824`), evolves them to `Coder-14B` and `R1-Distill-14B` via GPU SPR, partitions into `6,171` monophyletic clades, and exports `/tmp/qwen_tree_exp/clade_scores_48L.bin` in `72s`. |
+| [`qwen_tree_surgery/eval_clade_surgery.py`](qwen_tree_surgery/eval_clade_surgery.py) | Initial 48-layer clade knock-out (`15%`, `25%`), `50%` retention, and task-vector clade grafting evaluation script. |
+| [`qwen_tree_surgery/eval_definitive_proof.py`](qwen_tree_surgery/eval_definitive_proof.py) | Multi-budget knock-out (`10%, 15%, 20%`), retention curve (`85%, 70%, 50%`), and native R1 CoT task-vector grafting (`15%, 25%, 35%`) benchmark. |
+| [`qwen_tree_surgery/eval_competitors_and_top_clades.py`](qwen_tree_surgery/eval_competitors_and_top_clades.py) | Ultra-sparse exact clade knock-out (`Top 5, 10, 25, 50, 100` clades) + head-to-head competitor suite (`Spherical k-Means`, `TIES-Merging`, `DARE`, `3-Matrix Frobenius Norm`, `Cosine Drift`). |
+| [`qwen_tree_surgery/download_full_3models.py`](qwen_tree_surgery/download_full_3models.py) | Downloads full 48-layer checkpoints (`Base`, `Coder`, `R1`) into `/tmp/qwen_tree_exp/checkpoints/` and exports `.bf16` MLP matrices. |
+| [`qwen_tree_surgery/results.log`](qwen_tree_surgery/results.log) | Full output of `qwen_tree_gpu` across all 48 layers, vocabulary (`152k`), attention (`245k`), and full MLP (`663k`). |
+| [`qwen_tree_surgery/clade_surgery_results.log`](qwen_tree_surgery/clade_surgery_results.log) | Output of `eval_clade_surgery.py`. |
+| [`qwen_tree_surgery/definitive_proof_results.log`](qwen_tree_surgery/definitive_proof_results.log) | Output of `eval_definitive_proof.py`. |
+| [`qwen_tree_surgery/competitors_results.log`](qwen_tree_surgery/competitors_results.log) | Output of `eval_competitors_and_top_clades.py` (Tables 1–4). |
 
 ### How to Run / Reproduce on Local Machine (or Gefion)
 1. **Python Environment**: Always use `/home/sjbhatt/venvs/vllm/bin/python3` (`torch 2.8.0+cu128`, `transformers 4.57.1`, `accelerate`, `safetensors`).
@@ -197,3 +197,4 @@ All source code and logs are tracked in [`qwen_tree_surgery/`](file:///home/sjbh
    ```bash
    CUDA_VISIBLE_DEVICES=0 /home/sjbhatt/venvs/vllm/bin/python3 qwen_tree_surgery/eval_competitors_and_top_clades.py
    ```
+
