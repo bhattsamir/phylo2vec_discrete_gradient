@@ -1,0 +1,31 @@
+# Build artifacts & binaries
+build/
+*.o
+*.so
+*.dylib
+*.a
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# LaTeX intermediates
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+
+# Large benchmark data & logs
+*.bin
+*.fa
+*.fasta
+*.tree
+*.nwk
+*.log
+.DS_Store
+
