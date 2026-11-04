@@ -1,0 +1,139 @@
+NOVELTY ASSESSMENT
+Reviewed 3 November 2026. This is a focused comparison with primary literature
+and the local implementation, not an exhaustive proof of priority.
+
+RECOMMENDED CENTRAL CLAIM
+
+We develop an exact BME coordinate evaluator and a parallel block-optimization
+formulation. A shared quadratic computation evaluates all valid coordinate
+changes. Applying it to an exactly condensed skeleton preserves the full-tree
+objective differences while reducing the size of the coordinate problem.
+
+The useful distinction is the combination of the evaluation algorithm, its
+parallel dependencies, and its exact block restriction. Exact BME itself,
+coordinate differences, relabeling, and fixed-clade reduction have precedents.
+The current evidence supports an algorithmic and systems contribution. It does
+not establish a new fundamental BME identity or a universal first claim.
+
+CLOSEST PRIOR WORK
+
+1. Phylo2Vec, Penn et al. (advance access 2024, journal volume 2025).
+   Section 1.3.2, Equation 4 and Algorithm 1 already define the neighbour
+   matrix, coordinate hill climbing, and ordered relabeling. The present
+   distinction is the shared BME-specific evaluator, not these definitions.
+   Primary full text: https://arxiv.org/html/2304.12693v3
+   Published version: https://doi.org/10.1093/sysbio/syae030
+
+2. GradME, Penn et al. (2023).
+   The Methods and supplementary continuous-objective derivation give an
+   expected BME objective and a cubic recurrence. Its exactness is not the
+   distinction. Here evaluation is specialized to a discrete tree and includes
+   the full coordinate range. Appendix A.4 now explains the vertex relation.
+   Primary full text: https://arxiv.org/html/2306.05739v2
+   Published version: https://doi.org/10.1093/gbe/evad213
+
+3. Hordijk and Gascuel (2005), and FastME 2.0 (2015).
+   Balanced subtree averages and exact SPR score propagation already permit
+   quadratic sweeps. Our coordinate mapping and parallel organization do not
+   improve that asymptotic order. They provide a different computational
+   interface and execution schedule, with a different candidate subset.
+   Primary text: https://doi.org/10.1093/bioinformatics/bti713
+   Primary text: https://pmc.ncbi.nlm.nih.gov/articles/PMC4576710/
+
+4. Haws, Hodge and Yoshida (2011).
+   Section 2.4 describes fixed-clade faces as affine images of smaller BME
+   polytopes. The condensation identity should be presented as the explicit
+   objective restriction used by our algorithm, not an unprecedented theorem.
+   Primary full text: https://arxiv.org/html/1004.2073v2#S2.SS4
+
+5. Tapo and Zhu (2026 preprint), scikit-bio BME.
+   Parallel array-based BME already exists. The preprint abstract, author
+   repository and official documentation identify taxon-addition construction
+   as its task. Our task evaluates rearrangements of an existing tree.
+   Read the primary abstract and implementation documentation. The full
+   preprint could not be retrieved, so its internal claims were not audited.
+   https://www.biorxiv.org/content/10.64898/2026.07.27.740982v1
+   https://github.com/qiyunzhu/skbio-bme-bench/
+   https://scikit.bio/docs/latest/generated/skbio.tree.bme.html
+
+6. Camerota Verdu et al. (2026).
+   Their method learns an SPR selection policy, with online search and
+   adaptation. This distinguishes search policy from the evaluation mechanism
+   developed here. Their use of a GPU also rules out casual claims to be the
+   first GPU-assisted BME search.
+   Primary full text: https://pmc.ncbi.nlm.nih.gov/articles/PMC12814993/
+
+IMPLEMENTATION EVIDENCE
+
+Source hashes and the reviewed revision are in before_manifest.json.
+Line numbers refer to those source files. No engine code was changed.
+
+- phylo2vec_fastme.c:607, calculate_discrete_gradient_full_c. Shared table
+  construction precedes coordinate-row evaluation. Calls at lines 798 and
+  802 traverse both half-trees. Lines 807-827 map regraft scores to the full
+  coordinate range, including the root boundary. This is the strongest
+  direct evidence for the complete-table evaluator.
+- phylo2vec_fastme.c:2230, condense_tree_bme_c. Exact component weights and
+  the all-leaf distance accumulation implement objective restriction. The
+  all-pair accumulation at line 2341 retains N-dependent distance-construction cost.
+  The minibatch optimizer calls this reduction at line 2541.
+- phylo2vec_cuda_8xh100.cu:104 and :179 implement the column recurrences.
+  Autonomous row reconstruction starts at :910. Fused selection kernels
+  begin at :749 and :1303. The sharded driver begins at :2634.
+- phylo2vec_fastme.c:1909-1965 checks component and endpoint conflicts, then
+  evaluates combined candidates. The previous paper description of disjoint
+  path corridors was stronger than this code. It is now corrected.
+
+WHAT THE MATHEMATICAL ARGUMENT ESTABLISHES
+
+For a fixed component partition, the exact condensed matrix is sufficient
+to score every reconnection of those components up to one constant. Therefore
+the same is true of every skeleton coordinate change. This is deterministic
+equality for the supplied distance matrix. It is stronger than an unbiased
+estimate obtained by sampling leaf pairs. It does not require additive input
+distances, and it does not imply global optimization.
+
+The full coordinate table contains (N-1)^2 entries. An algorithm explicitly
+writing these values takes at least quadratic work in the standard unit-cost
+model. The shared evaluator meets that bound. This elementary observation
+does not lower-bound best-move-only evaluation, and is not a new lower bound
+for tree search in general.
+
+BLOCKS AND COSTS
+
+The exact dense-distance CPU minibatch path exists. The main theorem also
+specifies a proper subtree window using the entire oriented outside component.
+After a commit, the next window must use the updated tree.
+
+O(K^2) is the cost of the reduced coordinate sweep AFTER exact distances are
+available. It is not an N-independent cost for arbitrary raw distances.
+The recorded large sequence runs use capped proposal distances followed by
+full acceptance checks. They should not be advertised as timing the all-exact
+proposal method. The appendix keeps that distinction explicit.
+
+POSITIONING TO RETAIN
+
+Lead with the computational operation made practical: many exact global
+objective changes from one shared computation, or from a smaller exact block.
+Then identify the concrete parallel dependencies and memory/recomputation
+tradeoff. Treat the classical identities as the reason the method is correct.
+Do not claim first exact BME, first vector search, first parallel BME, a new
+condensation principle, a better-than-FastME asymptotic sweep, or guaranteed
+coverage of tree space by the implemented greedy schedule.
+
+SEARCH SCOPE AND LIMIT
+
+Primary-source checks covered the original representation, continuous BME,
+classical SPR evaluation, fixed-clade geometry, recent parallel BME, and
+learned BME search. Searches for BME minibatches, discrete Phylo2Vec gradients,
+and GPU BME did not reveal the precise combined formulation described here.
+Absence from this search is not a proof that no earlier implementation exists.
+
+CHANGES AND VALIDATION
+
+Revised the abstract and introduction, added three prior-work citations,
+added the explicit-output lower-bound observation and the vertex-gradient
+relation, and corrected the conflict-filter description. The reference
+generator was updated so regeneration preserves the added citations.
+No benchmark was rerun or changed. Build and preservation checks are recorded
+in validation.json. Paper edits do not establish an ICML acceptance probability.

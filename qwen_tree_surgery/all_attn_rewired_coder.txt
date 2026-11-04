@@ -1,0 +1,231 @@
+# Top Quartet-Violated Clades & Rewired Phylo2Vec Coordinates (Coder-14B vs Base)
+CLADE rank=1 size=1040 viols=602 margin=35.1736 leaves=36827,30904,34555,34143,32859,55316,28680,28599,28758,30167,28764,32589,14801,15147,39213,15975,5626,7356,44076,38112,43919,17394,59563,53828
+CLADE rank=2 size=1040 viols=613 margin=34.7706 leaves=19227,12613,52065,6885,22064,38150,38262,32542,45906,33861,33851,58887,52527,22299,10085,10110,7413,65122,25042,37050,27974,6307,26608,28166
+CLADE rank=3 size=1040 viols=593 margin=34.5718 leaves=18466,13204,8767,40236,36415,41889,42189,56564,46113,34400,2910,7999,57849,60132,3543,35735,64874,35714,7078,66522,66036,10524,7901,42010
+CLADE rank=4 size=1040 viols=598 margin=33.8345 leaves=51342,54029,53826,44599,24964,19070,2041,27626,35232,33292,33430,61196,26169,62580,63276,58448,59024,60707,60937,27771,1683,41178,39240,39226
+CLADE rank=5 size=1040 viols=583 margin=32.5307 leaves=55613,41849,61786,53262,63643,62295,19280,58691,40537,61069,57223,32927,51194,41704,33517,33470,25865,43489,39475,44442,53309,41261,19560,56891
+CLADE rank=6 size=1040 viols=594 margin=32.1776 leaves=37662,8996,10773,17525,15568,62765,44926,31079,63407,21006,54659,32529,29492,14232,2246,9952,33315,34448,48382,18219,19537,19409,22006,30344
+CLADE rank=7 size=1040 viols=599 margin=32.0866 leaves=48371,61261,19168,43172,20952,18848,23195,28748,27414,14423,34774,31133,61221,50124,5382,49370,25416,36763,36880,46648,20901,24925,23176,14550
+CLADE rank=8 size=1040 viols=598 margin=31.6598 leaves=40861,26556,24318,23258,23642,8766,41238,56525,21639,44003,8886,8216,22736,31451,17035,18519,50836,29569,29665,17810,39093,23001,16646,15782
+CLADE rank=9 size=1040 viols=587 margin=30.8606 leaves=26557,4747,22086,21474,52059,27464,29813,29192,25623,59454,36211,32843,25244,33223,6327,41349,50569,6719,35545,59977,30973,50095,50479,10816
+CLADE rank=10 size=1040 viols=601 margin=30.7621 leaves=53432,59082,57179,42603,60598,63695,58565,58703,63100,58270,38890,63753,65416,65362,55081,64830,66520,62019,65345,61619,65746,65550,62023,65296
+CLADE rank=11 size=910 viols=528 margin=30.7290 leaves=7862,1829,3471,19317,40762,35952,39438,59626,63704,8237,62328,20200,62773,29729,42481,42381,5084,59465,13412,23801,41624,21523,17054,23381
+CLADE rank=12 size=1040 viols=596 margin=30.3365 leaves=7899,56861,57939,56202,12223,16413,2181,19789,105,8509,53079,19435,40628,33944,44403,37469,15315,18423,60294,24209,47246,38887,48221,37655
+CLADE rank=13 size=910 viols=517 margin=29.5462 leaves=25013,19677,16493,4400,2679,44745,39756,8816,18216,32574,32490,38061,17873,35597,40726,27685,40915,23712,25971,55568,32431,53577,16983,1336
+CLADE rank=14 size=910 viols=541 margin=29.3579 leaves=17060,27291,25204,53020,60264,45780,9801,56484,20206,56771,42661,54795,42845,42497,34961,61018,54620,49138,11168,4257,26980,8287,2852,7024
+CLADE rank=15 size=910 viols=561 margin=29.2072 leaves=43536,58992,52234,24597,18463,26361,18334,43728,59579,50345,55755,26574,27683,33488,26304,61010,43023,23832,52616,9754,15524,15948,15495,17969
+CLADE rank=16 size=910 viols=506 margin=28.3405 leaves=44704,62472,44270,39189,40888,14853,31017,59872,51323,13307,65979,23707,26484,24268,21095,51133,41900,20716,36706,41519,61136,32390,34020,40298
+CLADE rank=17 size=910 viols=511 margin=28.2493 leaves=19718,32512,52194,3597,1911,23338,55416,59900,49462,435,46878,23743,4468,58185,41007,45265,43957,25702,57960,6422,9753,26265,16640,18702
+CLADE rank=18 size=910 viols=541 margin=27.9751 leaves=1845,8269,27339,10112,43895,59153,57001,59985,30606,26862,43105,55673,919,13988,50833,50031,48693,51041,54885,26495,38392,37997,93,60466
+CLADE rank=19 size=910 viols=530 margin=27.8715 leaves=2991,3072,21264,21280,54903,32541,26224,26727,45702,561,62813,15418,15415,24306,23864,8779,21373,19371,22593,30272,35699,49957,49032,46723
+CLADE rank=20 size=910 viols=548 margin=27.7396 leaves=10238,31146,1555,18210,59788,30112,24510,63492,50432,53315,46124,28884,3928,3895,30580,45878,10418,22073,51747,42800,57914,55744,33720,19944
+CLADE rank=21 size=910 viols=541 margin=27.5429 leaves=35759,21657,5535,38116,20429,49688,2689,20403,5817,58369,49638,40600,40949,25550,15080,22118,24275,33155,938,20719,6199,52496,61029,57556
+CLADE rank=22 size=910 viols=543 margin=26.8429 leaves=58139,61013,59978,45517,64147,55780,39454,27207,6115,37815,38391,30745,47717,46077,20811,20743,45506,28700,647,47607,5147,54807,24716,18444
+CLADE rank=23 size=910 viols=532 margin=26.6872 leaves=65215,66210,5486,62196,6440,6553,6950,12042,57245,28788,36219,21807,4112,4155,4372,259,48754,50523,49921,15218,28614,44668,50503,2300
+CLADE rank=24 size=910 viols=535 margin=26.6668 leaves=46467,22680,43958,35502,35740,14712,17129,38808,42756,32552,1150,8745,55074,3398,2722,13899,4341,39326,49747,55012,31266,22224,1687,1713
+CLADE rank=25 size=780 viols=472 margin=26.2760 leaves=293,34550,14622,3658,17821,30939,18895,18915,32028,5292,31234,11400,11412,38572,60391,3742,3748,6990,6478,19636,40761,33505,28622,57038
+CLADE rank=26 size=910 viols=516 margin=25.9802 leaves=30465,20963,6333,8835,14525,6042,7920,53911,54652,50683,10785,48227,40216,39616,42823,39875,49051,47718,28127,33625,27649,14566,28771,28501
+CLADE rank=27 size=910 viols=522 margin=25.7526 leaves=59099,12796,37552,55931,9414,47025,17238,39560,19359,22303,58931,41657,37697,18265,23194,46786,39862,12918,9248,28992,1001,55559,64544,19044
+CLADE rank=28 size=780 viols=471 margin=23.7396 leaves=21194,51123,41727,63421,15780,15450,27285,39933,7880,54811,32232,54742,45718,52011,59911,22643,43955,29096,42451,38291,36401,21594,49561,9023
+CLADE rank=29 size=780 viols=456 margin=23.7336 leaves=14107,7457,52594,55101,25044,23104,15599,1127,44066,19374,16407,49263,50074,47366,47695,62599,26378,55925,21032,1125,31552,38209,31422,19469
+CLADE rank=30 size=780 viols=435 margin=23.7236 leaves=42352,39926,39932,38523,65774,49230,7981,8828,50752,51698,65657,65607,58392,13852,55175,33468,29850,34485,22869,60868,48486,48453,58419,36010
+MIGRATE leaf=3 old_v=3 new_v=2 self_cos=0.55051
+MIGRATE leaf=5 old_v=3 new_v=7 self_cos=0.57679
+MIGRATE leaf=6 old_v=7 new_v=6 self_cos=0.55510
+MIGRATE leaf=7 old_v=6 new_v=1 self_cos=0.55486
+MIGRATE leaf=8 old_v=11 new_v=1 self_cos=0.53095
+MIGRATE leaf=9 old_v=10 new_v=3 self_cos=0.55191
+MIGRATE leaf=10 old_v=9 new_v=15 self_cos=0.55168
+MIGRATE leaf=11 old_v=18 new_v=16 self_cos=0.55955
+MIGRATE leaf=12 old_v=19 new_v=9 self_cos=0.58922
+MIGRATE leaf=14 old_v=10 new_v=25 self_cos=0.56730
+MIGRATE leaf=15 old_v=12 new_v=3 self_cos=0.55943
+MIGRATE leaf=16 old_v=7 new_v=8 self_cos=0.46401
+MIGRATE leaf=17 old_v=24 new_v=28 self_cos=0.57155
+MIGRATE leaf=19 old_v=23 new_v=8 self_cos=0.56761
+MIGRATE leaf=20 old_v=37 new_v=33 self_cos=0.43277
+MIGRATE leaf=22 old_v=30 new_v=7 self_cos=0.55191
+MIGRATE leaf=24 old_v=35 new_v=3 self_cos=0.59206
+MIGRATE leaf=25 old_v=22 new_v=38 self_cos=0.53614
+MIGRATE leaf=26 old_v=16 new_v=34 self_cos=0.53932
+MIGRATE leaf=28 old_v=11 new_v=53 self_cos=0.54884
+MIGRATE leaf=29 old_v=30 new_v=42 self_cos=0.54038
+MIGRATE leaf=31 old_v=46 new_v=37 self_cos=0.53452
+MIGRATE leaf=35 old_v=0 new_v=9 self_cos=0.55414
+MIGRATE leaf=36 old_v=36 new_v=67 self_cos=0.53950
+MIGRATE leaf=37 old_v=45 new_v=19 self_cos=0.56579
+MIGRATE leaf=39 old_v=74 new_v=75 self_cos=0.57077
+MIGRATE leaf=40 old_v=59 new_v=57 self_cos=0.55641
+MIGRATE leaf=41 old_v=42 new_v=62 self_cos=0.54495
+MIGRATE leaf=42 old_v=46 new_v=53 self_cos=0.57980
+MIGRATE leaf=43 old_v=17 new_v=83 self_cos=0.54139
+MIGRATE leaf=44 old_v=3 new_v=0 self_cos=0.59416
+MIGRATE leaf=45 old_v=39 new_v=80 self_cos=0.51489
+MIGRATE leaf=46 old_v=73 new_v=88 self_cos=0.56067
+MIGRATE leaf=47 old_v=35 new_v=9 self_cos=0.58333
+MIGRATE leaf=48 old_v=59 new_v=55 self_cos=0.48762
+MIGRATE leaf=51 old_v=43 new_v=93 self_cos=0.56911
+MIGRATE leaf=52 old_v=6 new_v=42 self_cos=0.55870
+MIGRATE leaf=53 old_v=59 new_v=24 self_cos=0.53067
+MIGRATE leaf=54 old_v=93 new_v=91 self_cos=0.54828
+MIGRATE leaf=55 old_v=24 new_v=59 self_cos=0.53816
+MIGRATE leaf=57 old_v=83 new_v=5 self_cos=0.56433
+MIGRATE leaf=60 old_v=45 new_v=71 self_cos=0.56911
+MIGRATE leaf=61 old_v=0 new_v=5 self_cos=0.45326
+MIGRATE leaf=62 old_v=39 new_v=86 self_cos=0.56172
+MIGRATE leaf=63 old_v=11 new_v=55 self_cos=0.56962
+MIGRATE leaf=64 old_v=82 new_v=69 self_cos=0.51502
+MIGRATE leaf=65 old_v=60 new_v=57 self_cos=0.60159
+MIGRATE leaf=66 old_v=95 new_v=109 self_cos=0.55968
+MIGRATE leaf=67 old_v=78 new_v=81 self_cos=0.53241
+MIGRATE leaf=69 old_v=96 new_v=66 self_cos=0.55067
+MIGRATE leaf=70 old_v=118 new_v=92 self_cos=0.53488
+MIGRATE leaf=71 old_v=54 new_v=28 self_cos=0.55293
+MIGRATE leaf=72 old_v=9 new_v=46 self_cos=0.53448
+MIGRATE leaf=73 old_v=45 new_v=141 self_cos=0.57617
+MIGRATE leaf=76 old_v=104 new_v=95 self_cos=0.56448
+MIGRATE leaf=80 old_v=157 new_v=155 self_cos=0.57467
+MIGRATE leaf=82 old_v=97 new_v=149 self_cos=0.58984
+MIGRATE leaf=83 old_v=46 new_v=156 self_cos=0.56012
+MIGRATE leaf=86 old_v=101 new_v=150 self_cos=0.53686
+MIGRATE leaf=87 old_v=121 new_v=62 self_cos=0.54725
+MIGRATE leaf=89 old_v=112 new_v=109 self_cos=0.56118
+MIGRATE leaf=91 old_v=91 new_v=43 self_cos=0.54038
+MIGRATE leaf=92 old_v=131 new_v=179 self_cos=0.53193
+MIGRATE leaf=94 old_v=52 new_v=16 self_cos=0.55827
+MIGRATE leaf=95 old_v=73 new_v=172 self_cos=0.52824
+MIGRATE leaf=96 old_v=54 new_v=172 self_cos=0.51466
+MIGRATE leaf=99 old_v=127 new_v=122 self_cos=0.57571
+MIGRATE leaf=100 old_v=116 new_v=190 self_cos=0.53724
+MIGRATE leaf=103 old_v=176 new_v=163 self_cos=0.53477
+MIGRATE leaf=107 old_v=180 new_v=39 self_cos=0.55831
+MIGRATE leaf=110 old_v=55 new_v=118 self_cos=0.53680
+MIGRATE leaf=111 old_v=92 new_v=117 self_cos=0.54063
+MIGRATE leaf=112 old_v=94 new_v=19 self_cos=0.54672
+MIGRATE leaf=114 old_v=166 new_v=5 self_cos=0.54815
+MIGRATE leaf=117 old_v=160 new_v=156 self_cos=0.40068
+MIGRATE leaf=122 old_v=138 new_v=28 self_cos=0.57989
+MIGRATE leaf=124 old_v=202 new_v=160 self_cos=0.55874
+MIGRATE leaf=126 old_v=163 new_v=35 self_cos=0.55545
+MIGRATE leaf=127 old_v=214 new_v=212 self_cos=0.51275
+MIGRATE leaf=128 old_v=140 new_v=238 self_cos=0.19878
+MIGRATE leaf=136 old_v=144 new_v=168 self_cos=0.17730
+MIGRATE leaf=139 old_v=154 new_v=241 self_cos=0.22647
+MIGRATE leaf=146 old_v=178 new_v=76 self_cos=0.20867
+MIGRATE leaf=151 old_v=80 new_v=86 self_cos=0.21904
+MIGRATE leaf=152 old_v=188 new_v=211 self_cos=0.19149
+MIGRATE leaf=154 old_v=208 new_v=207 self_cos=0.22370
+MIGRATE leaf=156 old_v=3 new_v=206 self_cos=0.21474
+MIGRATE leaf=164 old_v=176 new_v=175 self_cos=0.20610
+MIGRATE leaf=168 old_v=119 new_v=173 self_cos=0.16108
+MIGRATE leaf=174 old_v=289 new_v=41 self_cos=0.20611
+MIGRATE leaf=176 old_v=303 new_v=292 self_cos=0.38241
+MIGRATE leaf=177 old_v=51 new_v=226 self_cos=0.27375
+MIGRATE leaf=178 old_v=248 new_v=174 self_cos=0.24249
+MIGRATE leaf=181 old_v=228 new_v=230 self_cos=0.24546
+MIGRATE leaf=183 old_v=318 new_v=124 self_cos=0.23823
+MIGRATE leaf=185 old_v=211 new_v=212 self_cos=0.21448
+MIGRATE leaf=186 old_v=305 new_v=35 self_cos=0.22531
+MIGRATE leaf=190 old_v=329 new_v=176 self_cos=0.27264
+MIGRATE leaf=191 old_v=51 new_v=226 self_cos=0.20247
+MIGRATE leaf=192 old_v=242 new_v=247 self_cos=0.33237
+MIGRATE leaf=193 old_v=227 new_v=376 self_cos=0.25831
+MIGRATE leaf=195 old_v=190 new_v=328 self_cos=0.24770
+MIGRATE leaf=201 old_v=293 new_v=260 self_cos=0.28308
+MIGRATE leaf=202 old_v=190 new_v=195 self_cos=0.16461
+MIGRATE leaf=203 old_v=256 new_v=322 self_cos=0.21967
+MIGRATE leaf=209 old_v=297 new_v=298 self_cos=0.53570
+MIGRATE leaf=210 old_v=222 new_v=221 self_cos=0.25674
+MIGRATE leaf=214 old_v=357 new_v=370 self_cos=0.24551
+MIGRATE leaf=215 old_v=266 new_v=353 self_cos=0.19591
+MIGRATE leaf=216 old_v=390 new_v=244 self_cos=0.24656
+MIGRATE leaf=218 old_v=319 new_v=3 self_cos=0.21867
+MIGRATE leaf=219 old_v=335 new_v=334 self_cos=0.22496
+MIGRATE leaf=222 old_v=345 new_v=344 self_cos=0.26230
+MIGRATE leaf=224 old_v=418 new_v=257 self_cos=0.24750
+MIGRATE leaf=235 old_v=289 new_v=294 self_cos=0.19425
+MIGRATE leaf=243 old_v=338 new_v=343 self_cos=0.23282
+MIGRATE leaf=251 old_v=434 new_v=24 self_cos=0.19787
+MIGRATE leaf=253 old_v=343 new_v=348 self_cos=0.27436
+MIGRATE leaf=255 old_v=314 new_v=320 self_cos=0.27158
+MIGRATE leaf=256 old_v=310 new_v=498 self_cos=0.31958
+MIGRATE leaf=257 old_v=464 new_v=29 self_cos=0.57402
+MIGRATE leaf=258 old_v=486 new_v=224 self_cos=0.27234
+MIGRATE leaf=261 old_v=388 new_v=392 self_cos=0.30814
+MIGRATE leaf=262 old_v=383 new_v=389 self_cos=0.20870
+MIGRATE leaf=263 old_v=312 new_v=315 self_cos=0.24989
+MIGRATE leaf=268 old_v=427 new_v=429 self_cos=0.30426
+MIGRATE leaf=270 old_v=300 new_v=303 self_cos=0.27903
+MIGRATE leaf=271 old_v=499 new_v=456 self_cos=0.30110
+MIGRATE leaf=273 old_v=361 new_v=151 self_cos=0.30356
+MIGRATE leaf=278 old_v=335 new_v=339 self_cos=0.24593
+MIGRATE leaf=280 old_v=57 new_v=448 self_cos=0.19920
+MIGRATE leaf=284 old_v=537 new_v=258 self_cos=0.24590
+MIGRATE leaf=286 old_v=396 new_v=402 self_cos=0.26926
+MIGRATE leaf=288 old_v=314 new_v=318 self_cos=0.28415
+MIGRATE leaf=299 old_v=352 new_v=356 self_cos=0.22305
+MIGRATE leaf=301 old_v=370 new_v=375 self_cos=0.32104
+MIGRATE leaf=304 old_v=351 new_v=355 self_cos=0.34373
+MIGRATE leaf=305 old_v=409 new_v=416 self_cos=0.23044
+MIGRATE leaf=310 old_v=442 new_v=448 self_cos=0.23899
+MIGRATE leaf=322 old_v=453 new_v=460 self_cos=0.21075
+MIGRATE leaf=324 old_v=433 new_v=439 self_cos=0.28025
+MIGRATE leaf=329 old_v=374 new_v=375 self_cos=0.27840
+MIGRATE leaf=330 old_v=433 new_v=437 self_cos=0.24163
+MIGRATE leaf=341 old_v=309 new_v=366 self_cos=0.18837
+MIGRATE leaf=345 old_v=365 new_v=364 self_cos=0.19482
+MIGRATE leaf=348 old_v=377 new_v=376 self_cos=0.33422
+MIGRATE leaf=350 old_v=660 new_v=486 self_cos=0.32778
+MIGRATE leaf=351 old_v=641 new_v=258 self_cos=0.22315
+MIGRATE leaf=355 old_v=195 new_v=488 self_cos=0.29541
+MIGRATE leaf=356 old_v=490 new_v=496 self_cos=0.61351
+MIGRATE leaf=358 old_v=558 new_v=634 self_cos=0.18407
+MIGRATE leaf=363 old_v=513 new_v=523 self_cos=0.21661
+MIGRATE leaf=377 old_v=518 new_v=181 self_cos=0.24571
+MIGRATE leaf=378 old_v=494 new_v=499 self_cos=0.21967
+MIGRATE leaf=380 old_v=446 new_v=447 self_cos=0.22234
+MIGRATE leaf=383 old_v=693 new_v=685 self_cos=0.29704
+MIGRATE leaf=385 old_v=337 new_v=317 self_cos=0.59149
+MIGRATE leaf=386 old_v=448 new_v=449 self_cos=0.35389
+MIGRATE leaf=390 old_v=355 new_v=543 self_cos=0.31823
+MIGRATE leaf=391 old_v=351 new_v=497 self_cos=0.36290
+MIGRATE leaf=394 old_v=451 new_v=449 self_cos=0.34470
+MIGRATE leaf=397 old_v=588 new_v=597 self_cos=0.38638
+MIGRATE leaf=400 old_v=743 new_v=737 self_cos=0.46735
+MIGRATE leaf=411 old_v=700 new_v=154 self_cos=0.27179
+MIGRATE leaf=412 old_v=184 new_v=602 self_cos=0.33646
+MIGRATE leaf=415 old_v=662 new_v=672 self_cos=0.33910
+MIGRATE leaf=425 old_v=697 new_v=694 self_cos=0.33409
+MIGRATE leaf=431 old_v=176 new_v=355 self_cos=0.34534
+MIGRATE leaf=435 old_v=531 new_v=529 self_cos=0.40269
+MIGRATE leaf=437 old_v=614 new_v=618 self_cos=0.28598
+MIGRATE leaf=444 old_v=749 new_v=756 self_cos=0.42114
+MIGRATE leaf=445 old_v=614 new_v=618 self_cos=0.64343
+MIGRATE leaf=446 old_v=867 new_v=679 self_cos=0.28115
+MIGRATE leaf=448 old_v=693 new_v=607 self_cos=0.44471
+MIGRATE leaf=450 old_v=699 new_v=322 self_cos=0.27134
+MIGRATE leaf=455 old_v=493 new_v=494 self_cos=0.29047
+MIGRATE leaf=463 old_v=893 new_v=606 self_cos=0.34453
+MIGRATE leaf=471 old_v=713 new_v=576 self_cos=0.37923
+MIGRATE leaf=475 old_v=450 new_v=496 self_cos=0.32386
+MIGRATE leaf=476 old_v=822 new_v=735 self_cos=0.36981
+MIGRATE leaf=478 old_v=550 new_v=549 self_cos=0.36826
+MIGRATE leaf=488 old_v=545 new_v=546 self_cos=0.30010
+MIGRATE leaf=492 old_v=546 new_v=547 self_cos=0.37974
+MIGRATE leaf=496 old_v=565 new_v=566 self_cos=0.32540
+MIGRATE leaf=503 old_v=787 new_v=802 self_cos=0.36057
+MIGRATE leaf=512 old_v=654 new_v=653 self_cos=0.27593
+MIGRATE leaf=513 old_v=575 new_v=791 self_cos=0.40638
+MIGRATE leaf=514 old_v=669 new_v=763 self_cos=0.33089
+MIGRATE leaf=524 old_v=766 new_v=772 self_cos=0.32853
+MIGRATE leaf=526 old_v=665 new_v=664 self_cos=0.31041
+MIGRATE leaf=527 old_v=913 new_v=425 self_cos=0.32540
+MIGRATE leaf=536 old_v=780 new_v=787 self_cos=0.28792
+MIGRATE leaf=537 old_v=802 new_v=810 self_cos=0.32904
+MIGRATE leaf=543 old_v=709 new_v=708 self_cos=0.28579
+MIGRATE leaf=544 old_v=585 new_v=586 self_cos=0.27258
+MIGRATE leaf=548 old_v=514 new_v=829 self_cos=0.29223
+MIGRATE leaf=550 old_v=636 new_v=637 self_cos=0.31176
+MIGRATE leaf=554 old_v=573 new_v=572 self_cos=0.32983
+MIGRATE leaf=559 old_v=614 new_v=544 self_cos=0.32864
+MIGRATE leaf=565 old_v=1095 new_v=1082 self_cos=0.30452

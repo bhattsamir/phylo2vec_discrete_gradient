@@ -126,6 +126,24 @@ D.~C.~Haws, T.~L.~Hodge, and R.~Yoshida.
 \newblock Optimality of the neighbor joining algorithm and faces of the balanced minimum evolution polytope.
 \newblock \emph{Bulletin of Mathematical Biology}, 73(11):2627--2648, 2011.
 \newblock \href{https://doi.org/10.1007/s11538-011-9640-x}{doi:10.1007/s11538-011-9640-x}.
+
+\bibitem{penn2023gradme}
+M.~J.~Penn, N.~Scheidwasser, J.~Penn, C.~A.~Donnelly, D.~A.~Duch\^ene, and S.~Bhatt.
+\newblock Leaping through tree space: continuous phylogenetic inference for rooted and unrooted trees.
+\newblock \emph{Genome Biology and Evolution}, 15(12):evad213, 2023.
+\newblock \href{https://doi.org/10.1093/gbe/evad213}{doi:10.1093/gbe/evad213}.
+
+\bibitem{tapo2026parallel}
+C.~Tapo and Q.~Zhu.
+\newblock Parallel and scalable balanced minimum evolution algorithm for large-scale phylogenetic inference.
+\newblock \emph{bioRxiv}, 2026. Preprint.
+\newblock \href{https://doi.org/10.64898/2026.07.27.740982}{doi:10.64898/2026.07.27.740982}.
+
+\bibitem{camerota2026learning}
+F.~J.~Camerota Verd\`u, A.~Gasparin, L.~Bortolussi, and L.~Castelli.
+\newblock Learning to explore tree neighbourhoods for phylogenetic inference.
+\newblock \emph{Briefings in Bioinformatics}, 27(1):bbaf732, 2026.
+\newblock \href{https://doi.org/10.1093/bib/bbaf732}{doi:10.1093/bib/bbaf732}.
 """
 refs = refs.replace(r"\begin{thebibliography}{9}", r"\begin{thebibliography}{10}")
 refs = refs.replace(r"\end{thebibliography}", extra + "\n" + r"\end{thebibliography}")
@@ -139,6 +157,7 @@ for entry in re.split(r"(?=\\bibitem\{)", refs)[1:]:
     entries[key] = entry.split(r"\end{thebibliography}")[0].strip()
 order = ["pauplin2000direct", "desper2002fast", "desper2004theory",
          "hordijk2005spr", "lefort2015fastme", "penn2024phylo2vec",
+         "penn2023gradme", "tapo2026parallel", "camerota2026learning",
          "haws2011optimality", "pineiro2020veryfasttree", "mirarab2015pasta",
          "penn2025eigen"]
 assert set(order) == set(entries)

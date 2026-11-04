@@ -75,6 +75,24 @@ On a GPU, independent rows reconstruct their mappings using the latest eligible 
 When several merges have the same minimum leaf, only the latest eligible merge may write that destination.
 This avoids concurrent writes that would otherwise depend on thread scheduling.
 
+\subsection{Connection to continuous vertex derivatives}
+\label{sec:vertex_gradient}
+
+GradME defines an expected objective $F(W)=\mathbb E[f(V)]$ for independent ordered coordinates~\cite{penn2023gradme}.
+For comparison, take $f(v)=L(T(v);D_\pi)$ with the same unrooted convention as Equation~\eqref{eq:pauplin}.
+Let $W^v$ put probability one on each entry of an ordered vector $v$.
+For $j\leq i$, change only row $i$ to $(1-t)e_{v_i}+t e_j$, where $e_j$ is a unit vector.
+Only two vectors then have nonzero probability, giving
+\begin{equation}
+ F(W(t))=(1-t)f(v)+t f(v^{(i\leftarrow j)}),\qquad
+ \left.\frac{dF(W(t))}{dt}\right|_{t=0}=\Delta_{i,j}.
+ \label{eq:vertex_gradient}
+\end{equation}
+This is a direct consequence of the expected-objective definition, not a new exactness property.
+The computational distinction is the shared quadratic evaluator at a discrete tree.
+It also evaluates $j>i$, outside the ordered domain of this relaxation.
+It does not evaluate gradients at arbitrary interior $W$ in quadratic time.
+
 \section{Parallel dependencies and workspace}
 \label{sec:parallel_details}
 

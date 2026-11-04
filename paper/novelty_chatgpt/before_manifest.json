@@ -1,0 +1,14 @@
+{
+  "head": "92bb2ab92db01c0097c762e3b8ce150567c36b62",
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "c5a570727d8936e47d23873ed4de1e961332863c9294716d25c8e7850dd66118",
+    "paper/phylo2vec_bme_appendix.tex": "94f78339c73b5d1b2305b1c866c0e4fa43e80e840d8a26583853b39c7473da5e",
+    "paper/phylo2vec_bme_references.tex": "51c15ede91fabdfa0d722b78eb9f8884ec5c9e0cc2c52c3d602fd379cf6987ce",
+    "paper/restructure_chatgpt/prepare_tables.py": "b515f3d42f517ea5fbfa3cc1defb4b694692ee1d609681bb079cf734b1a1e722",
+    "paper/restructure_chatgpt/validation.json": "e55134b93cb3083c64384102b5631b073214d009bc16fe09751e91ce5e988340",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+    "phylo2vec_cuda_8xh100.cu": "1be4b15a9c4a952d4cad82469bcc444fc7ba055aaeb1c51c56d6cde927f6e5b7"
+  }
+}

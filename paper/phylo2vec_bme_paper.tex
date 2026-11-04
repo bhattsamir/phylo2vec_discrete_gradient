@@ -29,8 +29,8 @@
 
 \begin{abstract}
 Balanced minimum evolution (BME) provides a distance-based criterion for phylogenetic inference, but searching large tree spaces requires repeated evaluation of many candidate rearrangements.
-We formulate exact BME evaluation as discrete coordinate differences in Phylo2Vec space and organize the underlying subtree-distance recurrences for parallel execution.
-For a tree represented in an ordered labeling, all valid single-coordinate changes are evaluated in $O(N^2)$ time.
+We give a shared evaluator for the Phylo2Vec coordinate-difference table and organize the underlying BME subtree-distance recurrences for parallel execution.
+For a tree represented in an ordered labeling, all valid single-coordinate changes are evaluated in $O(N^2)$ time, matching the size of the explicit output.
 Relabeling preserves the current tree while changing the coordinate neighborhood.
 The same evaluator applies to smaller skeleton trees whose leaves represent fixed components of the full tree.
 We prove that exact balanced distances between these components preserve every skeleton-induced BME change.
@@ -52,20 +52,32 @@ Efficient recurrences permit an entire subtree-prune-and-regraft (SPR) neighborh
 For large trees, the practical costs include storing the subtree-distance table, repeatedly traversing the tree, and coordinating many small candidate evaluations.
 The number of optimization sweeps depends on the instance and the search strategy.
 
-Phylo2Vec represents rooted binary trees by bounded integer vectors~\cite{penn2024phylo2vec}.
-This representation provides a coordinate system in which a discrete difference records the change in BME after replacing one vector entry.
-An ordered labeling permits efficient decoding and maps coordinate changes to a structured collection of SPR moves.
-The representation also separates the tree topology from its leaf-label permutation.
-Changing the permutation can expose different coordinate moves without changing the current labeled tree or its score.
+The Phylo2Vec representation already defines a matrix of single-coordinate objective differences and an ordered relabeling scheme for tree search~\cite[Section~1.3.2]{penn2024phylo2vec}.
+Its ordered coordinate neighborhood is a subset of the SPR neighborhood.
+The computational question addressed here is how to evaluate the entire BME coordinate table together, sharing work across candidates and exposing parallelism.
+We retain the quadratic sweep complexity of classical BME SPR evaluation while mapping its results to all valid Phylo2Vec coordinates.
 
-Our method combines this coordinate formulation with parallel evaluation and component-based reduction.
-The reduction relies on established BME structure.
+Several related approaches address different parts of this problem.
+GradME optimizes an expected BME objective over independent ordered coordinates using a cubic-time recurrence and automatic differentiation~\cite{penn2023gradme}.
+Our evaluator specializes to a discrete current tree, rather than a distribution over trees, and includes the full coordinate range.
+The connection to GradME's vertex derivatives is made explicit in Appendix~\ref{sec:vertex_gradient}.
+Recent parallel BME work accelerates taxon-addition tree construction using array-based traversal~\cite{tapo2026parallel}.
+Learned SPR search instead trains a policy to select rearrangements~\cite{camerota2026learning}.
+Our contribution concerns the exact evaluation of coordinate moves and reduced blocks, independently of how a search policy selects among them.
+
+Component reduction also has established mathematical foundations.
 Balanced subtree averages underlie earlier distance-based algorithms~\cite{desper2002fast,desper2004theory}, and fixed-clade families have been described as affine images of smaller BME polytopes~\cite[Section~2.4]{haws2011optimality}.
-We state the corresponding objective identity explicitly because its assumptions determine when minibatch optimization evaluates the full-tree objective.
-In particular, condensed distances must include the balanced contributions of every leaf, and a subtree window must retain the rest of the tree through the correct attachment orientation.
+We use that structure to restrict the full objective to a smaller skeleton without discarding any leaf's contribution.
+Here a minibatch is a block of tree components whose connections may change, with every other internal topology fixed.
+Its coordinate differences equal the full-tree differences deterministically, rather than only in expectation over sampled data.
 
-The contribution developed here is an algorithmic formulation: exact BME coordinate evaluation, its extension to minibatches through exact condensed distances, and parallel execution using column decomposition.
-We distinguish exact identities from finite-precision calculations and from heuristic search decisions.
+We develop three algorithmic contributions:
+\begin{enumerate}
+ \item A shared evaluator for all $(N-1)^2$ valid coordinate entries, including the map from general coordinate values to regraft edges. Its $O(N^2)$ work matches the size of the explicit table, without separately scoring candidate trees.
+ \item An exact block formulation that applies the same evaluator to condensed skeletons. The proof specifies the outside orientation and sequential updates needed for a proper subtree window. A sweep costs $O(K^2)$ after the exact $K$-component distance matrix is available.
+ \item A parallel execution scheme based on independent distance columns and SPR rows, with on-demand row reconstruction, fused row-wise selection, and distribution across GPUs. The reconstruction variant reduces the balanced-distance table from approximately $4N^2$ to $N^2$ entries while retaining quadratic sweep work.
+\end{enumerate}
+These contributions concern objective evaluation and its execution, with heuristic choices governing the search trajectory.
 The main experiments assess objective agreement, local optimization, and gradient throughput.
 Recorded sequence-refinement measurements of a separate implementation variant are identified in Appendix~\ref{sec:sequence_variant}.
 
@@ -156,6 +168,9 @@ The recurrence preserves the Pauplin score difference at each traversal step, so
 
 The proposition concerns the coordinate neighborhood of the current labeling.
 It does not assert that this neighborhood is the entire SPR neighborhood, or that coordinate descent finds a global BME optimum.
+There are $\sum_{i=0}^{N-2}(2i+1)=(N-1)^2$ valid entries.
+Any algorithm that explicitly writes one scalar per entry requires $\Omega(N^2)$ work in the standard unit-cost model, so the evaluator matches this output-size lower bound.
+This observation does not give a lower bound for returning only the best move, and does not improve the asymptotic sweep cost of classical BME SPR evaluation.
 
 \subsection{Exact condensed distances and skeleton reduction}
 \label{sec:condensation}
@@ -313,7 +328,7 @@ Exactness here is relative to the specified distance matrix, not to unknown evol
 \subsection{Search strategy}
 \label{sec:optimizer}
 
-The full-tree CPU optimizer evaluates coordinate differences, ranks improving rows, and forms candidate batches using disjoint path corridors as a conflict filter.
+The full-tree CPU optimizer evaluates coordinate differences, ranks improving rows, and filters candidate batches for conflicts involving pruned components and attachment endpoints.
 It then evaluates the combined candidate tree and backtracks to a smaller batch if the score does not improve.
 The acceptance decision uses the joint objective rather than the sum of individual predicted improvements.
 When the current coordinate neighborhood is exhausted, the optimizer changes the ordered labeling and searches again.
