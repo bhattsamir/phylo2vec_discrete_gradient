@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phylogenetic Tree Surgery on Qwen-14B — Interactive Colleague Explainer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased p-6 md:p-10">
+  <div class="max-w-5xl mx-auto space-y-6">
+
+    <!-- Header / Hero -->
+    <div class="bg-white border border-slate-200 rounded-2xl p-6 md:p-8 shadow-sm">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <span class="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+          Colleague Explainer &bull; Zero-Training LLM Tree Surgery
+        </span>
+        <span class="text-xs text-slate-500">
+          Models: Qwen2.5-14B &bull; Qwen2.5-Coder-14B &bull; DeepSeek-R1-Distill-Qwen-14B
+        </span>
+      </div>
+      <h1 class="text-2xl md:text-3xl font-bold tracking-tight text-slate-900 mb-3">
+        Finding the 0.6% of Neurons That Drive Reasoning &amp; Coding via Phylogenetic Trees
+      </h1>
+      <p class="text-sm md:text-base text-slate-600 leading-relaxed">
+        When a base language model (<code>Qwen2.5-14B</code>) is fine-tuned into a <strong>Coding specialist</strong> (<code>Qwen2.5-Coder-14B</code>) or a <strong>Math/Reasoning specialist</strong> (<code>DeepSeek-R1-Distill-Qwen-14B</code>), almost every weight changes slightly due to training noise. How do we isolate the tiny fraction of neurons where <em>true structural rewiring</em> happened? We treat neurons like biological species and build evolutionary trees across every layer.
+      </p>
+
+      <!-- Key Headline Pills -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+          <div class="text-xs text-slate-500 uppercase font-semibold">Ultra-Sparse Causality</div>
+          <div class="text-2xl font-bold text-indigo-600 mt-1">0.8% of Clades</div>
+          <div class="text-xs text-slate-600 mt-1 leading-relaxed">
+            Reverting just <strong>50 out of 6,171</strong> tree clades (1.47% of MLP weights) causes <strong>27.3%</strong> of the total reasoning loss spike (~19&times; above random).
+          </div>
+        </div>
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+          <div class="text-xs text-slate-500 uppercase font-semibold">Zero-Training Compression</div>
+          <div class="text-2xl font-bold text-emerald-600 mt-1">88.3% Retained</div>
+          <div class="text-xs text-slate-600 mt-1 leading-relaxed">
+            Keeping only the <strong>20%</strong> of neurons flagged by tree topology preserves <strong>88.3%</strong> of reasoning gains &amp; <strong>94.0%</strong> of coding gains.
+          </div>
+        </div>
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+          <div class="text-xs text-slate-500 uppercase font-semibold">Beats All 7 Baselines</div>
+          <div class="text-2xl font-bold text-slate-900 mt-1">#1 Across All</div>
+          <div class="text-xs text-slate-600 mt-1 leading-relaxed">
+            Outperforms <strong>TIES-Merging</strong>, <strong>DARE</strong>, <strong>Spherical k-Means</strong>, <strong>Cosine Drift</strong>, and <strong>Frobenius Norm</strong>.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Interactive Tabs -->
+    <div class="bg-white border border-slate-200 rounded-2xl p-6 md:p-8 shadow-sm">
+      <div class="flex flex-wrap gap-2 border-b border-slate-200 pb-4 mb-6">
+        <button onclick="switchTab('what')" id="btn-what" class="px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 text-white transition">
+          1. What We Did (The Idea)
+        </button>
+        <button onclick="switchTab('compare')" id="btn-compare" class="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition">
+          2. Head-to-Head vs. 7 Competitors
+        </button>
+        <button onclick="switchTab('knockout')" id="btn-knockout" class="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition">
+          3. Top-5 to Top-100 Clade Knock-Out
+        </button>
+        <button onclick="switchTab('hybrid')" id="btn-hybrid" class="px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition">
+          4. Zero-Training Hybrid Chimera
+        </button>
+      </div>
+
+      <!-- TAB 1 -->
+      <div id="tab-what" class="space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-5">
+            <div class="text-xs font-bold uppercase text-indigo-600 mb-1">Step 1 &bull; The 3 Sibling Models</div>
+            <h3 class="text-base font-bold text-slate-900 mb-2">Same Architecture, 3 Skills</h3>
+            <p class="text-xs text-slate-600 leading-relaxed">
+              We compare three 14B-parameter models that share the exact same 48-layer architecture:<br/><br/>
+              &bull; <strong>Base</strong>: <code>Qwen2.5-14B</code> (Ancestor)<br/>
+              &bull; <strong>Coder</strong>: <code>Qwen2.5-Coder-14B</code><br/>
+              &bull; <strong>Reasoner</strong>: <code>DeepSeek-R1-Distill-Qwen-14B</code>
+            </p>
+          </div>
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-5">
+            <div class="text-xs font-bold uppercase text-indigo-600 mb-1">Step 2 &bull; Neurons as "Species"</div>
+            <h3 class="text-base font-bold text-slate-900 mb-2">48 Trees of 13,824 Neurons</h3>
+            <p class="text-xs text-slate-600 leading-relaxed">
+              Each layer has <strong>13,824 MLP neurons</strong> (<code>gate_proj</code>, <code>up_proj</code>, <code>down_proj</code>). We compute an exact <strong>13,824 &times; 13,824</strong> cosine distance matrix between neurons on GPU and build a <strong>Balanced Minimum Evolution (BME) phylogenetic tree</strong> for every layer, partitioning each layer into ~128 evolutionary clades (~108 neurons/clade, 6,171 clades total).
+            </p>
+          </div>
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-5">
+            <div class="text-xs font-bold uppercase text-indigo-600 mb-1">Step 3 &bull; Quartet Violations</div>
+            <h3 class="text-base font-bold text-slate-900 mb-2">Who Changed Partners?</h3>
+            <p class="text-xs text-slate-600 leading-relaxed">
+              If a group of neurons merely scaled up or rotated together during fine-tuning, their <strong>tree relationships (quartets) stay identical</strong>. If a clade <em>rewired its functional role</em>, its closest evolutionary neighbors change between Base, Coder, and Reasoner!
+            </p>
+          </div>
+        </div>
+
+        <div class="bg-indigo-50/60 border border-indigo-200 rounded-xl p-5">
+          <h4 class="text-sm font-bold text-slate-900 mb-1">Why Does Tree Topology Beat Standard Weight Magnitude (&Vert;&Delta;W&Vert;<sub>F</sub>)?</h4>
+          <p class="text-xs text-slate-700 leading-relaxed">
+            Standard model-merging and pruning methods (like <strong>Magnitude</strong>, <strong>TIES-Merging</strong>, or <strong>Cosine Drift</strong>) ask a 1-body question: <em>"Did neuron <i>i</i>'s weight vector move?"</em> During fine-tuning, entire subspaces drift or rotate uniformly without changing the circuit they compute. <strong>Phylogenetic Quartet Violation</strong> asks a relational <i>N</i>-body question: <em>"Did this clade break its geometric relationship with neighboring neurons in the tree?"</em>
+          </p>
+        </div>
+      </div>
+
+      <!-- TAB 2 -->
+      <div id="tab-compare" class="hidden space-y-5">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-base font-bold text-slate-900">
+              20% Sparse Task-Vector Retention (Keep Only 20% of Fine-Tuned Neurons, Revert 80% to Base)
+            </h3>
+            <p class="text-xs text-slate-600">
+              Higher % = more specialist capability preserved while discarding 80% of fine-tuning updates.
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="setCompMode('global')" id="mode-global" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 text-white">
+              Global Top 20%
+            </button>
+            <button onclick="setCompMode('strat')" id="mode-strat" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700">
+              Per-Layer Stratified 20%
+            </button>
+          </div>
+        </div>
+
+        <div id="comp-bars" class="space-y-3"></div>
+
+        <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-700 leading-relaxed">
+          <strong>Key Takeaway:</strong> Even when we force every method to pick the exact same number of neurons inside every single layer (<em>Per-Layer Stratified 20%</em>), <strong>Tree Quartet-Violated Clades</strong> still beats flat <strong>Spherical k-Means</strong> (<code>76.4%</code> vs. <code>73.3%</code>), <strong>TIES-Merging</strong> (<code>71.6%</code>), and <strong>3-Matrix Frobenius Norm</strong> (<code>74.4%</code>).
+        </div>
+      </div>
+
+      <!-- TAB 3 -->
+      <div id="tab-knockout" class="hidden space-y-5">
+        <div>
+          <h3 class="text-base font-bold text-slate-900">
+            Surgical Knock-Out: Reverting Only the Top <i>K</i> Clades (Out of 6,171 Total Clades) Back to Base
+          </h3>
+          <p class="text-xs text-slate-600">
+            What happens to <code>DeepSeek-R1-Distill-Qwen-14B</code> when we surgically revert <strong>only the top 5, 10, 25, 50, or 100 tree-violated clades</strong> back to Base weights while leaving the other 98.5%+ of the model untouched?
+          </p>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr class="border-b border-slate-200 text-slate-500">
+                <th class="py-2.5 px-3">Clades Reverted</th>
+                <th class="py-2.5 px-3">% of 6,171 Clades</th>
+                <th class="py-2.5 px-3">% of Model MLP Weights</th>
+                <th class="py-2.5 px-3">Violated Clades Loss Impact</th>
+                <th class="py-2.5 px-3">Conserved Clades Control</th>
+                <th class="py-2.5 px-3">Causal Selectivity Ratio</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-200">
+              <tr>
+                <td class="py-2.5 px-3 font-semibold">Top 5 Clades</td>
+                <td class="py-2.5 px-3">0.08%</td>
+                <td class="py-2.5 px-3">0.12% (806 neurons)</td>
+                <td class="py-2.5 px-3 font-semibold text-slate-900">5.2% of total drop (+0.044 nats)</td>
+                <td class="py-2.5 px-3 text-slate-500">0.4% (+0.003 nats)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-600">14.2&times;</td>
+              </tr>
+              <tr>
+                <td class="py-2.5 px-3 font-semibold">Top 10 Clades</td>
+                <td class="py-2.5 px-3">0.16%</td>
+                <td class="py-2.5 px-3">0.29% (1,924 neurons)</td>
+                <td class="py-2.5 px-3 font-semibold text-slate-900">9.4% of total drop (+0.080 nats)</td>
+                <td class="py-2.5 px-3 text-slate-500">1.4% (+0.012 nats)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-600">6.7&times;</td>
+              </tr>
+              <tr>
+                <td class="py-2.5 px-3 font-semibold">Top 25 Clades</td>
+                <td class="py-2.5 px-3">0.41%</td>
+                <td class="py-2.5 px-3">0.67% (4,429 neurons)</td>
+                <td class="py-2.5 px-3 font-semibold text-slate-900">14.7% of total drop (+0.126 nats)</td>
+                <td class="py-2.5 px-3 text-slate-500">3.0% (+0.025 nats)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-600">5.0&times;</td>
+              </tr>
+              <tr class="bg-indigo-50/50">
+                <td class="py-2.5 px-3 font-bold">Top 50 Clades</td>
+                <td class="py-2.5 px-3 font-bold">0.81%</td>
+                <td class="py-2.5 px-3 font-bold">1.47% (9,731 neurons)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-700">27.3% of total drop (+0.233 nats)</td>
+                <td class="py-2.5 px-3 text-slate-500">6.0% (+0.051 nats)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-700">4.6&times; (~19&times; per-neuron)</td>
+              </tr>
+              <tr>
+                <td class="py-2.5 px-3 font-semibold">Top 100 Clades</td>
+                <td class="py-2.5 px-3">1.62%</td>
+                <td class="py-2.5 px-3">2.99% (19,849 neurons)</td>
+                <td class="py-2.5 px-3 font-semibold text-slate-900">39.3% of total drop (+0.336 nats)</td>
+                <td class="py-2.5 px-3 text-slate-500">10.7% (+0.091 nats)</td>
+                <td class="py-2.5 px-3 font-bold text-indigo-600">3.7&times;</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 4 -->
+      <div id="tab-hybrid" class="hidden space-y-5">
+        <div>
+          <h3 class="text-base font-bold text-slate-900">
+            Zero-Training Clade-Level Model Merging ("Tree-Guided Chimera")
+          </h3>
+          <p class="text-xs text-slate-600">
+            Because Coder-specialized clades and Reasoner-specialized clades occupy mostly distinct branches of the layer trees, we can graft <strong>Coder clades + Reasoner clades</strong> onto the Base model with <strong>zero gradient training</strong>.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div class="text-xs text-slate-500 uppercase font-semibold">Base Model (Qwen2.5-14B)</div>
+            <div class="mt-2 space-y-1 text-xs">
+              <div>Math/Reasoning Loss: <strong>1.584 nats</strong> (bad)</div>
+              <div>Python Code Loss: <strong>0.761 nats</strong> (moderate)</div>
+              <div>General Text Loss: <strong>1.673 nats</strong> (best)</div>
+            </div>
+          </div>
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div class="text-xs text-slate-500 uppercase font-semibold">Uniform 50/50 Weight Average</div>
+            <div class="mt-2 space-y-1 text-xs">
+              <div>Math/Reasoning Loss: <strong>1.031 nats</strong></div>
+              <div>Python Code Loss: <strong>0.703 nats</strong></div>
+              <div>General Text Loss: <strong>1.701 nats</strong></div>
+            </div>
+          </div>
+          <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+            <div class="text-xs text-indigo-700 uppercase font-bold">Tree-Guided Chimera (Ours)</div>
+            <div class="mt-2 space-y-1 text-xs">
+              <div>Math/Reasoning Loss: <strong>0.822 nats</strong> (82% of R1 gain!)</div>
+              <div>Python Code Loss: <strong>0.695 nats</strong> (beats 50/50!)</div>
+              <div>General Text Loss: <strong>1.762 nats</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const compData = {
+      global: [
+        { name: "1. Tree Quartet-Violated Clades (Ours)", r1: 88.3, coder: 94.0, highlight: true, tag: "Phylogenetic Topology" },
+        { name: "2. 3-Matrix Frobenius Norm (||ΔW||_F)", r1: 85.4, coder: 88.8, highlight: false, tag: "Magnitude Baseline" },
+        { name: "3. TIES-Merging (Trim + Elect + Merge)", r1: 83.2, coder: 85.1, highlight: false, tag: "SOTA Merging Baseline" },
+        { name: "4. Spherical k-Means (K=128 Flat Clusters)", r1: 80.1, coder: 88.4, highlight: false, tag: "Flat Clustering" },
+        { name: "5. Per-Neuron Cosine Drift (1 - cos)", r1: 77.7, coder: 77.2, highlight: false, tag: "Directional Drift" },
+        { name: "6. DARE (Random Drop 80% + Rescale 5x)", r1: 26.8, coder: 58.6, highlight: false, tag: "Random Rescaled" },
+        { name: "7. Random 20% Neurons (Control)", r1: 16.0, coder: 28.0, highlight: false, tag: "Random Control" },
+        { name: "8. Tree Conserved Clades (Bottom 20%)", r1: 5.5, coder: 12.1, highlight: false, tag: "Negative Control" }
+      ],
+      strat: [
+        { name: "1. Tree Quartet-Violated Clades (Stratified)", r1: 76.4, coder: 91.5, highlight: true, tag: "Equal Per-Layer Budget" },
+        { name: "2. 3-Matrix Frobenius Norm (Stratified)", r1: 74.4, coder: 89.2, highlight: false, tag: "Equal Per-Layer Budget" },
+        { name: "3. Spherical k-Means (Stratified)", r1: 73.3, coder: 88.1, highlight: false, tag: "Equal Per-Layer Budget" },
+        { name: "4. TIES-Merging (Stratified)", r1: 71.6, coder: 84.5, highlight: false, tag: "Equal Per-Layer Budget" },
+        { name: "5. Per-Neuron Cosine Drift (Stratified)", r1: 70.6, coder: 82.0, highlight: false, tag: "Equal Per-Layer Budget" }
+      ]
+    };
+
+    function renderCompBars(mode) {
+      const container = document.getElementById('comp-bars');
+      const rows = compData[mode];
+      container.innerHTML = rows.map(r => `
+        <div class="bg-slate-50 border ${r.highlight ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-slate-200'} rounded-xl p-3.5">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs md:text-sm font-bold text-slate-900">${r.name}</span>
+              <span class="px-2 py-0.5 rounded text-xs bg-white border border-slate-200 text-slate-600">${r.tag}</span>
+            </div>
+            <div class="text-xs font-semibold text-slate-700">
+              Reasoning: <span class="font-bold text-indigo-600">${r.r1.toFixed(1)}%</span> &bull; Coding: <span class="font-bold text-emerald-600">${r.coder.toFixed(1)}%</span>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <div class="text-xs text-slate-500 mb-1">Reasoning Gain Retained (R1-14B)</div>
+              <div class="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden">
+                <div class="h-full bg-indigo-600 rounded-full" style="width: ${Math.max(2, r.r1)}%"></div>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs text-slate-500 mb-1">Coding Gain Retained (Coder-14B)</div>
+              <div class="w-full h-2.5 bg-slate-200 rounded-full overflow-hidden">
+                <div class="h-full bg-emerald-600 rounded-full" style="width: ${Math.max(2, r.coder)}%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function setCompMode(mode) {
+      const gBtn = document.getElementById('mode-global');
+      const sBtn = document.getElementById('mode-strat');
+      if (mode === 'global') {
+        gBtn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 text-white";
+        sBtn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700";
+      } else {
+        sBtn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 text-white";
+        gBtn.className = "px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 text-slate-700";
+      }
+      renderCompBars(mode);
+    }
+
+    function switchTab(tab) {
+      ['what', 'compare', 'knockout', 'hybrid'].forEach(t => {
+        document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+        const btn = document.getElementById('btn-' + t);
+        if (t === tab) {
+          btn.className = "px-4 py-2 rounded-lg text-sm font-semibold bg-indigo-600 text-white transition";
+        } else {
+          btn.className = "px-4 py-2 rounded-lg text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 transition";
+        }
+      });
+    }
+
+    renderCompBars('global');
+  </script>
+</body>
+</html>
+
