@@ -1,0 +1,88 @@
+Building 48-Layer Qwen2.5-14B MLP Base Trees & Computing Clade Rewiring Scores...
+  Processed layer 04/48 (5.50s)
+  Processed layer 08/48 (6.17s)
+  Processed layer 12/48 (5.82s)
+  Processed layer 16/48 (6.02s)
+  Processed layer 20/48 (6.00s)
+  Processed layer 24/48 (5.82s)
+  Processed layer 28/48 (5.93s)
+  Processed layer 32/48 (6.30s)
+  Processed layer 36/48 (6.06s)
+  Processed layer 40/48 (6.19s)
+  Processed layer 44/48 (6.16s)
+  Processed layer 48/48 (5.94s)
+Saved 48-layer clade scores to /tmp/qwen_tree_exp/clade_scores_48L.bin!
+Loading 48-layer phylogenetic clade scores...
+Loading Base, R1-Distill-14B, and Coder-14B MLP states & initializing GPU models...
+
+==========================================================================================================
+PART 1: CLADE KNOCK-OUT ABLATION ON R1-DISTILL-14B (Revert k% of MLP Clades back to Qwen2.5-14B Base)
+==========================================================================================================
+Intervention / Clade Selection             | Reverted | Reasoning PPL | Next-Tok Acc | KL(R1 || Edit)
+----------------------------------------------------------------------------------------------------------
+Pure R1-Distill-14B (Unedited Specialist)  |     0.0% |        2.3574 |       81.51% |        0.00000
+Pure Qwen2.5-14B (100% Reverted to Base)   |   100.0% |        2.1370 |       82.09% |        0.40598
+----------------------------------------------------------------------------------------------------------
+Revert Top-15% Topo-Violated Clades        |    15.0% |        2.4048 |       81.01% |        0.04911
+Revert Random-15% Monophyletic Clades      |    15.0% |        2.3116 |       81.15% |        0.00943
+Revert Bottom-15% Topo-Conserved Clades    |    15.0% |        2.3408 |       80.97% |        0.01200
+----------------------------------------------------------------------------------------------------------
+Revert Top-30% Topo-Violated Clades        |    30.0% |        2.3598 |       81.15% |        0.05602
+Revert Random-30% Monophyletic Clades      |    30.0% |        2.2835 |       81.24% |        0.04993
+Revert Bottom-30% Topo-Conserved Clades    |    30.0% |        2.2827 |       81.06% |        0.03443
+----------------------------------------------------------------------------------------------------------
+Revert Top-50% Topo-Violated Clades        |    50.0% |        2.2237 |       81.10% |        0.10468
+Revert Random-50% Monophyletic Clades      |    50.0% |        2.2316 |       81.15% |        0.07606
+Revert Bottom-50% Topo-Conserved Clades    |    50.0% |        2.3334 |       80.51% |        0.10581
+----------------------------------------------------------------------------------------------------------
+
+==========================================================================================================
+PART 2: CLADE KNOCK-OUT ABLATION ON QWEN2.5-CODER-14B (Revert k% of MLP Clades back to Qwen2.5-14B Base)
+==========================================================================================================
+Intervention / Clade Selection             | Reverted | Code Suite PPL | Next-Tok Acc | KL(Coder||Edit)
+----------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (Unedited)          |     0.0% |        1.4624 |       90.04% |        0.00000
+Pure Qwen2.5-14B (100% Reverted to Base)   |   100.0% |        1.4591 |       90.39% |        0.11081
+----------------------------------------------------------------------------------------------------------
+Revert Top-15% Topo-Violated Clades        |    15.0% | 28361680.4352 |        0.42% |       16.73783
+Revert Random-15% Monophyletic Clades      |    15.0% |        6.2564 |       73.84% |        1.44010
+Revert Bottom-15% Topo-Conserved Clades    |    15.0% |        1.6816 |       88.64% |        0.14064
+----------------------------------------------------------------------------------------------------------
+Revert Top-30% Topo-Violated Clades        |    30.0% |    42044.5954 |        0.00% |       10.21888
+Revert Random-30% Monophyletic Clades      |    30.0% |        4.2045 |       74.89% |        1.05123
+Revert Bottom-30% Topo-Conserved Clades    |    30.0% |        2.2151 |       83.80% |        0.40526
+----------------------------------------------------------------------------------------------------------
+Revert Top-50% Topo-Violated Clades        |    50.0% | 485165195.4098 |        1.05% |       31.03624
+Revert Random-50% Monophyletic Clades      |    50.0% | 485165195.4098 |        0.98% |       59.88488
+Revert Bottom-50% Topo-Conserved Clades    |    50.0% |       11.0911 |       50.70% |        1.97011
+----------------------------------------------------------------------------------------------------------
+
+==========================================================================================================
+PART 3: CLADE-SPARSE POST-TRAINING RETENTION (50% Neuron Budget on R1-Distill-14B & Coder-14B)
+==========================================================================================================
+Sparse Post-Training Retention (50% Budget) |   Kept % | Specialist PPL | Next-Tok Acc | KL(Spec||Edit)
+----------------------------------------------------------------------------------------------------------
+[R1] Keep Top-50% Quartet-Violated Clades  |    50.0% |        2.3334 |       80.51% |        0.10581
+[R1] Keep Top-50% Euclidean-Drift Clades   |    50.0% |        2.3592 |       80.92% |        0.11326
+[R1] Keep Random-50% Monophyletic Clades   |    50.0% |        2.2573 |       81.24% |        0.08001
+[R1] Keep Bottom-50% Topo-Conserved Clades |    50.0% |        2.2237 |       81.10% |        0.10468
+----------------------------------------------------------------------------------------------------------
+[Coder] Keep Top-50% Quartet-Violated Clades |    50.0% |       11.0911 |       50.70% |        1.97011
+[Coder] Keep Top-50% Euclidean-Drift Clades |    50.0% |     9886.6816 |        7.85% |        8.80221
+[Coder] Keep Random-50% Monophyletic Clades |    50.0% |      699.7747 |       19.78% |        6.18881
+[Coder] Keep Bottom-50% Topo-Conserved Clades |    50.0% | 485165195.4098 |        1.05% |       31.03624
+
+==========================================================================================================
+PART 4: CROSS-SPECIALIST CLADE-SURGICAL GRAFTING (Grafting R1-Distill Rewired Clades into Coder-14B)
+  Goal: Inject k% of R1-Distill-14B's topologically rewired reasoning clades into Qwen2.5-Coder-14B
+        while avoiding Coder-14B's heavily rewired syntax clades!
+==========================================================================================================
+Coder-14B + 20% R1-Distill Clade Graft     | R1 Graft | Code KL(C||M) |   Reas PPL | Reas KL Gain
+----------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (0% R1 Graft)       |     0.0% |       0.00000 |     2.1649 |      0.00000
+Tree-Surgical Graft (High z_R1 - z_Coder)  |    20.0% |       0.37574 |     2.9258 |     -0.22401
+Random 20% Clade Graft                     |    20.0% |       0.14237 |     2.3161 |     +0.00358
+Anti-Surgical Graft (Low z_R1 - z_Coder)   |    20.0% |      16.72300 | 92074344.8377 |    -17.56899
+==========================================================================================================
+
+Completed all surgical evaluations in 168.1s!

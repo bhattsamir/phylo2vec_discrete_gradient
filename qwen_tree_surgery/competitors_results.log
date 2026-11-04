@@ -1,0 +1,152 @@
+Step 1/3: Extracting Base MLP weights on CPU and loading R1-Distill-14B on cuda:0...
+Computing R1 3-Matrix Frobenius Norm & Spherical k-Means Cluster-Switching baselines...
+
+==============================================================================================================================
+TABLE 2: ULTRA-SPARSE CLADE KNOCK-OUT ON R1-DISTILL-14B (Top 5, 10, 25, 50 Clades out of 6171)
+==============================================================================================================================
+Clade Knock-Out Rule (R1-Distill-14B)        |   Budget | Neurons |   R1 CoT PPL | Next-Tok Acc |  KL(R1 || Edit)
+------------------------------------------------------------------------------------------------------------------------------
+Pure R1-Distill-14B (Unedited)               |   0/6171 |   0.00% |       2.1555 |       90.00% |         0.00000
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-5   Quartet-Violated Clades (Tree) |   5/6171 |   0.08% |       2.1561 |       90.13% |         0.00041
+Revert Top-5   Spherical k-Means Clades      |   5/6171 |   0.08% |       2.1561 |       90.05% |         0.00035
+Revert Top-5   Cosine-Drift Clades (1-cos)   |   5/6171 |   0.08% |       2.1544 |       90.17% |         0.00036
+Revert Top-5   3-Matrix Frobenius Clades (L2) |   5/6171 |   0.08% |       2.1552 |       90.22% |         0.00039
+Revert Random-5   Monophyletic Clades        |   5/6171 |   0.08% |       2.1562 |       90.09% |         0.00039
+Revert Bottom-5   Topo-Conserved Clades      |   5/6171 |   0.08% |       2.1602 |       90.05% |         0.00054
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-10  Quartet-Violated Clades (Tree) |  10/6171 |   0.16% |       2.1568 |       89.96% |         0.00044
+Revert Top-10  Spherical k-Means Clades      |  10/6171 |   0.16% |       2.1612 |       90.05% |         0.00049
+Revert Top-10  Cosine-Drift Clades (1-cos)   |  10/6171 |   0.16% |       2.1543 |       90.30% |         0.00040
+Revert Top-10  3-Matrix Frobenius Clades (L2) |  10/6171 |   0.16% |       2.1539 |       90.05% |         0.00043
+Revert Random-10  Monophyletic Clades        |  10/6171 |   0.15% |       2.1559 |       90.13% |         0.00055
+Revert Bottom-10  Topo-Conserved Clades      |  10/6171 |   0.16% |       2.1579 |       90.22% |         0.00054
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-25  Quartet-Violated Clades (Tree) |  25/6171 |   0.41% |       2.1581 |       90.43% |         0.00056
+Revert Top-25  Spherical k-Means Clades      |  25/6171 |   0.41% |       2.1562 |       90.17% |         0.00045
+Revert Top-25  Cosine-Drift Clades (1-cos)   |  25/6171 |   0.41% |       2.1551 |       90.09% |         0.00050
+Revert Top-25  3-Matrix Frobenius Clades (L2) |  25/6171 |   0.41% |       2.1545 |       89.92% |         0.00061
+Revert Random-25  Monophyletic Clades        |  25/6171 |   0.41% |       2.1536 |       90.00% |         0.00058
+Revert Bottom-25  Topo-Conserved Clades      |  25/6171 |   0.41% |       2.1592 |       90.13% |         0.00048
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-50  Quartet-Violated Clades (Tree) |  50/6171 |   0.81% |       2.1551 |       90.09% |         0.00076
+Revert Top-50  Spherical k-Means Clades      |  50/6171 |   0.81% |       2.1505 |       90.26% |         0.00043
+Revert Top-50  Cosine-Drift Clades (1-cos)   |  50/6171 |   0.81% |       2.1552 |       90.13% |         0.00060
+Revert Top-50  3-Matrix Frobenius Clades (L2) |  50/6171 |   0.80% |       2.1502 |       89.88% |         0.00091
+Revert Random-50  Monophyletic Clades        |  50/6171 |   0.81% |       2.1628 |       89.92% |         0.00110
+Revert Bottom-50  Topo-Conserved Clades      |  50/6171 |   0.81% |       2.1498 |       90.13% |         0.00066
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-100 Quartet-Violated Clades (Tree) | 100/6171 |   1.63% |       2.1545 |       89.79% |         0.00128
+Revert Top-100 Spherical k-Means Clades      | 100/6171 |   1.63% |       2.1585 |       90.26% |         0.00060
+Revert Top-100 Cosine-Drift Clades (1-cos)   | 100/6171 |   1.63% |       2.1464 |       90.05% |         0.00059
+Revert Top-100 3-Matrix Frobenius Clades (L2) | 100/6171 |   1.61% |       2.1516 |       89.79% |         0.00174
+Revert Random-100 Monophyletic Clades        | 100/6171 |   1.60% |       2.1450 |       89.92% |         0.00141
+Revert Bottom-100 Topo-Conserved Clades      | 100/6171 |   1.63% |       2.1466 |       90.13% |         0.00083
+
+Step 2/3: Loading Qwen2.5-Coder-14B on cuda:0 and computing Coder baselines...
+
+==============================================================================================================================
+TABLE 1: ULTRA-SPARSE CLADE KNOCK-OUT ON QWEN2.5-CODER-14B (Top 5, 10, 25, 50 Clades out of 6171 Total Clades)
+  Reverting ONLY k clades (< 0.2% to 1.2% of the network) back to Qwen2.5-14B Base:
+==============================================================================================================================
+Clade Knock-Out Rule                         |   Clades | Neurons |     Code PPL | Next-Tok Acc | KL(Coder||Edit)
+------------------------------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (0 Clades Reverted)   |   0/6171 |   0.00% |       1.4624 |       90.04% |         0.00000
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-5   Quartet-Violated Clades (Tree) |   5/6171 |   0.08% |       1.4614 |       90.11% |         0.00055
+Revert Top-5   Spherical k-Means Clades      |   5/6171 |   0.08% |       1.4622 |       90.04% |         0.00054
+Revert Top-5   Cosine-Drift Clades (1-cos)   |   5/6171 |   0.08% |       1.4625 |       89.97% |         0.00063
+Revert Top-5   3-Matrix Frobenius Clades (L2) |   5/6171 |   0.08% |       1.4621 |       90.18% |         0.00103
+Revert Random-5   Monophyletic Clades        |   5/6171 |   0.08% |       1.4616 |       89.97% |         0.00088
+Revert Bottom-5   Topo-Conserved Clades      |   5/6171 |   0.05% |       1.4614 |       90.04% |         0.00065
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-10  Quartet-Violated Clades (Tree) |  10/6171 |   0.16% |       1.4626 |       90.11% |         0.00056
+Revert Top-10  Spherical k-Means Clades      |  10/6171 |   0.16% |       1.4666 |       90.11% |         0.00250
+Revert Top-10  Cosine-Drift Clades (1-cos)   |  10/6171 |   0.16% |       1.4613 |       90.04% |         0.00069
+Revert Top-10  3-Matrix Frobenius Clades (L2) |  10/6171 |   0.16% |       1.4930 |       89.97% |         0.02322
+Revert Random-10  Monophyletic Clades        |  10/6171 |   0.16% |       1.4750 |       89.76% |         0.01034
+Revert Bottom-10  Topo-Conserved Clades      |  10/6171 |   0.08% |       1.4628 |       89.83% |         0.00100
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-25  Quartet-Violated Clades (Tree) |  25/6171 |   0.41% |       1.4626 |       90.04% |         0.00055
+Revert Top-25  Spherical k-Means Clades      |  25/6171 |   0.41% |       1.9323 |       83.94% |         0.27553
+Revert Top-25  Cosine-Drift Clades (1-cos)   |  25/6171 |   0.41% |       1.4614 |       90.18% |         0.00090
+Revert Top-25  3-Matrix Frobenius Clades (L2) |  25/6171 |   0.41% |       1.4900 |       90.04% |         0.02453
+Revert Random-25  Monophyletic Clades        |  25/6171 |   0.41% |       1.4659 |       90.04% |         0.00200
+Revert Bottom-25  Topo-Conserved Clades      |  25/6171 |   0.18% |       1.4647 |       89.83% |         0.00424
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-50  Quartet-Violated Clades (Tree) |  50/6171 |   0.81% |       1.4602 |       90.04% |         0.00073
+Revert Top-50  Spherical k-Means Clades      |  50/6171 |   0.81% |       1.9888 |       83.66% |         0.30170
+Revert Top-50  Cosine-Drift Clades (1-cos)   |  50/6171 |   0.81% |       1.4633 |       89.76% |         0.00118
+Revert Top-50  3-Matrix Frobenius Clades (L2) |  50/6171 |   0.81% |       1.5086 |       89.97% |         0.03378
+Revert Random-50  Monophyletic Clades        |  50/6171 |   0.80% |       1.4712 |       89.90% |         0.00462
+Revert Bottom-50  Topo-Conserved Clades      |  50/6171 |   0.57% |       1.4738 |       90.53% |         0.01341
+------------------------------------------------------------------------------------------------------------------------------
+Revert Top-100 Quartet-Violated Clades (Tree) | 100/6171 |   1.63% |       1.7652 |       87.66% |         0.18521
+Revert Top-100 Spherical k-Means Clades      | 100/6171 |   1.63% |       2.5340 |       80.79% |         0.54244
+Revert Top-100 Cosine-Drift Clades (1-cos)   | 100/6171 |   1.63% |       1.4688 |       89.62% |         0.00317
+Revert Top-100 3-Matrix Frobenius Clades (L2) | 100/6171 |   1.63% |       1.5316 |       89.55% |         0.04936
+Revert Random-100 Monophyletic Clades        | 100/6171 |   1.63% |       1.4695 |       90.04% |         0.00562
+Revert Bottom-100 Topo-Conserved Clades      | 100/6171 |   1.39% |       1.4850 |       90.60% |         0.02029
+
+==============================================================================================================================
+TABLE 3: PER-LAYER STRATIFIED RETENTION vs. COMPETITORS ON QWEN2.5-CODER-14B (With Live Code Execution Pass@1)
+  Every layer l=0..47 keeps the exact same k% budget (Tree vs. Spherical k-Means vs. Frobenius vs. Cosine vs. DARE)
+==============================================================================================================================
+Per-Layer Retention Method & Budget            |  Kept % |    Code PPL | Next-Tok Acc | KL(Coder||Edit) | Live Pass@1
+------------------------------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (100% Kept)             |  100.0% |      1.4624 |       90.04% |         0.00000 |   5/8 (62%)
+------------------------------------------------------------------------------------------------------------------------------
+[Tree] Keep Top-85% Quartet-Violated Clades    |   85.2% |      1.7170 |       88.92% |         0.16877 |   4/8 (50%)
+[k-Means] Keep Top-85% Spherical k-Means Clades |   85.2% |      2.1016 |       84.43% |         0.38350 |    0/8 (0%)
+[Frobenius] Keep Top-85% 3-Matrix L2 Clades    |   85.1% |      1.5724 |       88.71% |         0.08453 |   4/8 (50%)
+[Cosine] Keep Top-85% Cosine-Drift Clades      |   85.1% |      1.7574 |       87.87% |         0.19509 |   4/8 (50%)
+[Random] Keep Random-85% Monophyletic Clades   |   85.2% |      1.6498 |       87.52% |         0.11559 |   4/8 (50%)
+[Conserved] Keep Bottom-85% Topo-Conserved     |   85.2% |      1.6823 |       87.87% |         0.14105 |   5/8 (62%)
+[DARE] Keep 85% Random + 1/p Rescale (ICML 24) |   85.0% |      1.7682 |       86.82% |         0.21942 |   1/8 (12%)
+------------------------------------------------------------------------------------------------------------------------------
+[Tree] Keep Top-70% Quartet-Violated Clades    |   70.3% |      2.0942 |       82.40% |         0.36242 |    0/8 (0%)
+[k-Means] Keep Top-70% Spherical k-Means Clades |   70.3% |      2.5317 |       78.96% |         0.56701 |    0/8 (0%)
+[Frobenius] Keep Top-70% 3-Matrix L2 Clades    |   70.3% |      1.7868 |       84.92% |         0.23072 |   1/8 (12%)
+[Cosine] Keep Top-70% Cosine-Drift Clades      |   70.3% |      2.3903 |       79.24% |         0.49724 |    0/8 (0%)
+[Random] Keep Random-70% Monophyletic Clades   |   70.3% |  16729.5448 |        7.29% |         9.31377 |    0/8 (0%)
+[Conserved] Keep Bottom-70% Topo-Conserved     |   70.3% |     14.2548 |       60.31% |         2.24817 |    0/8 (0%)
+[DARE] Keep 70% Random + 1/p Rescale (ICML 24) |   70.0% |   2262.0159 |        8.98% |         7.28156 |    0/8 (0%)
+------------------------------------------------------------------------------------------------------------------------------
+[Tree] Keep Top-50% Quartet-Violated Clades    |   50.0% |     11.4216 |       56.03% |         2.04641 |    0/8 (0%)
+[k-Means] Keep Top-50% Spherical k-Means Clades |   50.0% |   3484.7803 |        6.80% |         7.73787 |    0/8 (0%)
+[Frobenius] Keep Top-50% 3-Matrix L2 Clades    |   50.0% | 181083.6665 |        1.05% |        11.69933 |    0/8 (0%)
+[Cosine] Keep Top-50% Cosine-Drift Clades      |   50.0% |     61.9352 |       44.11% |         3.71672 |    0/8 (0%)
+[Random] Keep Random-50% Monophyletic Clades   |   50.0% |  45611.4319 |        1.19% |        10.34452 |    0/8 (0%)
+[Conserved] Keep Bottom-50% Topo-Conserved     |   50.0% | 485165195.4098 |        0.70% |        23.00242 |    0/8 (0%)
+[DARE] Keep 50% Random + 1/p Rescale (ICML 24) |   50.0% | 485165195.4098 |        0.35% |        35.23169 |    0/8 (0%)
+
+==============================================================================================================================
+TABLE 4: MODEL MERGING BENCHMARK (Tree-Surgical Clade Grafting vs. TIES-Merging vs. Spherical k-Means vs. Frobenius)
+  Merging R1-Distill-14B reasoning into Qwen2.5-Coder-14B at 5%, 10%, and 20% Clade Budgets
+==============================================================================================================================
+Model Merging / Clade Grafting Method          |  Budget | Code KL(C||M) |   Live Code |  R1 CoT PPL | R1 CoT KL(R1||M)
+------------------------------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (Unmerged)              |    0.0% |       0.00000 |   5/8 (62%) |      3.4427 |          0.74608
+[TIES-Merging] Trim 25% + Sign Election (w=0.5) |   25.0% |       0.09634 |   4/8 (50%) |      3.4894 |          0.75223
+[TIES-Merging] Trim 25% + Sign Election (w=1.0) |   25.0% |       0.18272 |   3/8 (38%) |      3.9268 |          0.86878
+------------------------------------------------------------------------------------------------------------------------------
+[Tree-Surgical] Top-5% (z_R1 - z_Coder)        |    5.0% |       0.00127 |   5/8 (62%) |      3.3647 |          0.72815
+[k-Means-Diff] Top-5% (km_R1 - km_Coder)       |    5.0% |       0.00146 |   4/8 (50%) |      3.3741 |          0.72444
+[Frobenius-Diff] Top-5% (L2_R1 - L2_Coder)     |    5.0% |       0.00149 |   5/8 (62%) |      3.3785 |          0.72024
+[Random Clades] 5% Monophyletic Clades         |    5.0% |       0.00154 |   5/8 (62%) |      3.3780 |          0.72538
+[Anti-Surgical] Bottom-5% (z_R1 - z_Coder)     |    5.0% |       0.00163 |   5/8 (62%) |      3.4451 |          0.74694
+------------------------------------------------------------------------------------------------------------------------------
+[Tree-Surgical] Top-10% (z_R1 - z_Coder)       |   10.0% |       0.00206 |   4/8 (50%) |      3.2726 |          0.69862
+[k-Means-Diff] Top-10% (km_R1 - km_Coder)      |   10.0% |       0.00239 |   5/8 (62%) |      3.2713 |          0.69233
+[Frobenius-Diff] Top-10% (L2_R1 - L2_Coder)    |   10.0% |       0.00260 |   5/8 (62%) |      3.2590 |          0.68567
+[Random Clades] 10% Monophyletic Clades        |   10.0% |       0.00191 |   6/8 (75%) |      3.3349 |          0.71499
+[Anti-Surgical] Bottom-10% (z_R1 - z_Coder)    |   10.0% |       0.00303 |   5/8 (62%) |      3.3884 |          0.73218
+------------------------------------------------------------------------------------------------------------------------------
+[Tree-Surgical] Top-20% (z_R1 - z_Coder)       |   20.0% |       0.00447 |   5/8 (62%) |      3.1363 |          0.65263
+[k-Means-Diff] Top-20% (km_R1 - km_Coder)      |   20.0% |       0.00486 |   5/8 (62%) |      3.1488 |          0.65255
+[Frobenius-Diff] Top-20% (L2_R1 - L2_Coder)    |   20.0% |       0.00499 |   5/8 (62%) |      3.1266 |          0.63846
+[Random Clades] 20% Monophyletic Clades        |   20.0% |       0.00380 |   5/8 (62%) |      3.2058 |          0.67451
+[Anti-Surgical] Bottom-20% (z_R1 - z_Coder)    |   20.0% |       0.01063 |   5/8 (62%) |      3.2365 |          0.68463
+==============================================================================================================================
+
+Completed all competitor & ultra-sparse clade benchmarks in 765.0s!

@@ -1,0 +1,82 @@
+Loading Base, R1-Distill-14B (cuda:0), and Coder-14B (cuda:1)...
+Computing exact 3-matrix Frobenius norm changes ||Delta W_MLP||_F per neuron...
+Generating native R1-Distill-14B Chain-of-Thought traces on the 8 Math problems...
+2
+2
+
+========================================================================================================================
+EXPERIMENT 1: FINE-GRAINED SURGICAL KNOCK-OUT ON R1-DISTILL-14B (Native R1 Chain-of-Thought Traces)
+  Testing R1's sparse clade regime (k = 2%, 5%, 10%, 15% of MLP clades reverted to Qwen2.5-14B Base)
+========================================================================================================================
+Clade Knock-Out Selection                    | Reverted |  R1 CoT PPL | Next-Tok Acc | KL(R1 || Edit) | Ratio vs Clean
+------------------------------------------------------------------------------------------------------------------------
+Pure R1-Distill-14B (Unedited)               |     0.0% |      1.8894 |       92.29% |        0.00000 |            ---
+------------------------------------------------------------------------------------------------------------------------
+Revert Top- 2% Topo-Violated Clades          |     2.0% |      1.8861 |       91.93% |        0.00125 |          1.23x
+Revert Top- 2% Frobenius-L2 Norm Clades      |     2.0% |      1.8915 |       91.50% |        0.00189 |          1.87x
+Revert Random- 2% Monophyletic Clades        |     2.0% |      1.8847 |       92.00% |        0.00153 |          1.51x
+Revert Bottom- 2% Topo-Conserved Clades      |     2.0% |      1.8776 |       92.03% |        0.00101 |          1.00x
+------------------------------------------------------------------------------------------------------------------------
+Revert Top- 5% Topo-Violated Clades          |     5.0% |      1.8708 |       91.73% |        0.00379 |          1.03x
+Revert Top- 5% Frobenius-L2 Norm Clades      |     5.0% |      1.8877 |       91.00% |        0.00589 |          1.60x
+Revert Random- 5% Monophyletic Clades        |     5.0% |      1.8675 |       91.73% |        0.00389 |          1.05x
+Revert Bottom- 5% Topo-Conserved Clades      |     5.0% |      1.8810 |       91.40% |        0.00369 |          1.00x
+------------------------------------------------------------------------------------------------------------------------
+Revert Top-10% Topo-Violated Clades          |    10.0% |      1.8498 |       91.17% |        0.01363 |          1.29x
+Revert Top-10% Frobenius-L2 Norm Clades      |    10.0% |      1.8855 |       90.10% |        0.01555 |          1.47x
+Revert Random-10% Monophyletic Clades        |    10.0% |      1.8748 |       90.73% |        0.01119 |          1.06x
+Revert Bottom-10% Topo-Conserved Clades      |    10.0% |      1.8887 |       90.77% |        0.01058 |          1.00x
+------------------------------------------------------------------------------------------------------------------------
+Revert Top-15% Topo-Violated Clades          |    15.0% |      1.8329 |       90.44% |        0.02141 |          1.10x
+Revert Top-15% Frobenius-L2 Norm Clades      |    15.0% |      1.8975 |       89.01% |        0.02888 |          1.48x
+Revert Random-15% Monophyletic Clades        |    15.0% |      1.8706 |       90.20% |        0.02004 |          1.03x
+Revert Bottom-15% Topo-Conserved Clades      |    15.0% |      1.8978 |       90.17% |        0.01951 |          1.00x
+------------------------------------------------------------------------------------------------------------------------
+Revert Top-25% Topo-Violated Clades          |    25.0% |      1.8418 |       89.60% |        0.03957 |          1.03x
+Revert Top-25% Frobenius-L2 Norm Clades      |    25.0% |      1.9382 |       87.35% |        0.06306 |          1.64x
+Revert Random-25% Monophyletic Clades        |    25.0% |      1.8946 |       89.54% |        0.04020 |          1.04x
+Revert Bottom-25% Topo-Conserved Clades      |    25.0% |      1.9032 |       89.17% |        0.03855 |          1.00x
+Loading Base, R1-Distill-14B (cuda:0), and Coder-14B (cuda:1)...
+Computing exact 3-matrix Frobenius norm changes ||Delta W_MLP||_F per neuron...
+Generating native R1-Distill-14B Chain-of-Thought traces on the 8 Math problems...
+
+========================================================================================================================
+EXPERIMENT 2: SPARSE POST-TRAINING RETENTION CURVE ON QWEN2.5-CODER-14B (With Live Code Execution Pass@1)
+  Comparing Phylogenetic Quartet-Violated Clades vs. 3-Matrix Frobenius Norm vs. Cosine Drift vs. Random Clades
+========================================================================================================================
+Retention Method & Budget                    |   Kept % |    Code PPL | Next-Tok Acc | KL(Coder||Edit) | Live Pass@1
+------------------------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (100% Kept)           |   100.0% |      1.4624 |       90.04% |         0.00000 |   5/8 (62%)
+------------------------------------------------------------------------------------------------------------------------
+Keep Top-85% Quartet-Violated Clades (Tree)  |    85.0% |      1.6816 |       88.64% |         0.14064 |   1/8 (12%)
+Keep Top-85% 3-Matrix Frobenius Clades (L2)  |    85.0% | 25025791.5062 |        0.56% |        16.60702 |    0/8 (0%)
+Keep Top-85% Cosine-Drift Clades (1-cos)     |    85.0% |      1.7870 |       88.71% |         0.20732 |   3/8 (38%)
+Keep Random-85% Monophyletic Clades          |    85.0% |      1.9000 |       86.12% |         0.25977 |   3/8 (38%)
+Keep Bottom-85% Topo-Conserved Clades        |    85.0% | 28361680.4352 |        0.42% |        16.73783 |    0/8 (0%)
+------------------------------------------------------------------------------------------------------------------------
+Keep Top-70% Quartet-Violated Clades (Tree)  |    70.0% |      2.2151 |       83.80% |         0.40526 |    0/8 (0%)
+Keep Top-70% 3-Matrix Frobenius Clades (L2)  |    70.0% | 270997458.9242 |        0.14% |        18.97583 |    0/8 (0%)
+Keep Top-70% Cosine-Drift Clades (1-cos)     |    70.0% |      2.6007 |       84.43% |         0.57747 |    0/8 (0%)
+Keep Random-70% Monophyletic Clades          |    70.0% |      3.9143 |       72.37% |         0.97383 |    0/8 (0%)
+Keep Bottom-70% Topo-Conserved Clades        |    70.0% |  42044.5954 |        0.00% |        10.21888 |    0/8 (0%)
+------------------------------------------------------------------------------------------------------------------------
+Keep Top-50% Quartet-Violated Clades (Tree)  |    50.0% |     11.0911 |       50.70% |         1.97011 |    0/8 (0%)
+Keep Top-50% 3-Matrix Frobenius Clades (L2)  |    50.0% | 485165195.4098 |        0.21% |        25.46743 |    0/8 (0%)
+Keep Top-50% Cosine-Drift Clades (1-cos)     |    50.0% |   9886.6816 |        7.85% |         8.80221 |    0/8 (0%)
+Keep Random-50% Monophyletic Clades          |    50.0% | 870829.7321 |        2.03% |        13.27127 |    0/8 (0%)
+Keep Bottom-50% Topo-Conserved Clades        |    50.0% | 485165195.4098 |        1.05% |        31.03624 |    0/8 (0%)
+
+========================================================================================================================
+EXPERIMENT 3: CLADE-SURGICAL TASK-VECTOR GRAFTING (Injecting R1-Distill Task Vector into Qwen2.5-Coder-14B)
+  W_merged = W_Coder + (W_R1 - W_Base) on 25% of clades: Tree-Surgical vs. Random vs. Anti-Surgical
+========================================================================================================================
+Task-Vector Clade Grafting Method            |  Grafted | Code KL(C||M) |   Live Code |  R1 CoT PPL | R1 CoT KL(R1||M)
+------------------------------------------------------------------------------------------------------------------------
+Pure Qwen2.5-Coder-14B (0% R1 Task Vector)   |     0.0% |       0.00000 |   5/8 (62%) |      3.4427 |          0.74608
+Tree-Surgical Clades (High z_R1 - z_Coder)   |    25.0% |       0.00582 |   4/8 (50%) |      3.0502 |          0.62834
+Top R1 Quartet-Violated Clades (High z_R1)   |    25.0% |       0.02727 |   5/8 (62%) |      3.1336 |          0.65450
+Random 25% Monophyletic Clades               |    25.0% |       0.00688 |   6/8 (75%) |      3.2045 |          0.66850
+Anti-Surgical Clades (Low z_R1 - z_Coder)    |    25.0% |       0.02441 |   5/8 (62%) |      3.1758 |          0.67077
+========================================================================================================================
+
+All definitive proof-of-principle experiments finished in 343.9s!
