@@ -218,8 +218,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $18.62 \pm 0.89$ & $8.04 \pm 0.24$ & --- & $131.6 \pm 2.2$ & --- & 64 CPU\\
 1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{14.42 \pm 0.47}$ & $18.30 \pm 0.58$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
 1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.62 \pm 0.65$ & $9.42 \pm 0.27$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
-1,000 & 5 & \textbf{Phylo2Vec-Full} & $18.13 \pm 0.79$ & $\mathbf{0.04 \pm 0.01}$ & $\mathbf{-144.10 \pm 1.46}$ & $106.8 \pm 0.0$ & $688.8$ & 64 CPU + $1\times$ H100\\
-1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $18.31 \pm 1.19$ & $\mathbf{0.04 \pm 0.00}$ & $-144.10 \pm 1.45$ & $735.7 \pm 1.4$ & $690.8$ & 64 CPU + $1\times$ H100\\
+1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $18.31 \pm 1.19$ & $\mathbf{0.04 \pm 0.00}$ & $\mathbf{-144.10 \pm 1.45}$ & $735.7 \pm 1.4$ & $690.8$ & 64 CPU + $1\times$ H100\\
 \midrule
 5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 5,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $18.82 \pm 0.77$ & $2.07 \pm 0.06$ & --- & $133.0 \pm 0.0$ & $580.0$ & 64 CPU + $1\times$ A6000\\
@@ -227,8 +226,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $43.17 \pm 9.67$ & $42.96 \pm 0.86$ & --- & $317.6 \pm 7.4$ & --- & 64 CPU\\
 5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{13.62 \pm 1.33}$ & $117.48 \pm 5.45$ & --- & $292.2 \pm 1.8$ & --- & 64 CPU\\
 5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.85 \pm 1.41$ & $50.22 \pm 1.55$ & --- & $318.6 \pm 8.0$ & --- & 64 CPU\\
-5,000 & 5 & \textbf{Phylo2Vec-Full} & $14.94 \pm 0.61$ & $2.29 \pm 0.16$ & $\mathbf{-869.75 \pm 6.90}$ & $111.7 \pm 0.7$ & $694.8$ & 64 CPU + $1\times$ H100\\
-5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $14.80 \pm 0.62$ & $\mathbf{0.49 \pm 0.05}$ & $-869.75 \pm 6.89$ & $739.9 \pm 0.7$ & $696.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $14.80 \pm 0.62$ & $\mathbf{0.49 \pm 0.05}$ & $\mathbf{-869.75 \pm 6.89}$ & $739.9 \pm 0.7$ & $696.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $17.78 \pm 0.38$ & $8.90 \pm 0.10$ & --- & $145.8 \pm 0.8$ & $1156.0$ & 64 CPU + $1\times$ A6000\\
@@ -236,8 +234,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $58.97 \pm 6.78$ & $90.56 \pm 3.09$ & --- & $542.3 \pm 7.1$ & --- & 64 CPU\\
 10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $14.47 \pm 1.33$ & $280.93 \pm 11.76$ & --- & $571.8 \pm 1.3$ & --- & 64 CPU\\
 10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.29 \pm 0.59$ & $103.90 \pm 3.22$ & --- & $545.0 \pm 6.8$ & --- & 64 CPU\\
-10,000 & 5 & \textbf{Phylo2Vec-Full} & $13.69 \pm 0.36$ & $23.00 \pm 3.28$ & $\mathbf{-1868.38 \pm 10.02}$ & $429.9 \pm 157.2$ & $698.8$ & 64 CPU + $1\times$ H100\\
-10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{13.65 \pm 0.40}$ & $\mathbf{1.39 \pm 0.66}$ & $-1868.34 \pm 9.98$ & $743.8 \pm 1.1$ & $700.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{13.65 \pm 0.40}$ & $\mathbf{1.39 \pm 0.66}$ & $\mathbf{-1868.34 \pm 9.98}$ & $743.8 \pm 1.1$ & $700.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $19.50 \pm 0.15$ & $59.83 \pm 5.51$ & --- & $246.6 \pm 0.8$ & $446.0$ & 64 CPU + $1\times$ A6000\\
@@ -280,7 +277,6 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $4.99 \pm 1.36$ & $47.15 \pm 1.77$ & --- & $599.4 \pm 37.4$ & --- & 64 CPU\\
 1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{2.61 \pm 0.52}$ & $91.23 \pm 1.30$ & --- & $395.4 \pm 3.9$ & --- & 64 CPU\\
 1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $2.63 \pm 0.67$ & $52.11 \pm 1.45$ & --- & $603.1 \pm 44.1$ & --- & 64 CPU\\
-1,000 & 5 & \textbf{Phylo2Vec-Full} & $4.25 \pm 0.56$ & $\mathbf{0.04 \pm 0.00}$ & $\mathbf{-132.79 \pm 1.63}$ & $112.0 \pm 0.0$ & $696.8$ & 64 CPU + $1\times$ H100\\
 1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $4.29 \pm 0.58$ & $\mathbf{0.04 \pm 0.01}$ & $\mathbf{-132.79 \pm 1.63}$ & $741.0 \pm 0.9$ & $698.8$ & 64 CPU + $1\times$ H100\\
 \midrule
 5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
@@ -289,8 +285,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $9.27 \pm 2.30$ & $238.48 \pm 5.14$ & --- & $1666.2 \pm 47.3$ & --- & 64 CPU\\
 5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.04 \pm 0.31$ & $541.68 \pm 22.96$ & --- & $1742.7 \pm 4.4$ & --- & 64 CPU\\
 5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.98 \pm 0.36}$ & $256.49 \pm 5.46$ & --- & $1649.8 \pm 45.5$ & --- & 64 CPU\\
-5,000 & 5 & \textbf{Phylo2Vec-Full} & $3.36 \pm 0.07$ & $2.81 \pm 0.42$ & $\mathbf{-738.35 \pm 9.75}$ & $136.5 \pm 0.0$ & $720.8$ & 64 CPU + $1\times$ H100\\
-5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.33 \pm 0.12$ & $\mathbf{1.02 \pm 0.04}$ & $-738.28 \pm 9.79$ & $765.5 \pm 0.9$ & $722.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.33 \pm 0.12$ & $\mathbf{1.02 \pm 0.04}$ & $\mathbf{-738.28 \pm 9.79}$ & $765.5 \pm 0.9$ & $722.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.21 \pm 0.11$ & $9.31 \pm 0.05$ & --- & $266.6 \pm 0.8$ & $1196.0$ & 64 CPU + $1\times$ A6000\\
@@ -298,8 +293,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & --- & $2766.5 \pm 14.1$ & --- & 64 CPU\\
 10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & --- & $3411.9 \pm 9.2$ & --- & 64 CPU\\
 10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & --- & $2770.2 \pm 26.4$ & --- & 64 CPU\\
-10,000 & 5 & \textbf{Phylo2Vec-Full} & $3.08 \pm 0.09$ & $26.76 \pm 4.50$ & $\mathbf{-1542.81 \pm 15.45}$ & $440.4 \pm 136.2$ & $750.8$ & 64 CPU + $1\times$ H100\\
-10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $-1542.67 \pm 15.40$ & $796.2 \pm 0.0$ & $752.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $\mathbf{-1542.67 \pm 15.40}$ & $796.2 \pm 0.0$ & $752.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.90 \pm 0.17$ & $66.30 \pm 1.36$ & --- & $1038.6 \pm 6.4$ & $646.0$ & 64 CPU + $1\times$ A6000\\
@@ -341,8 +335,7 @@ FastTreeMP 2.2 (\texttt{-noml -intree}) & $47.52 \pm 10.80$ & $85.00 \pm 3.06$ &
 VeryFastTree 4.0 (\texttt{-noml -intree}) & $41.36 \pm 5.67$ & $50.23 \pm 2.15$ & --- & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & ---\\
 FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $12.18 \pm 0.80$ & $129.78 \pm 5.78$ & --- & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & ---\\
 VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{11.87 \pm 0.63}$ & $55.72 \pm 2.27$ & --- & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & ---\\
-\textbf{Phylo2Vec-Full} & $13.26 \pm 0.32$ & $28.63 \pm 3.34$ & $\mathbf{-1561.93 \pm 26.97}$ & $3.08 \pm 0.09$ & $26.76 \pm 4.50$ & $\mathbf{-1542.81 \pm 15.45}$\\
-\textbf{Phylo2Vec-Minibatch} & $13.25 \pm 0.23$ & $\mathbf{0.90 \pm 0.03}$ & $-1561.84 \pm 26.90$ & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $-1542.67 \pm 15.40$\\
+\textbf{Phylo2Vec-Minibatch} & $13.25 \pm 0.23$ & $\mathbf{0.90 \pm 0.03}$ & $\mathbf{-1561.84 \pm 26.90}$ & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $\mathbf{-1542.67 \pm 15.40}$\\
 \bottomrule
 \end{tabular*}
 \end{table*}
