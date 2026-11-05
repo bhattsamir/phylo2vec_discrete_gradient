@@ -25,8 +25,10 @@
 #include <vector>
 #include <queue>
 #include <algorithm>
+#include <functional>
 #include <omp.h>
 #include <cuda_runtime.h>
+#include "bme_branch_lengths_gpu.cuh"
 
 static void relabel_from_rooted_tree(
     const int32_t *c1_r,
@@ -2118,6 +2120,14 @@ static void compute_skeleton_leaf_dists(
     }
 }
 
+/* Exact acceptance check policy (--eta). A window's skeleton update is re-scored on complete
+ * leaf profiles only when its capped-profile gain is small, dL_capped > -eta; larger gains are
+ * accepted as proposed. eta = inf checks every improving window; eta = 0 (default) none. */
+static double g_exact_check_eta = 0.0;
+
+/* Supplies complete (uncapped) leaf profiles to the acceptance check, building them on first use. */
+typedef std::function<void(const int32_t **, const int32_t **, const float **)> ExactProfileBuilder;
+
 /* Optimize one K-leaf skeleton on GPU with path-disjoint SPR batching, monotonic condensed-skeleton
  * BME check, and (when exact_prof_* is supplied) an exact full-objective GPU acceptance check on
  * all changed super-leaf pairs involving capped clades or capped outside profiles. */
@@ -2129,7 +2139,8 @@ static double optimize_skeleton_on_gpu(
     std::vector<int64_t> &v_cf, std::vector<int32_t> &perm,
     const int32_t *exact_prof_offsets = NULL,
     const int32_t *exact_prof_leaves = NULL,
-    const float *exact_prof_weights = NULL
+    const float *exact_prof_weights = NULL,
+    const ExactProfileBuilder *exact_builder = NULL
 ) {
     CUDA_CHECK(cudaSetDevice(gpu_ws.dev_id));
     const int32_t R_sk = 2 * K - 1;
@@ -2382,7 +2393,9 @@ static double optimize_skeleton_on_gpu(
         return 0.0;
     }
 
-    if (exact_prof_offsets != NULL && exact_prof_leaves != NULL && exact_prof_weights != NULL) {
+    const bool have_exact = (exact_prof_offsets != NULL) || (exact_builder != NULL && *exact_builder);
+    if (have_exact && best_L - init_L > -g_exact_check_eta) {
+        if (exact_prof_offsets == NULL) (*exact_builder)(&exact_prof_offsets, &exact_prof_leaves, &exact_prof_weights);
         std::vector<uint8_t> is_capped(K, 0);
         bool any_capped = false;
         for (int32_t a = 0; a < K; ++a) {
@@ -2673,14 +2686,14 @@ static double run_subtree_minibatch_window(
                 max_prof_leaves, prof_leaves, prof_weights
             );
             if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
-                need_exact_prof = false;
+                need_exact_prof = true;
             }
         }
         prof_offsets[K] = (int32_t)prof_leaves.size();
 
         std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
         std::vector<float> exact_prof_weights;
-        if (need_exact_prof) {
+        auto build_exact_prof = [&]() {
             const int32_t exact_cap = (N >= 1000000) ? 2048 : -1;
             exact_prof_offsets.resize(K + 1, 0);
             exact_prof_leaves.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
@@ -2698,7 +2711,13 @@ static double run_subtree_minibatch_window(
                 }
             }
             exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
-        }
+        };
+        ExactProfileBuilder exact_builder = [&](const int32_t **o, const int32_t **l, const float **w) {
+            if (exact_prof_offsets.empty()) build_exact_prof();
+            *o = exact_prof_offsets.data();
+            *l = exact_prof_leaves.data();
+            *w = exact_prof_weights.data();
+        };
 
         std::vector<int64_t> v_mb(K - 1);
         std::vector<int32_t> perm_mb(K);
@@ -2708,9 +2727,8 @@ static double run_subtree_minibatch_window(
             K, W, 200, 128,
             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
             d_packed_seqs, gpu_ws, v_mb, perm_mb,
-            need_exact_prof ? exact_prof_offsets.data() : NULL,
-            need_exact_prof ? exact_prof_leaves.data() : NULL,
-            need_exact_prof ? exact_prof_weights.data() : NULL
+            NULL, NULL, NULL,
+            need_exact_prof ? &exact_builder : NULL
         );
         if (dL == 0.0) return 0.0;
 
@@ -2817,7 +2835,7 @@ static double run_subtree_minibatch_window(
                 max_prof_leaves, prof_leaves, prof_weights
             );
             if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
-                need_exact_prof = false;
+                need_exact_prof = true;
             }
         }
         prof_offsets[K_in] = (int32_t)prof_leaves.size();
@@ -2827,12 +2845,12 @@ static double run_subtree_minibatch_window(
 
         int32_t outgroup_true_leaves = N - leaf_cnt[sub_root];
         if (max_prof_leaves > 0 && outgroup_true_leaves > (int32_t)outgroup_leaves.size()) {
-            need_exact_prof = false;
+            need_exact_prof = true;
         }
 
         std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
         std::vector<float> exact_prof_weights;
-        if (need_exact_prof) {
+        auto build_exact_prof = [&]() {
             const int32_t exact_cap = (N >= 1000000) ? 2048 : -1;
             exact_prof_offsets.resize(K + 1, 0);
             exact_prof_leaves.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
@@ -2860,7 +2878,13 @@ static double run_subtree_minibatch_window(
                 );
             }
             exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
-        }
+        };
+        ExactProfileBuilder exact_builder = [&](const int32_t **o, const int32_t **l, const float **w) {
+            if (exact_prof_offsets.empty()) build_exact_prof();
+            *o = exact_prof_offsets.data();
+            *l = exact_prof_leaves.data();
+            *w = exact_prof_weights.data();
+        };
 
         std::vector<int64_t> v_mb(K - 1);
         std::vector<int32_t> perm_mb(K);
@@ -2870,9 +2894,8 @@ static double run_subtree_minibatch_window(
             K, W, 200, 128,
             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
             d_packed_seqs, gpu_ws, v_mb, perm_mb,
-            need_exact_prof ? exact_prof_offsets.data() : NULL,
-            need_exact_prof ? exact_prof_leaves.data() : NULL,
-            need_exact_prof ? exact_prof_weights.data() : NULL
+            NULL, NULL, NULL,
+            need_exact_prof ? &exact_builder : NULL
         );
         if (dL == 0.0) return 0.0;
 
@@ -3344,6 +3367,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[a], "--json") == 0) emit_json = true;
         else if (strcmp(argv[a], "--prefix") == 0 && a + 1 < argc) custom_prefix = argv[++a];
         else if (strcmp(argv[a], "--sizes") == 0 && a + 1 < argc) sizes_csv = argv[++a];
+        else if (strcmp(argv[a], "--eta") == 0 && a + 1 < argc) g_exact_check_eta = strtod(argv[++a], NULL);
     }
 
     int n_gpus = 0;
@@ -3514,6 +3538,15 @@ int main(int argc, char **argv) {
         }
         double dt_mb_gpu = wall_sec() - t0_mb;
 
+        /* O(N) GPU FastME / Pauplin (2000) BME branch-length estimation for all 2N - 3 edges */
+        std::vector<float> mb_branch_lengths;
+        double bl_prof_s = 0.0, bl_kern_s = 0.0;
+        double bme_tree_len = p2v_bme_bl::compute_bme_branch_lengths_gpu(
+            N, W, curr_c1.data(), curr_c2.data(), d_packed_seqs.data(), n_gpus,
+            mb_branch_lengths, 32, &bl_prof_s, &bl_kern_s
+        );
+        double dt_bl_gpu = bl_prof_s + bl_kern_s;
+
         compute_xor_splits_o_n(curr_c1.data(), curr_c2.data(), N, leaf_hashes.data(), splits_mb_gpu);
         int64_t rf_mb_gpu = count_wrong_splits_rf(splits_true, splits_mb_gpu);
 
@@ -3527,7 +3560,7 @@ int main(int argc, char **argv) {
         } else {
             snprintf(b_full, sizeof(b_full), "N/A (Minibatch)");
         }
-        snprintf(b_mb,   sizeof(b_mb),   "%lld (%.2fs)", (long long)rf_mb_gpu,   dt_mb_gpu);
+        snprintf(b_mb,   sizeof(b_mb),   "%lld (%.2fs+%.2fs BL)", (long long)rf_mb_gpu, dt_mb_gpu, dt_bl_gpu);
         double dL_rep = total_mb_delta_L;
 
         printf("%8d | %22s | %22s | %24s | %24s | %+10.2f\n",
@@ -3541,10 +3574,10 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
             double gpu_vram_mb = (double)(total_b - free_b) / (1024.0 * 1024.0);
             int omp_thr = omp_get_max_threads();
-            printf("[RESULT_JSON] {\"N\": %d, \"L\": %d, \"W\": %d, \"max_splits\": %d, \"rf_init\": %lld, \"rf_me\": %lld, \"rf_full_gpu\": %lld, \"dt_full_gpu\": %.4f, \"dL_full_gpu\": %.4f, \"rf_mb_gpu\": %lld, \"dt_mb_gpu\": %.4f, \"dL_mb_gpu\": %.4f, \"host_ram_mb\": %.1f, \"gpu_vram_mb\": %.1f, \"n_gpus\": %d, \"cpu_threads\": %d, \"gpu_name\": \"%s\"}\n",
+            printf("[RESULT_JSON] {\"N\": %d, \"L\": %d, \"W\": %d, \"max_splits\": %d, \"rf_init\": %lld, \"rf_me\": %lld, \"rf_full_gpu\": %lld, \"dt_full_gpu\": %.4f, \"dL_full_gpu\": %.4f, \"rf_mb_gpu\": %lld, \"dt_mb_gpu\": %.4f, \"dt_bl_gpu\": %.4f, \"bme_tree_len\": %.4f, \"dL_mb_gpu\": %.4f, \"host_ram_mb\": %.1f, \"gpu_vram_mb\": %.1f, \"n_gpus\": %d, \"cpu_threads\": %d, \"gpu_name\": \"%s\"}\n",
                    N, L_sites, W, N - 3, (long long)rf_init, (long long)rf_me,
                    (long long)rf_full_gpu, dt_full_gpu, dL_full_gpu,
-                   (long long)rf_mb_gpu, dt_mb_gpu, total_mb_delta_L,
+                   (long long)rf_mb_gpu, dt_mb_gpu, dt_bl_gpu, bme_tree_len, total_mb_delta_L,
                    host_ram_mb, gpu_vram_mb, n_gpus, omp_thr, prop.name);
         }
         fflush(stdout);

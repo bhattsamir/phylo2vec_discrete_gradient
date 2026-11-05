@@ -296,6 +296,27 @@ Deleting the complement would change the objective being optimized.
 The weights entering the outside distances are determined by the current topology of the complement and its attachment edge.
 They must be updated when a preceding rearrangement changes that topology.
 
+\begin{corollary}[Linear-time BME branch lengths via condensed profiles]
+\label{cor:branch_lengths}
+At each of the $N-2$ internal vertices $p$ of an unrooted binary tree $T$, let $A_p,B_p,O_p$ denote the three incident subtrees (two child clades and the parent-side complement) with balanced leaf-weight profiles $\omega_{A_p},\omega_{B_p},\omega_{O_p}$, and let $d^B_{XY}(p)=\sum_{x\in X}\sum_{y\in Y}\omega_X(x)\omega_Y(y)D_{xy}$ for $\{X,Y\}\subset\{A_p,B_p,O_p\}$.
+Then Pauplin's~\cite{pauplin2000direct} and FastME's~\cite{desper2002fast} balanced minimum-evolution branch length for every edge $e=(u,p)\in E(T)$ (with $u$ corresponding to $A_p$) is given by
+\begin{equation}
+ \hat\ell(e)=
+ \begin{cases}
+  \tfrac12\bigl(d^B_{AB}(p)+d^B_{AO}(p)-d^B_{BO}(p)\bigr), & u\text{ is a leaf},\\[4pt]
+  \tfrac14\bigl(d^B_{AB}(p)+d^B_{AO}(p)+d^B_{AO}(u)+d^B_{BO}(u)\bigr)
+  -\tfrac12\bigl(d^B_{BO}(p)+d^B_{AB}(u)\bigr), & u\text{ is internal},
+ \end{cases}
+ \label{eq:bme_branch_lengths}
+\end{equation}
+satisfying $\sum_{e\in E(T)}\hat\ell(e)=L(T;D)$ and requiring only $3(N-2)$ condensed profile-pair evaluations across the entire tree.
+\end{corollary}
+\begin{proof}
+Cutting an internal edge $e=(u,p)$ partitions the leaves into four subtrees $(A_u,B_u)$ on the $u$-side and $(B_p,O_p)$ on the $p$-side, where $A_p=A_u\cup B_u$ and $O_u=B_p\cup O_p$.
+By Equation~\eqref{eq:condensed_D}, $d^B(A_p,O_u)=\tfrac12(d^B_{AB}(p)+d^B_{AO}(p))=\tfrac12(d^B_{AO}(u)+d^B_{BO}(u))$, which reduces Pauplin's four-subtree formula $\tfrac14\sum_{X\in\{A_u,B_u\}}\sum_{Y\in\{B_p,O_p\}}d^B(X,Y)-\tfrac12\bigl(d^B_{AB}(u)+d^B_{BO}(p)\bigr)$ to Equation~\eqref{eq:bme_branch_lengths}.
+Constructing $\omega_{A_p},\omega_{B_p}$ in one bottom-up post-order pass and $\omega_{O_p}$ in one top-down pre-order pass evaluates all $2N-3$ branch lengths from the $3(N-2)$ node-local pairs $\bigl(d^B_{AB}(p),d^B_{AO}(p),d^B_{BO}(p)\bigr)$.
+\end{proof}
+
 \subsection{Minibatch evaluation and sequential updates}
 \label{sec:acceptance}
 
@@ -487,9 +508,9 @@ Figures~\ref{fig:rnasim_scaling} and~\ref{fig:jc_scaling_4panel} summarize runti
 
 Three consistent trends emerge across both benchmark suites:
 \begin{enumerate}
- \item \textbf{Topological equivalence across minimum-evolution solvers.} Across all sizes where CPU minimum-evolution baselines terminate ($N\leq100{,}000$), \texttt{Phylo2Vec-Full} and \texttt{Phylo2Vec-Minibatch} track the same normalized RF error curve as 64-thread \texttt{FastME}, \texttt{FastTreeMP} (\texttt{-noml}), and \texttt{VeryFastTree} (\texttt{-noml}) (Figures~\ref{fig:rnasim_scaling}B and~\ref{fig:jc_scaling_4panel}B), while reaching slightly lower BME objective values (Tables~\ref{tab:rnasim_scaling}--\ref{tab:jc10k_scaling}). By contrast, \texttt{DIPPER} constructs trees without NNI or SPR minimum-evolution refinement, leaving its topological error near or above the unrefined \texttt{VFT-InitNJ} baseline across all regime transitions. Restricting inner searches to $K$-component skeletons therefore preserves full-tree minimum-evolution accuracy.
- \item \textbf{Runtime and memory scaling to $10^7$ leaves.} Full-tree GPU coordinate sweeps (\texttt{Phylo2Vec-Full}) provide two-order-of-magnitude speedups over 64-thread CPU baselines up to $N=10{,}000$, where quadratic device storage becomes limiting. Above this threshold, \texttt{Phylo2Vec-Minibatch} decouples the inner sweep cost from $N$, extending refinement to $N=1{,}000{,}000$ and $10{,}000{,}000$ leaves on a single GPU in minutes (Figures~\ref{fig:rnasim_scaling}A and~\ref{fig:jc_scaling_4panel}A). Streaming packed sequence data into device memory keeps host RAM below $0.4$~GB up to $N=1{,}000{,}000$ and near $2$~GB at $N=10{,}000{,}000$, whereas CPU baseline memory grows super-linearly with $N$ (Figures~\ref{fig:rnasim_scaling}C and~\ref{fig:jc_scaling_4panel}C).
- \item \textbf{Effect of sequence length on distance noise.} Increasing alignment length tenfold from $L=1{,}000$ (\texttt{JC1k}) to $L=10{,}000$ (\texttt{JC10k}) reduces the variance of pairwise distance estimates, lowering minimum-evolution RF error more than fourfold across all solvers and narrowing the absolute topological gap to full maximum-likelihood refinement while retaining a two-order-of-magnitude runtime advantage (Figure~\ref{fig:jc_scaling_4panel}D).
+ \item \textbf{Global convergence from uniform random trees.} Starting from uniform random topologies ($100.0\%$ initial RF error), CPU minimum-evolution local searches (\texttt{FastTreeMP -noml -intree} and \texttt{VeryFastTree -noml -intree}) become trapped in poor local optima as $N$ grows ($70.0\text{--}84.9\%$ RF error on \texttt{JC10k} and $88.1\text{--}92.7\%$ on \texttt{RNASim} at $N=50{,}000\text{--}100{,}000$), whereas \texttt{Phylo2Vec-Minibatch} recovers global topology down to $2.45\text{--}2.61\%$ RF on \texttt{JC10k} ($1.40\%$ at $N=10^6$ and $2.58\%$ at $N=10^7$) and $8.76\text{--}9.91\%$ RF on \texttt{RNASim} ($1.17\%$ at $N=10^6$ and $4.13\%$ at $N=10^7$), outperforming \textit{de novo} GPU placement (\texttt{DIPPER 0.1.5}) across every dataset and regime (Figures~\ref{fig:rnasim_scaling}B and~\ref{fig:jc_scaling_4panel}B; Tables~\ref{tab:rnasim_scaling}--\ref{tab:jc10k_scaling}).
+ \item \textbf{Runtime, memory, and $O(N)$ branch-length scaling to $10^7$ leaves.} \texttt{Phylo2Vec-Minibatch} decouples the inner sweep cost from $N$, delivering $130\text{--}260\times$ speedups over 64-thread CPU baselines at $N=50{,}000\text{--}100{,}000$ ($3.7\text{--}6.8$~s on \texttt{RNASim}; $13.2\text{--}21.5$~s on \texttt{JC10k}) and refining $N=1{,}000{,}000$ leaves in $1.15\text{--}2.95$~min and $N=10{,}000{,}000$ leaves in $16.2\text{--}31.5$~min on $8\times\text{H100}$ GPUs (Figures~\ref{fig:rnasim_scaling}A and~\ref{fig:jc_scaling_4panel}A). Following topology optimization, Corollary~\ref{cor:branch_lengths} estimates all $2N-3$ FastME/BME branch lengths in $O(N)$ profile evaluations, taking $0.89\text{--}1.00$~s at $N=1{,}000{,}000$ ($0.12\text{--}0.20$~s GPU kernel) and $10.50\text{--}13.33$~s at $N=10{,}000{,}000$ ($1.39\text{--}2.00$~s GPU kernel across $19{,}999{,}997$ edges; Table~\ref{tab:bme_bl_scaling}). Streaming packed sequences into device memory keeps host RAM below $1.9$~GB up to $N=10^6$ and $2.8$~GB at $N=10^7$ (Figures~\ref{fig:rnasim_scaling}C and~\ref{fig:jc_scaling_4panel}C).
+ \item \textbf{Effect of sequence length on distance noise.} Increasing alignment length tenfold from $L=1{,}000$ (\texttt{JC1k}) to $L=10{,}000$ (\texttt{JC10k}) reduces the variance of pairwise distance estimates, lowering minimum-evolution RF error more than fourfold ($13.25\%\to3.07\%$ at $N=10{,}000$) and narrowing the topological gap to full maximum-likelihood refinement while retaining a $>160\times$ runtime advantage (Figure~\ref{fig:jc_scaling_4panel}D).
 \end{enumerate}
 
 \section{Discussion}

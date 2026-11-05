@@ -190,7 +190,8 @@ The GPU solver packs SPR moves with disjoint marked paths, rescores each combine
 It tries reversed labeling when no improving row remains, without CPU batch-halving or full SPR completion.
 The best trial is checked against the entry skeleton before committing a block.
 Intermediate trial scores can increase.
-For sequence refinement above $2{,}048$ leaves, inner skeleton proposals cap component leaf-weight lists at $64$ entries; before committing a block, affected condensed pairs are recomputed across all leaf contributions and checked with Equation~\eqref{eq:changed_pairs} in FP64 using acceptance margin $10^{-6}$.
+For sequence refinement above $2{,}048$ leaves, inner skeleton proposals cap component leaf-weight lists at $64$ entries; when a window's capped-profile gain satisfies $\Delta L_{\mathrm{capped}}>-\eta_{\mathrm{exact}}$ (controlled by \texttt{--eta}, with $\eta_{\mathrm{exact}}=\infty$ checking every improving window and $\eta_{\mathrm{exact}}=10^{-2}$ screening marginal gains), complete leaf profiles are lazily constructed and affected condensed pairs are verified with Equation~\eqref{eq:changed_pairs} in FP64 using acceptance margin $10^{-6}$.
+Following topology refinement, Corollary~\ref{cor:branch_lengths} estimates all $2N-3$ FastME/BME branch lengths on GPU using top-$32$ inside and outside leaf-weight profiles per internal node.
 
 \clearpage
 \section{Additional experimental results}
@@ -340,11 +341,34 @@ VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{11.87 \pm 0.63}$ & $55.72 \
 \end{tabular*}
 \end{table*}
 
+\begin{table*}[!htbp]
+\centering
+\caption{$O(N)$ GPU FastME/BME branch-length estimation scaling (Corollary~\ref{cor:branch_lengths}, top-$32$ dyadic profiles per internal node) from $N=1{,}000$ to $10{,}000{,}000$ leaves ($19{,}999{,}997$ unrooted edges) on $8\times\text{NVIDIA H100}$ GPUs (64 CPU threads).}
+\label{tab:bme_bl_scaling}
+\scriptsize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}rrrrrrrr@{}}
+\toprule
+$N$ & Unrooted edges ($2N-3$) & \multicolumn{3}{c}{\textbf{RNASim} ($L=1{,}596$ sites, $W=25$)} & \multicolumn{3}{c}{\textbf{JC10k} ($L=10{,}000$ sites, $W=160$)}\\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+ &  & CPU profiles (s) & GPU kernel (s) & Total (s) & CPU profiles (s) & GPU kernel (s) & Total (s)\\
+\midrule
+1,000 & 1,997 & 0.0005 & 0.0025 & \textbf{0.0029} & 0.0004 & 0.0039 & \textbf{0.0043}\\
+5,000 & 9,997 & 0.0025 & 0.0029 & \textbf{0.0054} & 0.0014 & 0.0047 & \textbf{0.0061}\\
+10,000 & 19,997 & 0.0023 & 0.0048 & \textbf{0.0071} & 0.0044 & 0.0077 & \textbf{0.0121}\\
+50,000 & 99,997 & 0.0325 & 0.0076 & \textbf{0.0400} & 0.0335 & 0.0129 & \textbf{0.0464}\\
+100,000 & 199,997 & 0.0732 & 0.0273 & \textbf{0.1004} & 0.0652 & 0.0219 & \textbf{0.0872}\\
+1,000,000 & 1,999,997 & 0.8760 & 0.1210 & \textbf{0.9971} & 0.6887 & 0.1972 & \textbf{0.8860}\\
+10,000,000 & 19,999,997 & 11.9402 & 1.3923 & \textbf{13.3325} & 8.4964 & 2.0030 & \textbf{10.4993}\\
+\bottomrule
+\end{tabular*}
+\end{table*}
+
 \clearpage
 \subsection{Numerical verification and small-tree CPU optimization}
 \label{sec:cpu_tables}
 
-Table~\ref{tab:validation} compares coordinate and condensed changes with independent direct BME calculations.
+Table~\ref{tab:validation} compares coordinate, condensed, and branch-length calculations with independent direct BME references.
 Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} report single-core CPU optimization comparisons against the in-memory FastME BME-SPR reference (FME) on Apple M5 across additive and noisy distance matrices ($N=20$ to $200$).
 
 \begin{table}[!htbp]
@@ -361,7 +385,10 @@ Ordered-tree enumeration & 28,488 changes, $N=4$--7 & $2.776\times10^{-15}$\\
 Relabeling, first orientation & 200 trees, $N=25$ & $1.776\times10^{-14}$\\
 Relabeling, reversed orientation & Same 200 trees & $2.665\times10^{-14}$\\
 Condensed SPR differences & 16,231 changes, $N=40$, $K=16$ & $1.564\times10^{-13}$\\
+Pauplin tree-length identity $\sum_e\hat\ell(e)=L(T;D)$ & $N=20$--1,000 ($1{,}997$ edges) & $2.27\times10^{-13}$\\
 FP32 CUDA gradient & Reported sizes $N=100$--4,000 & $1.11\times10^{-6}$\\
+FP32 CUDA BME branch lengths (uncapped) & $1{,}997$ edges, $N=1{,}000$ & $3.74\times10^{-6}$\\
+FP32 CUDA BME branch lengths (top-$64$ cap, MAE) & $1{,}997$ edges, $N=1{,}000$ & $6.13\times10^{-5}$\\
 \bottomrule
 \end{tabular}
 \end{table}
