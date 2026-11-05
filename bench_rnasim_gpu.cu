@@ -220,7 +220,8 @@ __global__ void k_build_real_seq_condensed_D(
     const int32_t * __restrict__ d_prof_leaves,
     const float   * __restrict__ d_prof_weights,
     const uint64_t * __restrict__ d_packed_seqs,
-    float * __restrict__ d_D_cond
+    float * __restrict__ d_D_cond,
+    int32_t heavy_min
 ) {
     int32_t b = blockIdx.x * blockDim.x + threadIdx.x;
     int32_t a = blockIdx.y * blockDim.y + threadIdx.y;
@@ -232,6 +233,8 @@ __global__ void k_build_real_seq_condensed_D(
     if (a < b) {
         int32_t off_a = d_prof_offsets[a], end_a = d_prof_offsets[a + 1];
         int32_t off_b = d_prof_offsets[b], end_b = d_prof_offsets[b + 1];
+        /* Pairs where both profiles have >= heavy_min leaves are left to the tiled kernel. */
+        if (end_a - off_a >= heavy_min && end_b - off_b >= heavy_min) return;
         float d_val = 0.0f;
         for (int32_t p = off_a; p < end_a; ++p) {
             int32_t la = d_prof_leaves[p];
@@ -244,6 +247,144 @@ __global__ void k_build_real_seq_condensed_D(
             }
             d_val += wa * row_sum;
         }
+        d_D_cond[(size_t)a * K + b] = d_val;
+        d_D_cond[(size_t)b * K + a] = d_val;
+    }
+}
+
+/* Same float formula as dev_jc69_dist_popc, from precomputed popcounts. */
+__device__ __forceinline__ float dev_jc69_from_counts(int32_t n_valid, int32_t n_match) {
+    if (n_valid <= 0) return 1.5f;
+    float p = (float)(n_valid - n_match) / (float)n_valid;
+    if (p >= 0.74f) p = 0.74f;
+    float d = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
+    return (d > 0.0f) ? d : 0.0f;
+}
+
+constexpr int32_t HB_T = 64;        /* leaf tile edge */
+constexpr int32_t HB_CW = 5;        /* words per staged chunk (25 words = 5 chunks) */
+constexpr int32_t HB_HEAVY_MIN = 8; /* both profiles at least this large -> tiled kernel */
+
+/* Tiled k_build_real_seq_condensed_D for heavy pairs (one block per pair a < b).
+ * Leaf sequences are staged in shared memory in word chunks and each thread keeps a
+ * 4x4 tile of exact popcounts. Distances use the same float formula, and the weighted
+ * sums run in the same order as k_build_real_seq_condensed_D (row sums over q, then
+ * over p), so D_cond is bit-identical. Requires W == 25. */
+__global__ __launch_bounds__(256) void k_build_condensed_D_heavy_tiled(
+    int32_t K, int32_t W, int32_t n_pairs,
+    const int32_t * __restrict__ d_pair_a,
+    const int32_t * __restrict__ d_pair_b,
+    const int32_t * __restrict__ d_prof_offsets,
+    const int32_t * __restrict__ d_prof_leaves,
+    const float   * __restrict__ d_prof_weights,
+    const uint64_t * __restrict__ d_packed_seqs,
+    float * __restrict__ d_D_cond
+) {
+    __shared__ uint64_t sA[5 * HB_CW * HB_T];   /* [channel][word][row] */
+    __shared__ uint64_t sB[5 * HB_CW * HB_T];
+    __shared__ float    s_dist[HB_T][HB_T + 1];
+    __shared__ float    s_row_sum[HB_T];
+    __shared__ int32_t  s_leaf_a[HB_T], s_leaf_b[HB_T];
+    __shared__ float    s_wa[HB_T], s_wb[HB_T];
+
+    const int32_t pid = blockIdx.x;
+    if (pid >= n_pairs) return;
+    const int32_t a = d_pair_a[pid], b = d_pair_b[pid];
+    const int32_t off_a = d_prof_offsets[a], len_a = d_prof_offsets[a + 1] - off_a;
+    const int32_t off_b = d_prof_offsets[b], len_b = d_prof_offsets[b + 1] - off_b;
+    const int32_t tid = (int32_t)threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    float d_val = 0.0f;
+
+    for (int32_t pa0 = 0; pa0 < len_a; pa0 += HB_T) {
+        const int32_t na = min(HB_T, len_a - pa0);
+        __syncthreads();
+        if (tid < HB_T) {
+            s_row_sum[tid] = 0.0f;
+            if (tid < na) {
+                s_leaf_a[tid] = d_prof_leaves[off_a + pa0 + tid];
+                s_wa[tid]     = d_prof_weights[off_a + pa0 + tid];
+            }
+        }
+        for (int32_t qb0 = 0; qb0 < len_b; qb0 += HB_T) {
+            const int32_t nb = min(HB_T, len_b - qb0);
+            __syncthreads();
+            if (tid < nb) {
+                s_leaf_b[tid] = d_prof_leaves[off_b + qb0 + tid];
+                s_wb[tid]     = d_prof_weights[off_b + qb0 + tid];
+            }
+            __syncthreads();
+
+            int32_t nv[4][4], nm[4][4];
+            #pragma unroll
+            for (int32_t i = 0; i < 4; ++i)
+                #pragma unroll
+                for (int32_t j = 0; j < 4; ++j) { nv[i][j] = 0; nm[i][j] = 0; }
+
+            for (int32_t w0 = 0; w0 < 25; w0 += HB_CW) {
+                /* Stage words w0..w0+HB_CW-1 of all 5 channels; consecutive threads read
+                 * consecutive words of one sequence. */
+                for (int32_t e = tid; e < 5 * HB_CW * HB_T; e += 256) {
+                    const int32_t cw = e % HB_CW, ch = (e / HB_CW) % 5, r = e / (5 * HB_CW);
+                    const int32_t s_idx = (ch * HB_CW + cw) * HB_T + r;
+                    const size_t g_off = (size_t)ch * W + w0 + cw;
+                    sA[s_idx] = (r < na) ? d_packed_seqs[(size_t)s_leaf_a[r] * 5 * W + g_off] : 0ull;
+                    sB[s_idx] = (r < nb) ? d_packed_seqs[(size_t)s_leaf_b[r] * 5 * W + g_off] : 0ull;
+                }
+                __syncthreads();
+                #pragma unroll
+                for (int32_t cw = 0; cw < HB_CW; ++cw) {
+                    uint64_t ra[4], rb[4], m[4][4];
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i) ra[i] = sA[(4 * HB_CW + cw) * HB_T + ty + 16 * i];
+                    #pragma unroll
+                    for (int32_t j = 0; j < 4; ++j) rb[j] = sB[(4 * HB_CW + cw) * HB_T + tx + 16 * j];
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i)
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) nv[i][j] += __popcll(ra[i] & rb[j]);
+                    #pragma unroll
+                    for (int32_t c = 0; c < 4; ++c) {
+                        #pragma unroll
+                        for (int32_t i = 0; i < 4; ++i) ra[i] = sA[(c * HB_CW + cw) * HB_T + ty + 16 * i];
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) rb[j] = sB[(c * HB_CW + cw) * HB_T + tx + 16 * j];
+                        #pragma unroll
+                        for (int32_t i = 0; i < 4; ++i)
+                            #pragma unroll
+                            for (int32_t j = 0; j < 4; ++j)
+                                m[i][j] = (c == 0) ? (ra[i] & rb[j]) : (m[i][j] | (ra[i] & rb[j]));
+                    }
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i)
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) nm[i][j] += __popcll(m[i][j]);
+                }
+                __syncthreads();
+            }
+
+            #pragma unroll
+            for (int32_t i = 0; i < 4; ++i) {
+                #pragma unroll
+                for (int32_t j = 0; j < 4; ++j) {
+                    const int32_t p = ty + 16 * i, q = tx + 16 * j;
+                    if (p < na && q < nb) {
+                        s_dist[p][q] = (s_leaf_a[p] == s_leaf_b[q]) ? 0.0f : dev_jc69_from_counts(nv[i][j], nm[i][j]);
+                    }
+                }
+            }
+            __syncthreads();
+            if (tid < na) {
+                float row_sum = s_row_sum[tid];
+                for (int32_t q = 0; q < nb; ++q) row_sum += s_wb[q] * s_dist[tid][q];
+                s_row_sum[tid] = row_sum;
+            }
+        }
+        __syncthreads();
+        if (tid == 0) {
+            for (int32_t p = 0; p < na; ++p) d_val += s_wa[p] * s_row_sum[p];
+        }
+    }
+    if (tid == 0) {
         d_D_cond[(size_t)a * K + b] = d_val;
         d_D_cond[(size_t)b * K + a] = d_val;
     }
@@ -1740,12 +1881,20 @@ struct RnaSimGpuWorkspace {
     double  *d_curr_L;
     float   *d_refine_D_scratch;
     bool     refine_split_ready;
+    /* Heavy-pair list for k_build_condensed_D_heavy_tiled (grown on demand). */
+    int32_t *d_heavy_a;
+    int32_t *d_heavy_b;
+    size_t   heavy_cap;
+    std::vector<int32_t> h_heavy_a, h_heavy_b;
 
     void init(int32_t gpu_id, int32_t K_cap) {
         dev_id = gpu_id;
         max_K = K_cap;
         d_refine_D_scratch = NULL;
         refine_split_ready = false;
+        d_heavy_a = NULL;
+        d_heavy_b = NULL;
+        heavy_cap = 0;
         int32_t R = 2 * K_cap - 1;
         int32_t M = 2 * K_cap - 2;
         size_t prof_cap = std::max((size_t)128 * (size_t)K_cap, (size_t)2048);
@@ -1828,6 +1977,9 @@ struct RnaSimGpuWorkspace {
         cudaFree(d_refine_D_scratch);
         d_refine_D_scratch = NULL;
         refine_split_ready = false;
+        cudaFree(d_heavy_a); cudaFree(d_heavy_b);
+        d_heavy_a = d_heavy_b = NULL;
+        heavy_cap = 0;
     }
 };
 
@@ -1987,9 +2139,43 @@ static double optimize_skeleton_on_gpu(
     CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_prof_weights, prof_weights, (size_t)total_prof * sizeof(float),   cudaMemcpyHostToDevice, gpu_ws.stream));
     dim3 blk2d(16, 16);
     dim3 grd2d((K + 15) / 16, (K + 15) / 16);
+    /* Pairs whose profiles both have >= HB_HEAVY_MIN leaves go to the tiled kernel; the
+     * rest (singletons, singleton x outgroup) stay on the per-thread kernel. */
+    const int32_t heavy_min = (W == 25) ? HB_HEAVY_MIN : INT32_MAX;
+    gpu_ws.h_heavy_a.clear();
+    gpu_ws.h_heavy_b.clear();
+    if (heavy_min != INT32_MAX) {
+        std::vector<int32_t> heavy_nodes;
+        for (int32_t a = 0; a < K; ++a) {
+            if (prof_offsets[a + 1] - prof_offsets[a] >= heavy_min) heavy_nodes.push_back(a);
+        }
+        for (size_t ia = 0; ia < heavy_nodes.size(); ++ia) {
+            for (size_t ib = ia + 1; ib < heavy_nodes.size(); ++ib) {
+                gpu_ws.h_heavy_a.push_back(heavy_nodes[ia]);
+                gpu_ws.h_heavy_b.push_back(heavy_nodes[ib]);
+            }
+        }
+    }
+    const int32_t n_heavy = (int32_t)gpu_ws.h_heavy_a.size();
+    if ((size_t)n_heavy > gpu_ws.heavy_cap) {
+        cudaFree(gpu_ws.d_heavy_a);
+        cudaFree(gpu_ws.d_heavy_b);
+        gpu_ws.heavy_cap = (size_t)n_heavy;
+        CUDA_CHECK(cudaMalloc(&gpu_ws.d_heavy_a, gpu_ws.heavy_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&gpu_ws.d_heavy_b, gpu_ws.heavy_cap * sizeof(int32_t)));
+    }
     k_build_real_seq_condensed_D<<<grd2d, blk2d, 0, gpu_ws.stream>>>(
-        K, W, gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D
+        K, W, gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D,
+        heavy_min
     );
+    if (n_heavy > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_heavy_a, gpu_ws.h_heavy_a.data(), (size_t)n_heavy * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
+        CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_heavy_b, gpu_ws.h_heavy_b.data(), (size_t)n_heavy * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
+        k_build_condensed_D_heavy_tiled<<<n_heavy, 256, 0, gpu_ws.stream>>>(
+            K, W, n_heavy, gpu_ws.d_heavy_a, gpu_ws.d_heavy_b,
+            gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D
+        );
+    }
 
     std::vector<int32_t> c1_cf, c2_cf, v_map_cf, m_lmin_cf, next_k_cf, parent_u_cf, sub_size_cf, tin_cf, adj_u_cf;
     std::vector<float> h_best_delta(K);
