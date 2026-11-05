@@ -1,46 +1,98 @@
-\section{Ordered representation and coordinate mapping}
-\label{sec:gauge}
+\section{Mathematical details}
+\subsection{Block reduction}
+\label{sec:block_proof}
 
-\subsection{Linear-time decoding}
+We use the component weights and attachment convention from
+Section~\ref{sec:condensation}.
 
-For $v_i\leq i$, initialize a component-root array by $r[x]=x$.
-Process $i=N-2,\ldots,0$.
-At step $i$, join the components with roots $r[v_i]$ and $r[i+1]$ at a new node
-$m=2N-2-i$, then replace $r[v_i]$ by $m$.
-Before this step, the active components have distinct minimum labels $0,\ldots,i+1$.
-Joining the two specified components removes minimum label $i+1$ and preserves minimum label $v_i$.
-Induction therefore establishes the invariant and the correctness of the construction.
-Each step uses constant work, giving an $O(N)$ decoder.
-This argument depends on the ordered condition and does not apply unchanged to a general vector with $v_i>i$.
-
-\subsection{Relabeling a decoded tree}
-
-\begin{proposition}[Ordered representation after relabeling]
-\label{thm:relabel}
-Given a decoded rooted binary tree, a parent-before-child ordering of its internal nodes constructs an ordered vector and a leaf permutation in $O(N)$ time.
-The represented labeled tree and its BME score are unchanged.
-\end{proposition}
+\begin{lemma}[Normalization of leaf weights]
+\label{lem:normalization}
+For each component, $\sum_{x\in S_a}\omega_a(x)=1$.
+\end{lemma}
 \begin{proof}
-Give the root temporary label zero and initialize a counter $t=1$.
-At each internal node, choose an ordering $(a,b)$ of its children.
-Pass the node's label to $a$, give $b$ label $t$, record $v_{t-1}$ as the inherited label, and increment $t$.
-Each newly issued label follows a unique chain of inheriting children to a leaf.
-Every leaf receives exactly one label, so the resulting labels form a permutation of $0,\ldots,N-1$.
-
-The inherited label was issued at an ancestor and is smaller than $t$, hence $v_{t-1}\leq t-1$.
-To verify decoding, process the recorded splits in reverse order.
-All descendants of a node were assigned their new labels later than that node, so both child components have already been assembled when its recorded merge is reached.
-The merge therefore recreates that node's original clade.
-Induction reconstructs the entire tree.
-Permuting both axes of $D$ by the inverse leaf-label map preserves all terms in Equation~\eqref{eq:pauplin}.
-Each vertex is processed a constant number of times.
+A singleton has weight one.
+At a binary root, every leaf weight in each child component is multiplied by $1/2$.
+Induction over the component therefore gives total mass
+$\tfrac12\cdot1+\tfrac12\cdot1=1$.
 \end{proof}
 
-The implementation chooses the child order from the minimum original leaf label in each child component, with a second orientation reversing that choice.
-These are two deterministic coordinate systems for the same current tree.
-Their existence proves representational coverage after suitable relabeling, not coverage by a particular optimizer trajectory.
-For general candidate vectors, the implementation also uses a tree-to-vector encoder.
-Its unrooted version first inserts a degree-two root on the edge incident to leaf zero, so round-trip correctness is assessed by unrooted splits rather than root placement.
+\paragraph{Proof of Theorem~\ref{thm:clade_condense}.}
+
+\begin{proof}
+Separate the unordered leaf pairs into pairs within a component and pairs between components.
+For $x,y\in S_a$, the path stays inside $S_a$ and is unchanged by rearranging the skeleton.
+The sum of all such terms is
+\[
+ C=\sum_a\sum_{\substack{x<y\\x,y\in S_a}}
+      D_{xy}\,2^{-q_{T_G}(x,y)},
+\]
+which is independent of $G$.
+
+For $x\in S_a$ and $y\in S_b$ with $a\ne b$, the path contains the branching vertices inside $S_a$, those on the skeleton path, and those inside $S_b$.
+These sets of vertices are disjoint, giving
+\[
+ q_{T_G}(x,y)=h_a(x)+q_G(a,b)+h_b(y).
+\]
+Therefore its weight factors as
+$2^{-q_{T_G}(x,y)}=\omega_a(x)\,2^{-q_G(a,b)}\,\omega_b(y)$.
+Summing between-component terms gives
+\begin{align*}
+ \sum_{a<b}\sum_{\substack{x\in S_a\\y\in S_b}}
+ D_{xy}\,2^{-q_{T_G}(x,y)}
+ &=\sum_{a<b}2^{-q_G(a,b)}
+      \sum_{\substack{x\in S_a\\y\in S_b}}\omega_a(x)\omega_b(y)D_{xy}\\
+ &=L(G;\widetilde D).
+\end{align*}
+Adding the within-component constant proves Equation~\eqref{eq:bme_condense_decomp}.
+Subtracting two such decompositions cancels $C$ and proves Equation~\eqref{eq:condensed_delta}.
+\end{proof}
+
+\subsection{Ordered representation}
+\label{sec:gauge}
+
+For an ordered vector, initialize $r[x]=x$ and process $i=N-2,\ldots,0$.
+Join components $r[v_i]$ and $r[i+1]$ at node $2N-2-i$, then replace $r[v_i]$ by this node.
+The active components have distinct minimum labels $0,\ldots,i+1$ before each merge, giving an $O(N)$ decoder.
+
+Relabeling uses Penn et al.'s linear-time construction~\cite[Lemmas~0.9--0.11]{penn2023gradme}.
+Starting with root label zero and counter $t=1$, visit internal nodes parent before child.
+Each passes its label to one child, labels the other $t$, records the inherited label as $v_{t-1}$, and increments $t$.
+Our first orientation lets the child with smaller minimum leaf index inherit; the second reverses that choice.
+Both preserve the tree and its BME score when both axes of $D$ are permuted by the inverse leaf-label map.
+The construction guarantees representational coverage after relabeling; optimizer reachability depends on its search policy.
+For unrooted tree-to-vector conversion, insert the artificial root on the edge incident to leaf zero.
+
+\subsection{Coordinate replacements are SPR moves}
+\label{sec:coord_spr}
+
+For an ordered $v$ and a leaf $\ell\geq i+1$, follow the chain $\ell_0=\ell$, $\ell_{s+1}=v_{\ell_s-1}$ while $\ell_s>i+1$.
+Each step uses a coordinate with index greater than $i$, and the chain strictly decreases.
+Let $P_i$ be the set of leaves whose chain stops at $i+1$; it contains $i+1$ and does not depend on $v_i$.
+
+\begin{lemma}[Coordinate neighbors are SPR neighbors]
+\label{lem:coord_spr}
+Let $v\in\mathcal V_N^{\mathrm{cf}}$, $0\leq i\leq N-2$, and $0\leq j\leq2i$.
+Then $T(v^{(i\leftarrow j)})$ either equals $T(v)$ or is obtained from $T(v)$ by one SPR move that prunes the subtree on the leaves $P_i$.
+\end{lemma}
+\begin{proof}
+Read $w=v^{(i\leftarrow j)}$ by leaf addition~\cite{penn2024phylo2vec}.
+Starting from leaf $0$, coordinate $w_k$ inserts leaf $k+1$ on one of the $2k+1$ edges of the current rooted tree on leaves $0,\ldots,k$, including the edge above its root, and a value $w_k\leq k$ selects the pendant edge of leaf $w_k$.
+Only step $i$ depends on $j$.
+It inserts leaf $i+1$ on some edge, creating a vertex $p$.
+Every later step $k>i$ has $w_k=v_k\leq k$ and inserts leaf $k+1$ on the pendant edge of leaf $v_k$.
+The new leaf therefore lies on the same side of $p$ as leaf $v_k$.
+By induction on $k$, the leaves on the side of $p$ that contains $i+1$ are exactly $P_i$.
+The insertions among these leaves build a subtree whose topology does not depend on $j$.
+Removing $P_i$ and suppressing $p$ leaves the tree $T^-$ produced by steps $0,\ldots,i-1$ and the insertions of leaves outside $P_i$, which also does not depend on $j$.
+Thus every $T(w)$ is $T^-$ with the fixed subtree on $P_i$ attached at one edge of the unrooted $T^-$.
+If leaf $i+1$ is inserted above the root, that edge is the one through the root of $T^-$, which becomes a single edge when the artificial root is suppressed.
+Taking $j=v_i$ recovers $T(v)$.
+Two such trees differ only in the attachment edge of $P_i$, so they are equal or related by one SPR move.
+\end{proof}
+
+The lemma bounds the coordinate neighborhood by the SPR neighborhood.
+It does not show the reverse inclusion.
+The mapping below identifies the attachment edge for each $j$.
 
 \subsection{Mapping coordinate values to regraft edges}
 \label{sec:mapping}
@@ -75,217 +127,265 @@ On a GPU, independent rows reconstruct their mappings using the latest eligible 
 When several merges have the same minimum leaf, only the latest eligible merge may write that destination.
 This avoids concurrent writes that would otherwise depend on thread scheduling.
 
-\subsection{Connection to continuous vertex derivatives}
-\label{sec:vertex_gradient}
-
-GradME defines an expected objective $F(W)=\mathbb E[f(V)]$ for independent ordered coordinates~\cite{penn2023gradme}.
-For comparison, take $f(v)=L(T(v);D_\pi)$ with the same unrooted convention as Equation~\eqref{eq:pauplin}.
-Let $W^v$ put probability one on each entry of an ordered vector $v$.
-For $j\leq i$, change only row $i$ to $(1-t)e_{v_i}+t e_j$, where $e_j$ is a unit vector.
-Only two vectors then have nonzero probability, giving
-\begin{equation}
- F(W(t))=(1-t)f(v)+t f(v^{(i\leftarrow j)}),\qquad
- \left.\frac{dF(W(t))}{dt}\right|_{t=0}=\Delta_{i,j}.
- \label{eq:vertex_gradient}
-\end{equation}
-This is a direct consequence of the expected-objective definition, not a new exactness property.
-The computational distinction is the shared quadratic evaluator at a discrete tree.
-It also evaluates $j>i$, outside the ordered domain of this relaxation.
-It does not evaluate gradients at arbitrary interior $W$ in quadratic time.
-
-\section{Parallel dependencies and workspace}
+\subsection{Parallel evaluation and reduced storage}
 \label{sec:parallel_details}
 
-\subsection{Column ownership and ancestor traversal}
+After initialization and the required transpose, Equation~\eqref{eq:bottom_up} has independent columns.
+For a non-root ancestor $u$ of $w$, let $\operatorname{sib}_u(w)$ be the child of $u$ whose subtree excludes $w$.
+The complementary direction is computed from the root down:
+\begin{equation}
+ A(u,w)=\tfrac12\{A(\operatorname{sib}_u(w),w)
+                         +A(\operatorname{parent}(u),w)\}.
+ \label{eq:top_down}
+\end{equation}
+The degree-three root is initialized using its two branches away from $w$.
 
-For a fixed column $w$, the bottom-up update in Equation~\eqref{eq:bottom_up} reads only earlier entries of that column.
-Thus the recurrence has no cross-column dependency once its initial entries are available.
-The implementation separates the necessary transpose from the recurrence rather than writing both triangular copies concurrently.
-Top-down correction visits ancestors of $w$ in order from the computational root.
-If a node's children have contiguous depth-first intervals, comparing the entry time of $w$ with their interval boundary selects the child containing $w$.
-Only the current node and the fixed target are required as traversal state.
-The initial degree-three root update uses the other two root branches.
+For reduced storage, retain only internal-to-leaf distances.
+These initialize the leaf entries of an internal row $w$; a leaf row instead starts from $D$.
+Bottom-up averaging fills internal entries, and Equation~\eqref{eq:top_down} overwrites ancestors of $w$ after the root initialization.
+Set the diagonal to zero.
+For a vertex $u$ in a disjoint component, the bottom-up calculation follows directly by linearity.
+For a descendant $u$ of $w$, the initial leaf entries already use the component at $w$ facing away from $u$, so the same averaging is valid.
+Ancestors require the complementary direction supplied by the overwrite.
+Thus each row costs $O(N+\operatorname{depth}(w))=O(N)$ to reconstruct.
+A constant number of reconstructions per pruned component retains $O(N^2)$ sweep work while reducing the balanced-distance table from approximately $4N^2$ to $N^2$ entries.
 
-\subsection{Autonomous row reconstruction}
+\section{Search settings}
+\label{sec:search_policies}
 
-Store the balanced distances from internal vertices to leaves.
-For a requested row $w$, these entries supply its leaf values.
-For leaf $w$, the leaf values instead come directly from $D$.
-Average child entries bottom-up to fill internal positions, then overwrite ancestors of $w$ top-down using the sibling and parent directions.
-Initialize the degree-three root correction explicitly and set the diagonal to zero.
+Algorithms~\ref{alg:block_search} and~\ref{alg:coordinate_search} use the following settings, with scores evaluated in the recorded component labeling.
+The CPU solver uses sweep budget $I=500$, escape budget $E=2$, and $\eta=10^{-12}(|\ell|+1)$ at score $\ell$.
 
-For an internal position $u$ in a disjoint component, the bottom-up average is the required balanced distance by linearity.
-For a descendant $u$ of $w$, the stored leaf values already use the component at $w$ directed away from that descendant, so averaging within the descendant gives the correct value.
-Ancestors of $w$ require the complementary direction and are supplied by the top-down overwrite.
-These cases exhaust the row.
-The reconstruction costs $O(N+\operatorname{depth}(w))=O(N)$.
-Reconstructing a constant number of rows per pruned component therefore retains quadratic sweep complexity.
-The approximately fourfold reduction concerns the balanced-distance table only.
+\paragraph{Block construction.}
+For requested size $3\leq K_\star<N$, expose $w$ consecutive leaves in the current depth-first order, with
+$w=\min\{K_\star-2,\max\{4,\lfloor2K_\star/3\rfloor\}\}$.
+Block $b$ starts at $b\max\{1,\lfloor w/2\rfloor\}\bmod N$.
+Condense maximal inactive subtrees, then split the largest such component until the skeleton reaches $K_\star$ leaves or no split remains possible.
+The resulting size $K$ can differ from the target $K_\star$.
+Rebuild the leaf order, components, and outside information from the current tree for every block.
+Hierarchical schedules combine backbone and local windows with staggered or larger windows crossing component boundaries.
+Full-tree search uses $K=N$ singleton components.
 
-\subsection{Traversal stack size}
+\paragraph{Row selection and joint acceptance.}
+$\proc{RankMin}$ selects $j_i\in\arg\min_{0\leq j\leq2i}\Delta_{i,j}$, retains changes below $-\eta$, and sorts them increasingly, resolving ties by deterministic traversal and row order.
+Let $d_{\min}<0$ be the best single change.
+$\proc{BatchStep}$ greedily packs at most eight rows, excluding shared marked pruned-subtree nodes and attachment endpoints.
+After the first row, require $\Delta_{i,j_i}<0.05d_{\min}$, and test a batch only if the sum is below $1.05d_{\min}$.
+Each trial starts from the same pre-trial encoding $v$ and is accepted only if its complete score satisfies
+$L(T(v');M_\pi)<\ell+d_{\min}-\eta$.
+On rejection, retry successively halved ranked prefixes down to two rows; if none passes, use the best single replacement.
+The predicted sum only screens candidates.
 
-When a traversal reaches two outward components, push the larger component first and the smaller second on a last-in-first-out stack.
-The smaller component is processed next.
-Each extra pending larger component is associated with descent into a component at most half the size of its predecessor.
-Hence the number of simultaneously pending components is logarithmic in the number of tree vertices.
-Including the active traversal state gives a safe bound
-$\lfloor\log_2(2N-2)\rfloor+2$.
-This is a workspace bound, not a statement that the traversal visits fewer vertices.
+\paragraph{Completion and escapes.}
+$\proc{Decode}$ restores component identities and suppresses the artificial root.
+$\proc{ExtraSPR}$ and $\proc{RemainingSPR}$ return an encoding in the current labeling or $\bot$ if no change is below $-\eta$.
+After an unsuccessful completion scan, an escape is permitted only if a subsequent sweep remains.
+For each row, retain the smallest change in $(\eta,0.05)$ and sort these increasingly.
+Attempt $e\in\{1,2\}$ combines the first and $(e+1)$th candidates if both exist and their sum is below $0.02$; otherwise it returns $\bot$.
+The thresholds are in objective units.
+Escapes can increase the working score, so the solver returns the best scored tree, including the final trial.
 
-\section{Sequence-refinement variant and recorded benchmarks}
-\label{sec:sequence_variant}
+\paragraph{GPU policy.}
+The GPU solver packs SPR moves with disjoint marked paths, rescores each combined trial on the next sweep, and retains the best scored skeleton over a bounded number of sweeps.
+It tries reversed labeling when no improving row remains, without CPU batch-halving or full SPR completion.
+The best trial is checked against the entry skeleton before committing a block.
+Intermediate trial scores can increase.
+For sequence refinement above $2{,}048$ leaves, inner skeleton proposals cap component leaf-weight lists at $64$ entries; before committing a block, affected condensed pairs are recomputed across all leaf contributions and checked with Equation~\eqref{eq:changed_pairs} in FP64 using acceptance margin $10^{-6}$.
 
-\subsection{Implementation used for the recorded measurements}
+\clearpage
+\section{Additional experimental results}
+\label{sec:additional_results}
 
-The sequence implementation used for the measurements in this appendix differs from the exact-distance search described in Section~\ref{sec:optimizer}.
-For trees larger than 2,048 leaves, it caps the weighted leaf lists used for proposal distances at 64 entries per component.
-These lists are called profiles in the implementation.
-Above the cap, unresolved subtree mass is assigned to representative leaves, producing an approximate matrix $\widetilde D^{\mathrm{cap}}$.
-For smaller trees, the proposal calculation is uncapped.
+\subsection{Sequence-refinement scaling tables}
+\label{sec:jc_tables}
 
-The approximate matrix guides the inner skeleton search.
-Before accepting an update, the implementation recomputes affected condensed distances involving truncated components using every leaf contribution.
-Distances for untruncated pairs can be reused.
-It then evaluates Equation~\eqref{eq:changed_pairs}, with FP64 accumulation and a numerical acceptance margin of $10^{-6}$.
-Outside weights are rebuilt from the current tree before each window, and ancestor summaries are updated after a commit.
-The acceptance calculation therefore evaluates the full-tree BME change, subject to rounding.
-It does not make the earlier proposal gradients exact, and the numerical margin is not a proved floating-point error bound.
+Tables~\ref{tab:rnasim_scaling}, \ref{tab:jc10k_scaling}, and~\ref{tab:jc1k_scaling} provide the complete numerical measurements corresponding to Figures~\ref{fig:rnasim_scaling} and~\ref{fig:jc_scaling_4panel} on simulated RNASim ($L=1{,}596$) and Jukes--Cantor ($L=10{,}000$ and $1{,}000$) alignments.
 
-These measurements characterize that implementation variant.
-They are not timings for constructing exact condensed distances and using them throughout every minibatch search.
-
-\subsection{Sequence data and comparison protocol}
-
-The recorded comparisons use the RNASim benchmark associated with PASTA~\cite{mirarab2015pasta}, with simulated sequences and a known reference tree.
-The reported alignments have 1,596 columns.
-The minibatch comparison uses gap-aware JC69 distances.
-Selected full-tree experiments also use the eigenvalue-based distance approach~\cite{penn2025eigen}, which changes the input objective and is identified separately.
-The CPU tools are 64-thread FastME 2.1.6 and VeryFastTree 4.0.5~\cite{lefort2015fastme,pineiro2020veryfasttree}.
-VeryFastTree's minimum-evolution refinement is run without its likelihood-refinement phase.
-Refinement time is reported separately from starting-tree construction.
-The minibatch times include the final full-tree acceptance calculation and sequential maintenance of the outside distances.
-
-\subsection{Recorded refinement results}
-
-Table~\ref{tab:rnasim_summary} compares this minibatch variant with VeryFastTree refinement from the same initial topology.
-At $N=50{,}000$, the minibatch method returns 4,950 incorrect splits in 16.84~s, compared with 4,980 in 313.53~s.
-At $N=100{,}000$, the corresponding results are 8,802 in 104.45~s and 8,857 in 593.50~s.
-The refinement-time ratios are 18.6 and 5.7 respectively.
-These exclude the shared initialization, which takes 63.01 and 179.03~s.
-Adding that initialization to both methods gives approximately 4.72-fold and 2.73-fold ratios, rather than the refinement-only ratios.
-
-\begin{table}[tb]
+\begin{table*}[!htbp]
 \centering
-\caption{RNASim refinement from a shared starting topology. VFT denotes 64-thread VeryFastTree minimum-evolution refinement. P2V denotes the sequence variant on one RTX A6000, using capped proposal distances above 2,048 leaves and full-tree acceptance checks. These are not timings of the exact-distance minibatch formulation. Times exclude the shared initialization.}
-\label{tab:rnasim_summary}
-\small
-\begin{tabular}{@{}rrrrrrr@{}}
+\caption{Sequence-to-tree scaling on simulated \textbf{RNASim} alignments ($L=1{,}596$ sites) from $N=1{,}000$ to $10{,}000{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF), alongside \texttt{DIPPER 0.1.5} (\textit{de novo}). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates.}
+\label{tab:rnasim_scaling}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}rrlrrrrrr@{}}
 \toprule
-$N$ & Initial & \multicolumn{2}{c}{Wrong splits} & \multicolumn{2}{c}{Refinement (s)} & Init. (s)\\
-\cmidrule(lr){3-4}\cmidrule(lr){5-6}
- & wrong splits & VFT & P2V & VFT & P2V & \\
+$N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & VRAM (MB) & Hardware\\
 \midrule
-1,000 & 214 & 178 & 176 & 6.88 & 0.06 & 0.58\\
-5,000 & 890 & 703 & 696 & 33.38 & 0.68 & 3.40\\
-10,000 & 1,667 & 1,313 & 1,320 & 65.98 & 1.55 & 7.82\\
-50,000 & 6,729 & 4,980 & 4,950 & 313.53 & 16.84 & 63.01\\
-100,000 & 12,375 & 8,857 & 8,802 & 593.50 & 104.45 & 179.03\\
+1,000 & 5 & Uniform Random Init & $99.97 \pm 0.04$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+1,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $20.98 \pm 0.82$ & $0.47 \pm 0.07$ & --- & $121.6 \pm 0.5$ & $392.0$ & 64 CPU + $1\times$ A6000\\
+1,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $19.70 \pm 3.12$ & $11.94 \pm 0.20$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
+1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $18.62 \pm 0.89$ & $8.04 \pm 0.24$ & --- & $131.6 \pm 2.2$ & --- & 64 CPU\\
+1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{14.42 \pm 0.47}$ & $18.30 \pm 0.58$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
+1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.62 \pm 0.65$ & $9.42 \pm 0.27$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
+1,000 & 5 & \textbf{Phylo2Vec-Full} & $18.13 \pm 0.79$ & $\mathbf{0.04 \pm 0.01}$ & $\mathbf{-144.10 \pm 1.46}$ & $106.8 \pm 0.0$ & $688.8$ & 64 CPU + $1\times$ H100\\
+1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $18.31 \pm 1.19$ & $\mathbf{0.04 \pm 0.00}$ & $-144.10 \pm 1.45$ & $735.7 \pm 1.4$ & $690.8$ & 64 CPU + $1\times$ H100\\
+\midrule
+5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+5,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $18.82 \pm 0.77$ & $2.07 \pm 0.06$ & --- & $133.0 \pm 0.0$ & $580.0$ & 64 CPU + $1\times$ A6000\\
+5,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $45.55 \pm 9.45$ & $70.38 \pm 1.91$ & --- & $290.4 \pm 0.5$ & --- & 64 CPU\\
+5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $43.17 \pm 9.67$ & $42.96 \pm 0.86$ & --- & $317.6 \pm 7.4$ & --- & 64 CPU\\
+5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{13.62 \pm 1.33}$ & $117.48 \pm 5.45$ & --- & $292.2 \pm 1.8$ & --- & 64 CPU\\
+5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.85 \pm 1.41$ & $50.22 \pm 1.55$ & --- & $318.6 \pm 8.0$ & --- & 64 CPU\\
+5,000 & 5 & \textbf{Phylo2Vec-Full} & $14.94 \pm 0.61$ & $2.29 \pm 0.16$ & $\mathbf{-869.75 \pm 6.90}$ & $111.7 \pm 0.7$ & $694.8$ & 64 CPU + $1\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $14.80 \pm 0.62$ & $\mathbf{0.49 \pm 0.05}$ & $-869.75 \pm 6.89$ & $739.9 \pm 0.7$ & $696.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $17.78 \pm 0.38$ & $8.90 \pm 0.10$ & --- & $145.8 \pm 0.8$ & $1156.0$ & 64 CPU + $1\times$ A6000\\
+10,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $64.34 \pm 7.47$ & $155.42 \pm 5.57$ & --- & $570.1 \pm 1.3$ & --- & 64 CPU\\
+10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $58.97 \pm 6.78$ & $90.56 \pm 3.09$ & --- & $542.3 \pm 7.1$ & --- & 64 CPU\\
+10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $14.47 \pm 1.33$ & $280.93 \pm 11.76$ & --- & $571.8 \pm 1.3$ & --- & 64 CPU\\
+10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.29 \pm 0.59$ & $103.90 \pm 3.22$ & --- & $545.0 \pm 6.8$ & --- & 64 CPU\\
+10,000 & 5 & \textbf{Phylo2Vec-Full} & $13.69 \pm 0.36$ & $23.00 \pm 3.28$ & $\mathbf{-1868.38 \pm 10.02}$ & $429.9 \pm 157.2$ & $698.8$ & 64 CPU + $1\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{13.65 \pm 0.40}$ & $\mathbf{1.39 \pm 0.66}$ & $-1868.34 \pm 9.98$ & $743.8 \pm 1.1$ & $700.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $19.50 \pm 0.15$ & $59.83 \pm 5.51$ & --- & $246.6 \pm 0.8$ & $446.0$ & 64 CPU + $1\times$ A6000\\
+50,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $89.30 \pm 1.13$ & $874.43 \pm 24.09$ & --- & $2835.9 \pm 0.6$ & --- & 64 CPU\\
+50,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $88.09 \pm 1.29$ & $486.95 \pm 38.28$ & --- & $2405.4 \pm 15.5$ & --- & 64 CPU\\
+50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{9.91 \pm 0.15}$ & $\mathbf{3.71 \pm 0.19}$ & $\mathbf{-10943.39 \pm 12.09}$ & $782.2 \pm 1.1$ & $746.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+100,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.10 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+100,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $16.80 \pm 0.19$ & $216.26 \pm 0.22$ & --- & $386.5 \pm 2.8$ & $512.0$ & 64 CPU + $1\times$ A6000\\
+100,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $92.62 \pm 0.59$ & $1853.11 \pm 67.03$ & --- & $5677.2 \pm 2.3$ & --- & 64 CPU\\
+100,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $92.73 \pm 1.37$ & $1024.52 \pm 37.34$ & --- & $4651.7 \pm 24.7$ & --- & 64 CPU\\
+100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{8.76 \pm 0.05}$ & $\mathbf{6.75 \pm 0.30}$ & $\mathbf{-23262.65 \pm 20.42}$ & $830.2 \pm 0.9$ & $794.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+1,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
+1,000,000 & 1 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $11.25$ & $978.23$ & --- & $4189.6$ & $1871.8$ & 64 CPU + $1\times$ A6000\\
+1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{1.17}$ & $\mathbf{69.01}$ & $\mathbf{-306164.97}$ & $\mathbf{1043.5}$ & $\mathbf{1656.8}$ & 64 CPU + $8\times$ H100\\
+\midrule
+10,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
+10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{4.13}$ & $\mathbf{974.61}$ & $\mathbf{-3319791.02}$ & $\mathbf{2575.1}$ & $10240.8$ & 64 CPU + $8\times$ H100\\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\begin{table*}[!htbp]
+\centering
+\caption{Sequence-to-tree scaling on simulated Jukes--Cantor alignments with $L=10{,}000$ sites (\texttt{JC10k}) from $N=1{,}000$ to $10{,}000{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF), alongside \texttt{DIPPER 0.1.5} (\textit{de novo}). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates.}
+\label{tab:jc10k_scaling}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}rrlrrrrrr@{}}
+\toprule
+$N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & VRAM (MB) & Hardware\\
+\midrule
+1,000 & 5 & Uniform Random Init & $99.97 \pm 0.04$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+1,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.60 \pm 0.48$ & $0.59 \pm 0.10$ & --- & $134.2 \pm 1.0$ & $398.0$ & 64 CPU + $1\times$ A6000\\
+1,000 & 5 & FastME 2.1.6 (\texttt{-s -u}) & $4.25 \pm 0.57$ & $110.76 \pm 4.85$ & --- & $138.0 \pm 2.5$ & --- & 64 CPU\\
+1,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $4.25 \pm 0.57$ & $68.20 \pm 1.47$ & --- & $345.0 \pm 0.6$ & --- & 64 CPU\\
+1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $4.99 \pm 1.36$ & $47.15 \pm 1.77$ & --- & $599.4 \pm 37.4$ & --- & 64 CPU\\
+1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{2.61 \pm 0.52}$ & $91.23 \pm 1.30$ & --- & $395.4 \pm 3.9$ & --- & 64 CPU\\
+1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $2.63 \pm 0.67$ & $52.11 \pm 1.45$ & --- & $603.1 \pm 44.1$ & --- & 64 CPU\\
+1,000 & 5 & \textbf{Phylo2Vec-Full} & $4.25 \pm 0.56$ & $\mathbf{0.04 \pm 0.00}$ & $\mathbf{-132.79 \pm 1.63}$ & $112.0 \pm 0.0$ & $696.8$ & 64 CPU + $1\times$ H100\\
+1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $4.29 \pm 0.58$ & $\mathbf{0.04 \pm 0.01}$ & $\mathbf{-132.79 \pm 1.63}$ & $741.0 \pm 0.9$ & $698.8$ & 64 CPU + $1\times$ H100\\
+\midrule
+5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+5,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.01 \pm 0.31$ & $2.32 \pm 0.10$ & --- & $193.8 \pm 0.1$ & $600.0$ & 64 CPU + $1\times$ A6000\\
+5,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $22.02 \pm 8.00$ & $380.93 \pm 5.04$ & --- & $1676.2 \pm 3.6$ & --- & 64 CPU\\
+5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $9.27 \pm 2.30$ & $238.48 \pm 5.14$ & --- & $1666.2 \pm 47.3$ & --- & 64 CPU\\
+5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.04 \pm 0.31$ & $541.68 \pm 22.96$ & --- & $1742.7 \pm 4.4$ & --- & 64 CPU\\
+5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.98 \pm 0.36}$ & $256.49 \pm 5.46$ & --- & $1649.8 \pm 45.5$ & --- & 64 CPU\\
+5,000 & 5 & \textbf{Phylo2Vec-Full} & $3.36 \pm 0.07$ & $2.81 \pm 0.42$ & $\mathbf{-738.35 \pm 9.75}$ & $136.5 \pm 0.0$ & $720.8$ & 64 CPU + $1\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.33 \pm 0.12$ & $\mathbf{1.02 \pm 0.04}$ & $-738.28 \pm 9.79$ & $765.5 \pm 0.9$ & $722.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.21 \pm 0.11$ & $9.31 \pm 0.05$ & --- & $266.6 \pm 0.8$ & $1196.0$ & 64 CPU + $1\times$ A6000\\
+10,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $33.51 \pm 13.07$ & $823.06 \pm 11.99$ & --- & $3345.3 \pm 9.4$ & --- & 64 CPU\\
+10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & --- & $2766.5 \pm 14.1$ & --- & 64 CPU\\
+10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & --- & $3411.9 \pm 9.2$ & --- & 64 CPU\\
+10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & --- & $2770.2 \pm 26.4$ & --- & 64 CPU\\
+10,000 & 5 & \textbf{Phylo2Vec-Full} & $3.08 \pm 0.09$ & $26.76 \pm 4.50$ & $\mathbf{-1542.81 \pm 15.45}$ & $440.4 \pm 136.2$ & $750.8$ & 64 CPU + $1\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $-1542.67 \pm 15.40$ & $796.2 \pm 0.0$ & $752.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.90 \pm 0.17$ & $66.30 \pm 1.36$ & --- & $1038.6 \pm 6.4$ & $646.0$ & 64 CPU + $1\times$ A6000\\
+50,000 & 4 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $74.25 \pm 4.51$ & $4525.52 \pm 115.67$ & --- & $16673.0 \pm 19.7$ & --- & 64 CPU\\
+50,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $70.03 \pm 2.04$ & $2506.54 \pm 103.01$ & --- & $12062.2 \pm 61.7$ & --- & 64 CPU\\
+50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.61 \pm 0.17}$ & $\mathbf{13.19 \pm 0.21}$ & $\mathbf{-8408.27 \pm 56.33}$ & $\mathbf{990.5 \pm 1.6}$ & $1004.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+100,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.10 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
+100,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.41 \pm 0.12$ & $313.35 \pm 84.78$ & --- & $2001.4 \pm 3.3$ & $912.0$ & 64 CPU + $1\times$ A6000\\
+100,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $84.88 \pm 2.64$ & $5588.08 \pm 300.03$ & --- & $23767.2 \pm 110.4$ & --- & 64 CPU\\
+100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.45 \pm 0.15}$ & $\mathbf{21.48 \pm 0.09}$ & $\mathbf{-17306.92 \pm 122.36}$ & $\mathbf{991.5 \pm 1.4}$ & $1310.8$ & 64 CPU + $8\times$ H100\\
+\midrule
+1,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
+1,000,000 & 1 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $5.64$ & $2592.75$ & --- & $24225.3$ & $17747.6$ & 64 CPU + $1\times$ A6000\\
+1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{1.40}$ & $\mathbf{176.97}$ & $\mathbf{-201262.38}$ & $\mathbf{1809.1}$ & $\mathbf{6806.8}$ & 64 CPU + $8\times$ H100\\
+\midrule
+10,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
+10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.58}$ & $\mathbf{4240.82}$ & $\mathbf{-2232357.84}$ & $\mathbf{2816.2}$ & $61726.8$ & 64 CPU + $8\times$ H100\\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\begin{table*}[!htbp]
+\centering
+\caption{Sequence-length sensitivity at $N=10{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF): simulated Jukes--Cantor alignments with $L=1{,}000$ sites (\texttt{JC1k}) vs.\ $L=10{,}000$ sites (\texttt{JC10k}) over $R=5$ independent replicates ($\text{mean}\pm\text{SD}$).}
+\label{tab:jc1k_scaling}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}lrrrrrr@{}}
+\toprule
+Method & \multicolumn{3}{c}{$L=1{,}000$ sites (\texttt{JC1k}, $R=5$)} & \multicolumn{3}{c}{$L=10{,}000$ sites (\texttt{JC10k}, $R=5$)}\\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+ & Norm.\ RF (\%) & Time (s) & $\Delta\text{BME}$ & Norm.\ RF (\%) & Time (s) & $\Delta\text{BME}$\\
+\midrule
+Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$\\
+DIPPER 0.1.5 (GPU, \textit{de novo}) & $22.06 \pm 0.26$ & $8.74 \pm 0.08$ & --- & $6.21 \pm 0.11$ & $9.31 \pm 0.05$ & ---\\
+FastTreeMP 2.2 (\texttt{-noml -intree}) & $47.52 \pm 10.80$ & $85.00 \pm 3.06$ & --- & $33.51 \pm 13.07$ & $823.06 \pm 11.99$ & ---\\
+VeryFastTree 4.0 (\texttt{-noml -intree}) & $41.36 \pm 5.67$ & $50.23 \pm 2.15$ & --- & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & ---\\
+FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $12.18 \pm 0.80$ & $129.78 \pm 5.78$ & --- & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & ---\\
+VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{11.87 \pm 0.63}$ & $55.72 \pm 2.27$ & --- & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & ---\\
+\textbf{Phylo2Vec-Full} & $13.26 \pm 0.32$ & $28.63 \pm 3.34$ & $\mathbf{-1561.93 \pm 26.97}$ & $3.08 \pm 0.09$ & $26.76 \pm 4.50$ & $\mathbf{-1542.81 \pm 15.45}$\\
+\textbf{Phylo2Vec-Minibatch} & $13.25 \pm 0.23$ & $\mathbf{0.90 \pm 0.03}$ & $-1561.84 \pm 26.90$ & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $-1542.67 \pm 15.40$\\
+\bottomrule
+\end{tabular*}
+\end{table*}
+
+\clearpage
+\subsection{Numerical verification and small-tree CPU optimization}
+\label{sec:cpu_tables}
+
+Table~\ref{tab:validation} compares coordinate and condensed changes with independent direct BME calculations.
+Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} report single-core CPU optimization comparisons against the in-memory FastME BME-SPR reference (FME) on Apple M5 across additive and noisy distance matrices ($N=20$ to $200$).
+
+\begin{table}[!htbp]
+\centering
+\caption{Agreement with independent BME calculations. Errors are maximum absolute discrepancies over the stated tests.}
+\label{tab:validation}
+\small
+\begin{tabular}{@{}p{0.39\linewidth}p{0.32\linewidth}r@{}}
+\toprule
+Calculation & Test scope & Maximum error\\
+\midrule
+CPU coordinate differences & 36,000 changes, $N=20$ & $3.553\times10^{-14}$\\
+Ordered-tree enumeration & 28,488 changes, $N=4$--7 & $2.776\times10^{-15}$\\
+Relabeling, first orientation & 200 trees, $N=25$ & $1.776\times10^{-14}$\\
+Relabeling, reversed orientation & Same 200 trees & $2.665\times10^{-14}$\\
+Condensed SPR differences & 16,231 changes, $N=40$, $K=16$ & $1.564\times10^{-13}$\\
+FP32 CUDA gradient & Reported sizes $N=100$--4,000 & $1.11\times10^{-6}$\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The topological advantage is not uniform.
-At $N=10{,}000$, the minibatch result has 1,320 incorrect splits, compared with 1,313 for VeryFastTree.
-A full-tree run with eigenvalue-based distances reaches 1,309 in 4.57~s, but uses a different distance estimate.
-The full-tree JC69 run returns 1,320 in 3.71~s.
-These variants should therefore not be combined into a single claim of consistently better topological accuracy.
-
-At $N=1{,}000$, FastME applied to the GPU-computed JC69 distance matrix returns 177 incorrect splits in 21.68~s with its own BIONJ initialization.
-Its shared-start refinement returns 178 in 11.27~s.
-The corresponding full-tree GPU result is 176 in 0.01~s, and minibatch refinement returns 176 in 0.06~s.
-The experiments differ in initialization and timing scope, so the ratios between their raw elapsed times are not interchangeable.
-
-
-\section{Truncation and stale outside-distance counterexamples}
-\label{sec:counterexamples}
-
-Two constructions illustrate the need for exact condensed distances and current outside information.
-The first concerns the approximate-proposal variant in Appendix~\ref{sec:sequence_variant}.
-On a 4,102-leaf tree containing a balanced 4,096-leaf component, an adversarial split distance can give a capped proposal change of $-0.25$ while its true full-profile change is $+0.2421875$ for a cap of 64, or $+0.234375$ for a cap of 128.
-The proposal sign alone is therefore insufficient.
-Full-profile acceptance rejects both changes.
-
-Separately, consider two disjoint windows whose internal rearrangements change their root-to-leaf weight vectors from $p_A,p_B$ to $p_A+\delta p_A,p_B+\delta p_B$.
-With a fixed path coefficient $\kappa$ between their attachment points, their cross contribution contains
-$\kappa p_A^\top D_{AB}p_B$.
-The jointly changed contribution includes the additional term
-\[
- \kappa\,\delta p_A^\top D_{AB}\delta p_B,
-\]
-which is absent from the sum of two changes computed against the original surroundings.
-In a 1,540-leaf test with two 768-leaf windows, changes
-$-0.0032945313$ and $-0.0254489835$ computed against frozen surroundings combine to an actual increase of $+0.0505258348$.
-Rebuilding the outside profile after the first commit makes the other proposal positive:
-$+0.0538203660$ or $+0.0759748183$, depending on the processing order.
-It is then rejected.
-These values come from controlled CPU replay of the acceptance and window-controller paths.
-They do not constitute a native-GPU concurrency test.
-
-\section{Implementation and reproducibility}
-\label{sec:software}
-
-The CPU evaluator, tree encoders, and full-tree optimizer are implemented in
-\texttt{phylo2vec\_fastme.c}, with input validation and Python bindings in
-\texttt{discrete\_gradient.py}.
-The lower-triangular and full-coordinate interfaces require an ordered baseline.
-The multi-GPU evaluator and its tiled variants are implemented in
-\texttt{phylo2vec\_cuda\_8xh100.cu}.
-Sequence refinement is exercised by \texttt{bench\_rnasim\_gpu.cu}.
-The distinct distance-oracle recovery workload is implemented in
-\texttt{bench\_minibatch\_recovery.cu}.
-
-Independent checks include \texttt{verify\_all.c} for objective identities and encoding boundaries,
-\texttt{verify\_spr\_coverage.py} for neighborhood enumeration, and
-\texttt{compare\_with\_fastme\_cli.py} for the external reference.
-The profile-completeness and window-composition constructions are recorded with their reproduction commands in the discrete-gradient review artifacts.
-The fifth review checks the window controller, full-profile arithmetic, and a shared-input batching path using CPU emulation.
-That harness does not cover the subsequent split-launch implementation.
-Native CUDA tests and the implementation revision associated with each timing must be recorded separately.
-
-The present manuscript reorganizes existing measurements rather than reporting a new benchmark campaign.
-The source archive and revision notes accompanying this draft preserve the original tables and identify the sequence timings retained in Appendix~\ref{sec:sequence_variant}.
-An end-to-end sequence benchmark with exact condensed distances throughout is not supplied by those records.
-Before submission, benchmark records should be consolidated with source revisions, compiler flags, seeds, repeat counts, and the exact timing boundaries.
-The earlier recovery and controlled-JC69 minibatch timings are retained in that archive rather than used to characterize the corrected acceptance path here.
-
-\section{Supplementary CPU comparisons}
-\label{sec:cpu_tables}
-
-Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} give the full Apple M5 comparisons.
-FME denotes the in-memory reference implementation.
-P2V denotes Phylo2Vec.
-RF denotes normalized Robinson--Foulds distance.
-Wins and ties refer to the BME objective, with tolerance $10^{-9}$.
-Timings and evaluation counts are means, with standard deviations and the reported P2V median and interquartile range retained.
-
 \input{phylo2vec_bme_cpu_tables}
 
 \clearpage
-\section{Supplementary scaling measurements}
+\subsection{GPU evaluation}
 \label{sec:scaling_tables}
 
-The tables below retain the reported sweep measurements, separating CPU/Metal, CUDA, sharded, and embedding-based workloads.
-The single-GPU speedups use their respective host CPU references.
-They should not be interpreted as comparisons against one common host baseline.
-Stage timings measure balanced-distance construction and SPR evaluation, rather than optimization to convergence.
-The $2N^2$ column in the sharded table is the original rectangular-workload size proxy.
-It is not the number of valid Phylo2Vec coordinate entries, which is $(N-1)^2$, nor a count of distinct neighboring trees.
-Reported memory units are retained from the benchmark records.
+Tables~\ref{tab:cuda_a6000_verify}--\ref{tab:h100_scaling} report coordinate-sweep and condensation costs at fixed trees.
+Single-GPU speedups use different host CPU references.
+In Table~\ref{tab:h100_scaling}, $2N^2$ is a rectangular-workload proxy; the number of valid coordinate entries is $(N-1)^2$.
+Memory units follow the benchmark records.
 
-For the embedding workload, each batch has 20,000 skeleton leaves, comprising 15,000 expanded leaves and 5,000 condensed components.
-Its epoch columns multiply average condensation-plus-gradient time by
-$\lceil N/15{,}000\rceil$.
-They are workload estimates rather than measured convergence times.
-The largest listed validation discrepancy in this workload is $1.4\times10^{-5}$, and the listed validation outcomes refer to the benchmark's own checks.
+For Table~\ref{tab:minibatch_scaling}, each skeleton contains 15,000 expanded leaves and 5,000 condensed components.
+Epoch estimates multiply mean condensation-plus-sweep time by $\lceil N/15{,}000\rceil$ and exclude additional search work and optimization to convergence.
+Validation discrepancies are observed errors on the benchmark checks.
 
 \input{phylo2vec_bme_scaling_tables}

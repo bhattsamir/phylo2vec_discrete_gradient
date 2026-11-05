@@ -1,0 +1,30 @@
+{
+  "compile": "pass",
+  "pages": 19,
+  "duplicate_labels": 0,
+  "unresolved_references": 0,
+  "unresolved_citations": 0,
+  "latex_warnings": 0,
+  "original_backup_hash_matches": true,
+  "benchmarks_rerun": false,
+  "matched_initialization_time_ratios": {
+    "50000": 4.715591734502191,
+    "100000": 2.7251657965288554
+  },
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "429a8a30e14db16c42d7675dc7b6a7af9a1bda7e05cfe91f6b9b1110a31da067",
+    "paper/phylo2vec_bme_appendix.tex": "0e515b03ede6882c5de4a95984167df2a5e5bd2f51ff4f40e0a703963bd6b297",
+    "paper/phylo2vec_bme_references.tex": "c4399e7a02e5d50f4703b593b67ce9a8602351cb1d919ee43eadf224affed6b3",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4"
+  },
+  "visually_checked_pages": [
+    1,
+    2,
+    12
+  ],
+  "abstract_words": 228,
+  "exact_focus_table_bodies_unchanged": true,
+  "exact_focus_backups_match": true,
+  "novelty_review_validation": "paper/novelty_chatgpt/validation.json"
+}

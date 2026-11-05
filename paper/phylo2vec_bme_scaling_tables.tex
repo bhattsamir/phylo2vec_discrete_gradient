@@ -1,59 +1,6 @@
 \begin{table}[!htbp]
 \centering\small
 \setlength{\tabcolsep}{4pt}
-\caption{CPU and Metal gradient timings on Apple M5. All times are milliseconds.}
-\label{tab:bench_gpu}
-\par\smallskip
-\textit{FP64 full sweep}\par\smallskip
-\begin{tabular}{@{}rrrrr@{}}
-\toprule
-$N$ & 1 CPU & 10 CPU & Ratio & 10 CPU tiled\\
-\midrule
-$100$ & $0.055$ & $0.068$ & $0.80\times$ & $0.096$\\
-$250$ & $0.332$ & $0.322$ & $1.03\times$ & $0.246$\\
-$500$ & $1.273$ & $0.433$ & \textbf{2.94$\times$} & $0.508$\\
-$1{,}000$ & $5.860$ & $1.878$ & \textbf{3.12$\times$} & $2.081$\\
-$2{,}000$ & $27.399$ & $10.230$ & \textbf{2.68$\times$} & $10.806$\\
-$3{,}000$ & $85.815$ & $24.428$ & \textbf{3.51$\times$} & \textbf{23.777 ms}\\
-$4{,}000$ & $132.225$ & $51.265$ & \textbf{2.58$\times$} & \textbf{43.329 ms}\\
-\bottomrule
-\end{tabular}
-\par\smallskip
-\textit{Balanced-distance construction}\par\smallskip
-\begin{tabular}{@{}rrrrr@{}}
-\toprule
-$N$ & CPU FP64 & CPU FP32 & Metal FP32 & Ratio\\
-\midrule
-$100$ & $0.012$ & $0.011$ & $0.517$ & $0.02\times$\\
-$250$ & $0.076$ & $0.058$ & $0.906$ & $0.08\times$\\
-$500$ & $0.312$ & $0.223$ & $1.216$ & $0.26\times$\\
-$1{,}000$ & $1.565$ & $1.344$ & $2.699$ & $0.58\times$\\
-$2{,}000$ & $8.954$ & $9.533$ & $4.462$ & \textbf{2.01$\times$}\\
-$3{,}000$ & $22.504$ & $35.030$ & $8.970$ & \textbf{2.51$\times$}\\
-$4{,}000$ & $68.188$ & $59.289$ & $7.571$ & \textbf{9.01$\times$}\\
-\bottomrule
-\end{tabular}
-\par\smallskip
-\textit{Hybrid sweep and absolute errors}\par\smallskip
-\begin{tabular}{@{}rrrrr@{}}
-\toprule
-$N$ & Hybrid FP32 & Ratio & FP64 error & FP32 error\\
-\midrule
-$100$ & $0.524$ & $0.10\times$ & $0.00\text{e+}00$ & $4.35\text{e-}07$\\
-$250$ & $0.934$ & $0.36\times$ & $0.00\text{e+}00$ & $5.24\text{e-}07$\\
-$500$ & $1.742$ & $0.73\times$ & $5.55\text{e-}17$ & $6.63\text{e-}07$\\
-$1{,}000$ & $3.097$ & \textbf{1.89$\times$} & $4.44\text{e-}16$ & $8.11\text{e-}07$\\
-$2{,}000$ & $6.312$ & \textbf{4.34$\times$} & $4.44\text{e-}16$ & $8.93\text{e-}07$\\
-$3{,}000$ & $14.359$ & \textbf{5.98$\times$} & $5.27\text{e-}16$ & $9.84\text{e-}07$\\
-$4{,}000$ & $26.922$ & \textbf{4.91$\times$} & $5.00\text{e-}16$ & $1.13\text{e-}06$\\
-\bottomrule
-\end{tabular}
-
-\end{table}
-
-\begin{table}[!htbp]
-\centering\small
-\setlength{\tabcolsep}{4pt}
 \caption{Single-GPU gradient timings and agreement with the CPU reference. Times are milliseconds.}
 \label{tab:cuda_a6000_verify}
 \par\smallskip
@@ -85,6 +32,36 @@ $4{,}000$ & $701.375$ & $3.565$ & $2.654$ & $6.219$ & \textbf{112.78$\times$} & 
 \bottomrule
 \end{tabular}
 \par\medskip\begin{minipage}{\linewidth}\footnotesize The maximum-error column is the reported combined check across the GPU paths. All listed checks pass their benchmark tolerance. CPU baselines differ between hosts.\end{minipage}
+\end{table}
+
+\begin{table}[!htbp]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\caption{Embedding-based condensed sweeps with $K=20{,}000$ skeleton leaves. The epoch columns are batch-count times mean condensation-plus-gradient time.}
+\label{tab:minibatch_scaling}
+\par\smallskip
+\textit{Two A6000 GPUs}\par\smallskip
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+$N$ & Batches & 2 A6000 cond.+grad. (ms) & Epoch (s)\\
+\midrule
+$1{,}000{,}000$ & $67$ & $4.45 + 284.44$ & $19.36$\\
+$5{,}000{,}000$ & $334$ & $8.42 + 283.02$ & $97.34$\\
+$10{,}000{,}000$ & $667$ & $17.29 + 281.58$ & $199.35$\\
+\bottomrule
+\end{tabular}
+\par\smallskip
+\textit{Eight H100 GPUs}\par\smallskip
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$N$ & Cond. ms & Grad. ms & Epoch s & MB/GPU & Check\\
+\midrule
+$1{,}000{,}000$ & $2.69$ & $48.53$ & $\mathbf{3.43}$ & $7{,}793$ & \textbf{PASS} ($1.4\text{e-}05$)\\
+$5{,}000{,}000$ & $4.86$ & $48.48$ & $\mathbf{17.82}$ & $7{,}824$ & \textbf{PASS} ($2.1\text{e-}06$)\\
+$10{,}000{,}000$ & $10.20$ & $48.57$ & $\mathbf{39.20}$ & $7{,}862$ & \textbf{PASS} ($2.2\text{e-}06$)\\
+\bottomrule
+\end{tabular}
+\par\medskip\begin{minipage}{\linewidth}\footnotesize This workload uses a bilinear embedding distance and is separate from sequence-distance refinement. The validation figures are observed discrepancies, not universal error bounds.\end{minipage}
 \end{table}
 
 \begin{table}[!htbp]
@@ -173,34 +150,4 @@ $380{,}000$ & $72{,}946$ & $569.9$ & \texttt{StreamD+Calib} [\textbf{PASS}]\\
 \bottomrule
 \end{tabular}
 \par\medskip\begin{minipage}{\linewidth}\footnotesize At $N=400{,}000$, the reported requirement is 80,600 MB/GPU (629.7 GB aggregate), exceeding available device memory. Full-Shard and Shard+Calib retain distance shards. StreamD+Calib generates distance tiles as required. The work proxy is not a count of distinct moves.\end{minipage}
-\end{table}
-
-\begin{table}[!htbp]
-\centering\small
-\setlength{\tabcolsep}{4pt}
-\caption{Embedding-based condensed sweeps with $K=20{,}000$ skeleton leaves. The epoch columns are batch-count times mean condensation-plus-gradient time.}
-\label{tab:minibatch_scaling}
-\par\smallskip
-\textit{Two A6000 GPUs}\par\smallskip
-\begin{tabular}{@{}rrrr@{}}
-\toprule
-$N$ & Batches & 2 A6000 cond.+grad. (ms) & Epoch (s)\\
-\midrule
-$1{,}000{,}000$ & $67$ & $4.45 + 284.44$ & $19.36$\\
-$5{,}000{,}000$ & $334$ & $8.42 + 283.02$ & $97.34$\\
-$10{,}000{,}000$ & $667$ & $17.29 + 281.58$ & $199.35$\\
-\bottomrule
-\end{tabular}
-\par\smallskip
-\textit{Eight H100 GPUs}\par\smallskip
-\begin{tabular}{@{}rrrrrr@{}}
-\toprule
-$N$ & Cond. ms & Grad. ms & Epoch s & MB/GPU & Check\\
-\midrule
-$1{,}000{,}000$ & $2.69$ & $48.53$ & $\mathbf{3.43}$ & $7{,}793$ & \textbf{PASS} ($1.4\text{e-}05$)\\
-$5{,}000{,}000$ & $4.86$ & $48.48$ & $\mathbf{17.82}$ & $7{,}824$ & \textbf{PASS} ($2.1\text{e-}06$)\\
-$10{,}000{,}000$ & $10.20$ & $48.57$ & $\mathbf{39.20}$ & $7{,}862$ & \textbf{PASS} ($2.2\text{e-}06$)\\
-\bottomrule
-\end{tabular}
-\par\medskip\begin{minipage}{\linewidth}\footnotesize This workload uses a bilinear embedding distance and is separate from sequence-distance refinement. The validation figures are observed discrepancies, not universal error bounds.\end{minipage}
 \end{table}

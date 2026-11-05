@@ -1,0 +1,83 @@
+{
+  "compile": "pass",
+  "pages": 19,
+  "duplicate_labels": 0,
+  "unresolved_references": [],
+  "unresolved_citations": [],
+  "latex_warnings": [],
+  "math_and_proof_preservation": {
+    "equation": {
+      "count_before": 14,
+      "count_after": 14,
+      "unchanged": true
+    },
+    "align*": {
+      "count_before": 1,
+      "count_after": 1,
+      "unchanged": true
+    },
+    "theorem": {
+      "count_before": 1,
+      "count_after": 1,
+      "unchanged": true
+    },
+    "lemma": {
+      "count_before": 1,
+      "count_after": 1,
+      "unchanged": true
+    },
+    "proposition": {
+      "count_before": 2,
+      "count_after": 2,
+      "unchanged": true
+    },
+    "corollary": {
+      "count_before": 2,
+      "count_after": 2,
+      "unchanged": true
+    },
+    "proof": {
+      "count_before": 6,
+      "count_after": 6,
+      "unchanged": true
+    }
+  },
+  "original_table_preservation": {
+    "tab:validation": true,
+    "tab:cpu_summary": true,
+    "tab:rnasim_summary": true
+  },
+  "protected_files_unchanged": {
+    "paper/phylo2vec_bme_references.tex": true,
+    "paper/phylo2vec_bme_cpu_tables.tex": true,
+    "paper/phylo2vec_bme_scaling_tables.tex": true,
+    "phylo2vec_fastme.c": true,
+    "phylo2vec_cuda_8xh100.cu": true,
+    "bench_rnasim_gpu.cu": true,
+    "bench_minibatch_recovery.cu": true
+  },
+  "abstract_word_counts": {
+    "before": 228,
+    "after": 183
+  },
+  "benchmarks_rerun": false,
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "15f01766a9f5021f401eb739a1dd462677b67e6509aff70c2fec2a23854eec8a",
+    "paper/phylo2vec_bme_appendix.tex": "321de2e8f4f0bc66f7770081841d2db59ba6164a7d299d333521f785a6f28275",
+    "paper/phylo2vec_bme_references.tex": "c4399e7a02e5d50f4703b593b67ce9a8602351cb1d919ee43eadf224affed6b3",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "paper/figures/exact_block_overview.tex": "9b1c43132b2876f9c90ab35730429c23bd8b0f3d6d2fe82b8c85f1b490f96188",
+    "paper/figures/exact_block_overview.pdf": "a8970e5b4045dd5df783491519f847df5e9d8e8b699bc8ba23456db8d4a6d9e0"
+  },
+  "visually_checked_pages": [
+    1,
+    2,
+    3,
+    7,
+    11,
+    14,
+    15
+  ],
+  "standalone_figure_visually_checked": true
+}

@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-04",
+  "compile": "pass",
+  "manuscript_pages": 19,
+  "figure_page": 3,
+  "figure_size_pdf_points": [
+    457.52801513671875,
+    176.8990020751953
+  ],
+  "vector_figure": true,
+  "raster_images": 0,
+  "fonts_embedded": true,
+  "type3_fonts": false,
+  "all_text_within_figure_bounds": true,
+  "source_label_sizes_tex_pt": {
+    "main_labels": 9,
+    "component_labels_and_formula": 10,
+    "mathematical_subscripts": "smaller"
+  },
+  "colour_and_greyscale_visual_check": true,
+  "integrated_figure_visual_check": true,
+  "latex_warnings": [],
+  "math_and_proofs_unchanged": true,
+  "original_numerical_tables_unchanged": true,
+  "implementation_sources_unchanged": true,
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "d0b3e1ab5c90d6df8b603b193d63b1d2c58a873cf242066068bc0023df13e3c4",
+    "paper/phylo2vec_bme_appendix.tex": "321de2e8f4f0bc66f7770081841d2db59ba6164a7d299d333521f785a6f28275",
+    "paper/phylo2vec_bme_references.tex": "c4399e7a02e5d50f4703b593b67ce9a8602351cb1d919ee43eadf224affed6b3",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "paper/figures/exact_block_overview.tex": "0537aac37119f49f52805e6863d707f9763767cf042c855e0986c923adb4387d",
+    "paper/figures/exact_block_overview.pdf": "fe5efea0d252b1489ceeef9691db730cd2276599a88498487f3bb8dfaff1afdc",
+    "paper/build_paper.sh": "e0e89d11c42349c826630b026cb1b36c3a24c80934505a8b8d7b854537f0262a"
+  }
+}

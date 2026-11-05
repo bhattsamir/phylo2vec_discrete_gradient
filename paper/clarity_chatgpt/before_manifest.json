@@ -1,0 +1,15 @@
+{
+  "head": "dd919c932516de9595bff38642e52d6c5b63fdff",
+  "sha256": {
+    "paper/phylo2vec_bme_paper.tex": "429a8a30e14db16c42d7675dc7b6a7af9a1bda7e05cfe91f6b9b1110a31da067",
+    "paper/phylo2vec_bme_appendix.tex": "0e515b03ede6882c5de4a95984167df2a5e5bd2f51ff4f40e0a703963bd6b297",
+    "paper/phylo2vec_bme_references.tex": "c4399e7a02e5d50f4703b593b67ce9a8602351cb1d919ee43eadf224affed6b3",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "paper/restructure_chatgpt/validation.json": "4d4df37e5a7ad0a23398f2e806ab32d6d8e51dd8ff7b67581b84f3877846f69f",
+    "phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+    "phylo2vec_cuda_8xh100.cu": "1be4b15a9c4a952d4cad82469bcc444fc7ba055aaeb1c51c56d6cde927f6e5b7",
+    "bench_rnasim_gpu.cu": "23cf944bb0aada837ae4292231e548bcf9bb45e738277741147f6b60b7216a77",
+    "bench_minibatch_recovery.cu": "97ebdc87b9fac7ce183ae482bb03a129abfdef4ca78b9911ddb10aff629fcf92"
+  }
+}

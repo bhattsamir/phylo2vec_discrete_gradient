@@ -20,6 +20,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <sys/resource.h>
 #include <float.h>
 #include <vector>
 #include <queue>
@@ -191,15 +192,15 @@ __device__ __forceinline__ float dev_jc69_dist_popc(
     const uint64_t *sy = &d_packed_seqs[(size_t)y * 5 * W];
     int32_t n_valid = 0;
     int32_t n_match = 0;
-    #pragma unroll
-    for (int w = 0; w < 25; ++w) {
-        uint64_t vx = sx[4 * 25 + w];
-        uint64_t vy = sy[4 * 25 + w];
+    #pragma unroll 5
+    for (int32_t w = 0; w < W; ++w) {
+        uint64_t vx = __ldg(&sx[4 * W + w]);
+        uint64_t vy = __ldg(&sy[4 * W + w]);
         n_valid += __popcll(vx & vy);
-        uint64_t m = (sx[0 * 25 + w] & sy[0 * 25 + w])
-                   | (sx[1 * 25 + w] & sy[1 * 25 + w])
-                   | (sx[2 * 25 + w] & sy[2 * 25 + w])
-                   | (sx[3 * 25 + w] & sy[3 * 25 + w]);
+        uint64_t m = (__ldg(&sx[0 * W + w]) & __ldg(&sy[0 * W + w]))
+                   | (__ldg(&sx[1 * W + w]) & __ldg(&sy[1 * W + w]))
+                   | (__ldg(&sx[2 * W + w]) & __ldg(&sy[2 * W + w]))
+                   | (__ldg(&sx[3 * W + w]) & __ldg(&sy[3 * W + w]));
         n_match += __popcll(m);
     }
     if (n_valid <= 0) return 1.5f;
@@ -220,7 +221,8 @@ __global__ void k_build_real_seq_condensed_D(
     const int32_t * __restrict__ d_prof_leaves,
     const float   * __restrict__ d_prof_weights,
     const uint64_t * __restrict__ d_packed_seqs,
-    float * __restrict__ d_D_cond
+    float * __restrict__ d_D_cond,
+    int32_t heavy_min
 ) {
     int32_t b = blockIdx.x * blockDim.x + threadIdx.x;
     int32_t a = blockIdx.y * blockDim.y + threadIdx.y;
@@ -232,6 +234,8 @@ __global__ void k_build_real_seq_condensed_D(
     if (a < b) {
         int32_t off_a = d_prof_offsets[a], end_a = d_prof_offsets[a + 1];
         int32_t off_b = d_prof_offsets[b], end_b = d_prof_offsets[b + 1];
+        /* Pairs where both profiles have >= heavy_min leaves are left to the tiled kernel. */
+        if (end_a - off_a >= heavy_min && end_b - off_b >= heavy_min) return;
         float d_val = 0.0f;
         for (int32_t p = off_a; p < end_a; ++p) {
             int32_t la = d_prof_leaves[p];
@@ -244,6 +248,145 @@ __global__ void k_build_real_seq_condensed_D(
             }
             d_val += wa * row_sum;
         }
+        d_D_cond[(size_t)a * K + b] = d_val;
+        d_D_cond[(size_t)b * K + a] = d_val;
+    }
+}
+
+/* Same float formula as dev_jc69_dist_popc, from precomputed popcounts. */
+__device__ __forceinline__ float dev_jc69_from_counts(int32_t n_valid, int32_t n_match) {
+    if (n_valid <= 0) return 1.5f;
+    float p = (float)(n_valid - n_match) / (float)n_valid;
+    if (p >= 0.74f) p = 0.74f;
+    float d = -0.75f * logf(1.0f - (4.0f / 3.0f) * p);
+    return (d > 0.0f) ? d : 0.0f;
+}
+
+constexpr int32_t HB_T = 64;        /* leaf tile edge */
+constexpr int32_t HB_CW = 5;        /* words per staged chunk (25 words = 5 chunks) */
+constexpr int32_t HB_HEAVY_MIN = 8; /* both profiles at least this large -> tiled kernel */
+
+/* Tiled k_build_real_seq_condensed_D for heavy pairs (one block per pair a < b).
+ * Leaf sequences are staged in shared memory in word chunks and each thread keeps a
+ * 4x4 tile of exact popcounts. Distances use the same float formula, and the weighted
+ * sums run in the same order as k_build_real_seq_condensed_D (row sums over q, then
+ * over p), so D_cond is bit-identical for any W > 0. */
+__global__ __launch_bounds__(256) void k_build_condensed_D_heavy_tiled(
+    int32_t K, int32_t W, int32_t n_pairs,
+    const int32_t * __restrict__ d_pair_a,
+    const int32_t * __restrict__ d_pair_b,
+    const int32_t * __restrict__ d_prof_offsets,
+    const int32_t * __restrict__ d_prof_leaves,
+    const float   * __restrict__ d_prof_weights,
+    const uint64_t * __restrict__ d_packed_seqs,
+    float * __restrict__ d_D_cond
+) {
+    __shared__ uint64_t sA[5 * HB_CW * HB_T];   /* [channel][word][row] */
+    __shared__ uint64_t sB[5 * HB_CW * HB_T];
+    __shared__ float    s_dist[HB_T][HB_T + 1];
+    __shared__ float    s_row_sum[HB_T];
+    __shared__ int32_t  s_leaf_a[HB_T], s_leaf_b[HB_T];
+    __shared__ float    s_wa[HB_T], s_wb[HB_T];
+
+    const int32_t pid = blockIdx.x;
+    if (pid >= n_pairs) return;
+    const int32_t a = d_pair_a[pid], b = d_pair_b[pid];
+    const int32_t off_a = d_prof_offsets[a], len_a = d_prof_offsets[a + 1] - off_a;
+    const int32_t off_b = d_prof_offsets[b], len_b = d_prof_offsets[b + 1] - off_b;
+    const int32_t tid = (int32_t)threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    float d_val = 0.0f;
+
+    for (int32_t pa0 = 0; pa0 < len_a; pa0 += HB_T) {
+        const int32_t na = min(HB_T, len_a - pa0);
+        __syncthreads();
+        if (tid < HB_T) {
+            s_row_sum[tid] = 0.0f;
+            if (tid < na) {
+                s_leaf_a[tid] = d_prof_leaves[off_a + pa0 + tid];
+                s_wa[tid]     = d_prof_weights[off_a + pa0 + tid];
+            }
+        }
+        for (int32_t qb0 = 0; qb0 < len_b; qb0 += HB_T) {
+            const int32_t nb = min(HB_T, len_b - qb0);
+            __syncthreads();
+            if (tid < nb) {
+                s_leaf_b[tid] = d_prof_leaves[off_b + qb0 + tid];
+                s_wb[tid]     = d_prof_weights[off_b + qb0 + tid];
+            }
+            __syncthreads();
+
+            int32_t nv[4][4], nm[4][4];
+            #pragma unroll
+            for (int32_t i = 0; i < 4; ++i)
+                #pragma unroll
+                for (int32_t j = 0; j < 4; ++j) { nv[i][j] = 0; nm[i][j] = 0; }
+
+            for (int32_t w0 = 0; w0 < W; w0 += HB_CW) {
+                /* Stage words w0..w0+HB_CW-1 of all 5 channels; consecutive threads read
+                 * consecutive words of one sequence. */
+                for (int32_t e = tid; e < 5 * HB_CW * HB_T; e += 256) {
+                    const int32_t cw = e % HB_CW, ch = (e / HB_CW) % 5, r = e / (5 * HB_CW);
+                    const int32_t s_idx = (ch * HB_CW + cw) * HB_T + r;
+                    const int32_t w = w0 + cw;
+                    const size_t g_off = (size_t)ch * W + w;
+                    sA[s_idx] = (r < na && w < W) ? d_packed_seqs[(size_t)s_leaf_a[r] * 5 * W + g_off] : 0ull;
+                    sB[s_idx] = (r < nb && w < W) ? d_packed_seqs[(size_t)s_leaf_b[r] * 5 * W + g_off] : 0ull;
+                }
+                __syncthreads();
+                #pragma unroll
+                for (int32_t cw = 0; cw < HB_CW; ++cw) {
+                    uint64_t ra[4], rb[4], m[4][4];
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i) ra[i] = sA[(4 * HB_CW + cw) * HB_T + ty + 16 * i];
+                    #pragma unroll
+                    for (int32_t j = 0; j < 4; ++j) rb[j] = sB[(4 * HB_CW + cw) * HB_T + tx + 16 * j];
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i)
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) nv[i][j] += __popcll(ra[i] & rb[j]);
+                    #pragma unroll
+                    for (int32_t c = 0; c < 4; ++c) {
+                        #pragma unroll
+                        for (int32_t i = 0; i < 4; ++i) ra[i] = sA[(c * HB_CW + cw) * HB_T + ty + 16 * i];
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) rb[j] = sB[(c * HB_CW + cw) * HB_T + tx + 16 * j];
+                        #pragma unroll
+                        for (int32_t i = 0; i < 4; ++i)
+                            #pragma unroll
+                            for (int32_t j = 0; j < 4; ++j)
+                                m[i][j] = (c == 0) ? (ra[i] & rb[j]) : (m[i][j] | (ra[i] & rb[j]));
+                    }
+                    #pragma unroll
+                    for (int32_t i = 0; i < 4; ++i)
+                        #pragma unroll
+                        for (int32_t j = 0; j < 4; ++j) nm[i][j] += __popcll(m[i][j]);
+                }
+                __syncthreads();
+            }
+
+            #pragma unroll
+            for (int32_t i = 0; i < 4; ++i) {
+                #pragma unroll
+                for (int32_t j = 0; j < 4; ++j) {
+                    const int32_t p = ty + 16 * i, q = tx + 16 * j;
+                    if (p < na && q < nb) {
+                        s_dist[p][q] = (s_leaf_a[p] == s_leaf_b[q]) ? 0.0f : dev_jc69_from_counts(nv[i][j], nm[i][j]);
+                    }
+                }
+            }
+            __syncthreads();
+            if (tid < na) {
+                float row_sum = s_row_sum[tid];
+                for (int32_t q = 0; q < nb; ++q) row_sum += s_wb[q] * s_dist[tid][q];
+                s_row_sum[tid] = row_sum;
+            }
+        }
+        __syncthreads();
+        if (tid == 0) {
+            for (int32_t p = 0; p < na; ++p) d_val += s_wa[p] * s_row_sum[p];
+        }
+    }
+    if (tid == 0) {
         d_D_cond[(size_t)a * K + b] = d_val;
         d_D_cond[(size_t)b * K + a] = d_val;
     }
@@ -271,8 +414,11 @@ __global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
     if (pid >= n_pairs) return;
 
     constexpr int32_t BM = 64, BN = 64, TY = 16, TX = 16, RJ = 4;
-    constexpr int32_t SW = 25, NSL = 5, PA = BM + 1, PB = BN + 1;
+    constexpr int32_t SW = 25, PA = BM + 1, PB = BN + 1;
     constexpr int32_t MAX_CAP_A = 128;
+    const int32_t nsl = W / 5;
+    const int32_t stride_x = 5 * W;
+    const int32_t c_step = W - 5;
 
     __shared__ uint64_t sA[SW * PA];
     __shared__ uint64_t sB[SW * PB];
@@ -293,7 +439,7 @@ __global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
     __shared__ double   s_row_sum[BM];
     __shared__ int32_t  s_meta[6];
 
-    if (W != 25) {
+    if (W <= 0 || (W % 5) != 0) {
         int32_t a = d_pair_a[pid];
         int32_t b = d_pair_b[pid];
         int32_t off_a = d_exact_offsets[a], end_a = d_exact_offsets[a + 1];
@@ -491,21 +637,21 @@ __global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
             uint32_t nv[1][RJ], nm[1][RJ]; \
             _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { nv[0][j] = 0u; nm[0][j] = 0u; } \
             _Pragma("unroll 1") \
-            for (int32_t s = 0; s < NSL; ++s) { \
+            for (int32_t s = 0; s < nsl; ++s) { \
                 __syncthreads(); \
                 _Pragma("unroll 1") for (int32_t idx = tid; idx < 16 * SW; idx += 256) { \
                     int32_t r = idx / SW; \
                     int32_t k = idx - r * SW; \
                     int32_t c = k / 5; \
                     int32_t la = s_leaf_a[r]; \
-                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * stride_x + s * 5 + c * c_step + k]) : 0ULL; \
                 } \
                 _Pragma("unroll 1") for (int32_t idx = tid; idx < BN * SW; idx += 256) { \
                     int32_t r = idx / SW; \
                     int32_t k = idx - r * SW; \
                     int32_t c = k / 5; \
                     int32_t lb = s_leaf_b[r]; \
-                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * stride_x + s * 5 + c * c_step + k]) : 0ULL; \
                 } \
                 __syncthreads(); \
                 NK_WL_STEP(1, PA, 0, 0) \
@@ -557,21 +703,21 @@ __global__ __launch_bounds__(256, 2) void k_refine_real_seq_condensed_D_pairs(
             _Pragma("unroll") for (int32_t i = 0; i < (RI); ++i) \
                 _Pragma("unroll") for (int32_t j = 0; j < RJ; ++j) { nv[i][j] = 0u; nm[i][j] = 0u; } \
             _Pragma("unroll 1") \
-            for (int32_t s = 0; s < NSL; ++s) { \
+            for (int32_t s = 0; s < nsl; ++s) { \
                 __syncthreads(); \
                 _Pragma("unroll 1") for (int32_t idx = tid; idx < (RI) * 16 * SW; idx += 256) { \
                     int32_t r = idx / SW; \
                     int32_t k = idx - r * SW; \
                     int32_t c = k / 5; \
                     int32_t la = s_leaf_a[r]; \
-                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                    sA[k * PA + r] = (la >= 0) ? __ldg(&d_packed_seqs[(size_t)la * stride_x + s * 5 + c * c_step + k]) : 0ULL; \
                 } \
                 _Pragma("unroll 1") for (int32_t idx = tid; idx < BN * SW; idx += 256) { \
                     int32_t r = idx / SW; \
                     int32_t k = idx - r * SW; \
                     int32_t c = k / 5; \
                     int32_t lb = s_leaf_b[r]; \
-                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * 125 + s * 5 + c * 20 + k]) : 0ULL; \
+                    sB[k * PB + r] = (lb >= 0) ? __ldg(&d_packed_seqs[(size_t)lb * stride_x + s * 5 + c * c_step + k]) : 0ULL; \
                 } \
                 __syncthreads(); \
                 NK_WL_STEP(RI, PA, 0, 0) \
@@ -1740,15 +1886,23 @@ struct RnaSimGpuWorkspace {
     double  *d_curr_L;
     float   *d_refine_D_scratch;
     bool     refine_split_ready;
+    /* Heavy-pair list for k_build_condensed_D_heavy_tiled (grown on demand). */
+    int32_t *d_heavy_a;
+    int32_t *d_heavy_b;
+    size_t   heavy_cap;
+    std::vector<int32_t> h_heavy_a, h_heavy_b;
 
     void init(int32_t gpu_id, int32_t K_cap) {
         dev_id = gpu_id;
         max_K = K_cap;
         d_refine_D_scratch = NULL;
         refine_split_ready = false;
+        d_heavy_a = NULL;
+        d_heavy_b = NULL;
+        heavy_cap = 0;
         int32_t R = 2 * K_cap - 1;
         int32_t M = 2 * K_cap - 2;
-        size_t prof_cap = std::max((size_t)128 * (size_t)K_cap, (size_t)2048);
+        size_t prof_cap = std::max((size_t)256 * (size_t)K_cap, (size_t)4096);
         exact_prof_cap = std::max(prof_cap, (size_t)16384);
         pair_cap = (size_t)K_cap * (size_t)K_cap / 2 + 16;
         CUDA_CHECK(cudaSetDevice(dev_id));
@@ -1828,6 +1982,9 @@ struct RnaSimGpuWorkspace {
         cudaFree(d_refine_D_scratch);
         d_refine_D_scratch = NULL;
         refine_split_ready = false;
+        cudaFree(d_heavy_a); cudaFree(d_heavy_b);
+        d_heavy_a = d_heavy_b = NULL;
+        heavy_cap = 0;
     }
 };
 
@@ -1987,18 +2144,55 @@ static double optimize_skeleton_on_gpu(
     CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_prof_weights, prof_weights, (size_t)total_prof * sizeof(float),   cudaMemcpyHostToDevice, gpu_ws.stream));
     dim3 blk2d(16, 16);
     dim3 grd2d((K + 15) / 16, (K + 15) / 16);
+    /* Pairs whose profiles both have >= HB_HEAVY_MIN leaves go to the tiled kernel; the
+     * rest (singletons, singleton x outgroup) stay on the per-thread kernel. */
+    const int32_t heavy_min = (W > 0) ? HB_HEAVY_MIN : INT32_MAX;
+    gpu_ws.h_heavy_a.clear();
+    gpu_ws.h_heavy_b.clear();
+    if (heavy_min != INT32_MAX) {
+        std::vector<int32_t> heavy_nodes;
+        for (int32_t a = 0; a < K; ++a) {
+            if (prof_offsets[a + 1] - prof_offsets[a] >= heavy_min) heavy_nodes.push_back(a);
+        }
+        for (size_t ia = 0; ia < heavy_nodes.size(); ++ia) {
+            for (size_t ib = ia + 1; ib < heavy_nodes.size(); ++ib) {
+                gpu_ws.h_heavy_a.push_back(heavy_nodes[ia]);
+                gpu_ws.h_heavy_b.push_back(heavy_nodes[ib]);
+            }
+        }
+    }
+    const int32_t n_heavy = (int32_t)gpu_ws.h_heavy_a.size();
+    if ((size_t)n_heavy > gpu_ws.heavy_cap) {
+        cudaFree(gpu_ws.d_heavy_a);
+        cudaFree(gpu_ws.d_heavy_b);
+        gpu_ws.heavy_cap = (size_t)n_heavy;
+        CUDA_CHECK(cudaMalloc(&gpu_ws.d_heavy_a, gpu_ws.heavy_cap * sizeof(int32_t)));
+        CUDA_CHECK(cudaMalloc(&gpu_ws.d_heavy_b, gpu_ws.heavy_cap * sizeof(int32_t)));
+    }
     k_build_real_seq_condensed_D<<<grd2d, blk2d, 0, gpu_ws.stream>>>(
-        K, W, gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D
+        K, W, gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D,
+        heavy_min
     );
+    if (n_heavy > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_heavy_a, gpu_ws.h_heavy_a.data(), (size_t)n_heavy * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
+        CUDA_CHECK(cudaMemcpyAsync(gpu_ws.d_heavy_b, gpu_ws.h_heavy_b.data(), (size_t)n_heavy * sizeof(int32_t), cudaMemcpyHostToDevice, gpu_ws.stream));
+        k_build_condensed_D_heavy_tiled<<<n_heavy, 256, 0, gpu_ws.stream>>>(
+            K, W, n_heavy, gpu_ws.d_heavy_a, gpu_ws.d_heavy_b,
+            gpu_ws.d_prof_offsets, gpu_ws.d_prof_leaves, gpu_ws.d_prof_weights, d_packed_seqs, gpu_ws.d_D
+        );
+    }
 
     std::vector<int32_t> c1_cf, c2_cf, v_map_cf, m_lmin_cf, next_k_cf, parent_u_cf, sub_size_cf, tin_cf, adj_u_cf;
     std::vector<float> h_best_delta(K);
     std::vector<int32_t> h_best_j(K);
 
-    double init_L = 0.0, curr_L = 0.0, best_L = 1e300;
-    std::vector<int64_t> best_v_cf = v_cf;
-    std::vector<int32_t> best_perm = perm;
+    double init_L = 0.0, curr_L = 0.0, best_L = 1e300, prev_L = 1e300;
+    std::vector<int64_t> best_v_cf = v_cf, prev_v_cf = v_cf;
+    std::vector<int32_t> best_perm = perm, prev_perm = perm;
     int32_t flipped_already = 0;
+    bool allow_fast_local = true;
+    bool last_was_fast_local = false;
+    int32_t cur_batch_cap = max_batch_cap;
 
     for (int32_t iter = 0; iter <= max_iters; ++iter) {
         int32_t other_rc, rc0, rc1, rc2;
@@ -2035,7 +2229,24 @@ static double optimize_skeleton_on_gpu(
         if (iter == 0) {
             init_L = curr_L;
             best_L = curr_L;
+            prev_L = curr_L;
+        } else if (last_was_fast_local && curr_L >= prev_L - 1e-8) {
+            // Fast local batch overshot: revert to prev state, halve batch cap, and run one strict path-disjoint step
+            v_cf = prev_v_cf;
+            perm = prev_perm;
+            cur_batch_cap = std::max(16, cur_batch_cap / 2);
+            allow_fast_local = false;
+            last_was_fast_local = false;
+            continue;
+        } else if (last_was_fast_local) {
+            cur_batch_cap = std::min(max_batch_cap, cur_batch_cap + 16);
+        } else {
+            // Re-enable fast_local after a strict step so an early overshoot never permanently locks out fast_local
+            allow_fast_local = true;
         }
+        prev_L = curr_L;
+        prev_v_cf = v_cf;
+        prev_perm = perm;
         if (curr_L < best_L) {
             best_L = curr_L;
             best_v_cf = v_cf;
@@ -2056,7 +2267,7 @@ static double optimize_skeleton_on_gpu(
         CUDA_CHECK(cudaStreamSynchronize(gpu_ws.stream));
 
         std::vector<MoveCand> cands;
-        float eps_move_thresh = -1e-4f;
+        float eps_move_thresh = -0.15f / (float)(W * 64);
         for (int32_t i = 1; i < K - 1; ++i) {
             if (h_best_delta[i] < eps_move_thresh && h_best_j[i] >= 0 && h_best_j[i] < root_u_sk) {
                 cands.push_back({i, h_best_j[i], h_best_delta[i]});
@@ -2073,53 +2284,85 @@ static double optimize_skeleton_on_gpu(
         flipped_already = 0;
         std::sort(cands.begin(), cands.end(), [](const MoveCand &a, const MoveCand &b) { return a.d < b.d; });
 
-        std::vector<uint8_t> node_busy(M_sk, 0);
+        std::vector<uint8_t> tin_busy(M_sk, 0);
         int32_t n_applied = 0;
-        std::vector<int32_t> path_nodes;
-        path_nodes.reserve(128);
+        std::vector<int32_t> mark_tins;
+        mark_tins.reserve(256);
+        bool fast_local_mode = allow_fast_local && (cands.size() >= 16);
+        last_was_fast_local = fast_local_mode;
+        float fast_cutoff = cands[0].d * 0.10f;
+        int32_t eff_batch_cap = fast_local_mode ? cur_batch_cap : max_batch_cap;
 
         for (const auto &mc : cands) {
+            if (fast_local_mode && mc.d > fast_cutoff && n_applied >= 8) break;
             int32_t i = mc.i, dst_u = mc.j;
             int32_t tr = v_map_cf[i + 1];
             int32_t pr = (tr == root_u_sk) ? other_rc : parent_u_cf[tr];
-            if (dst_u < 0 || dst_u >= root_u_sk) continue;
+            if (pr == root_u_sk || dst_u < 0 || dst_u >= root_u_sk) continue;
             int32_t dst_v = parent_u_cf[dst_u];
-            if (dst_v < 0) continue;
+            if (dst_v < 0 || dst_v == root_u_sk) continue;
 
-            if (tin_cf[tr] <= tin_cf[dst_u] && tin_cf[dst_u] < tin_cf[tr] + sub_size_cf[tr]) continue;
-            if (node_busy[tr] || node_busy[pr] || node_busy[dst_u] || node_busy[dst_v]) continue;
+            int32_t t0 = tin_cf[tr], t1 = t0 + sub_size_cf[tr];
+            if (t0 <= tin_cf[dst_u] && tin_cf[dst_u] < t1) continue;
+            if (t0 <= tin_cf[pr] && tin_cf[pr] < t1) continue;
 
-            path_nodes.clear();
-            path_nodes.push_back(tr);
-            path_nodes.push_back(dst_v);
-            int32_t u_anc = pr;
-            int32_t t_dst = tin_cf[dst_u];
-            int32_t hops = 0;
-            while (u_anc != -1 && !(tin_cf[u_anc] <= t_dst && t_dst < tin_cf[u_anc] + sub_size_cf[u_anc])) {
-                path_nodes.push_back(u_anc);
-                u_anc = parent_u_cf[u_anc];
-                if (++hops > 128) break;
-            }
-            if (u_anc == -1 || hops > 128) continue;
-            path_nodes.push_back(u_anc);
-            int32_t v_anc = dst_u;
-            while (v_anc != u_anc && v_anc != -1) {
-                path_nodes.push_back(v_anc);
-                v_anc = parent_u_cf[v_anc];
-                if (++hops > 128) break;
-            }
-            if (v_anc != u_anc || hops > 128) continue;
-
+            mark_tins.clear();
             bool conflict = false;
-            for (int32_t pn : path_nodes) {
-                if (node_busy[pn]) { conflict = true; break; }
+            if (fast_local_mode && sub_size_cf[tr] <= 63) {
+                for (int32_t t = t0; t < t1; ++t) {
+                    if (tin_busy[t]) { conflict = true; break; }
+                    mark_tins.push_back(t);
+                }
+                if (conflict) continue;
+                int32_t local_nodes[12];
+                int32_t nl = 0;
+                local_nodes[nl++] = pr;
+                local_nodes[nl++] = dst_u;
+                local_nodes[nl++] = dst_v;
+                for (int32_t k = 0; k < 3; ++k) {
+                    int32_t nb = adj_u_cf[3 * pr + k];
+                    if (nb >= 0 && nb != tr) local_nodes[nl++] = nb;
+                    int32_t nbu = adj_u_cf[3 * dst_u + k];
+                    if (nbu >= 0) local_nodes[nl++] = nbu;
+                    int32_t nbv = adj_u_cf[3 * dst_v + k];
+                    if (nbv >= 0) local_nodes[nl++] = nbv;
+                }
+                for (int32_t q = 0; q < nl; ++q) {
+                    int32_t tq = tin_cf[local_nodes[q]];
+                    if (tin_busy[tq]) { conflict = true; break; }
+                    mark_tins.push_back(tq);
+                }
+                if (conflict) continue;
+            } else {
+                mark_tins.push_back(tin_cf[tr]);
+                mark_tins.push_back(tin_cf[dst_v]);
+                int32_t u_anc = pr;
+                int32_t t_dst = tin_cf[dst_u];
+                int32_t hops = 0;
+                while (u_anc != -1 && !(tin_cf[u_anc] <= t_dst && t_dst < tin_cf[u_anc] + sub_size_cf[u_anc])) {
+                    mark_tins.push_back(tin_cf[u_anc]);
+                    u_anc = parent_u_cf[u_anc];
+                    if (++hops > M_sk) break;
+                }
+                if (u_anc == -1 || hops > M_sk) continue;
+                mark_tins.push_back(tin_cf[u_anc]);
+                int32_t v_anc = dst_u;
+                while (v_anc != u_anc && v_anc != -1) {
+                    mark_tins.push_back(tin_cf[v_anc]);
+                    v_anc = parent_u_cf[v_anc];
+                    if (++hops > M_sk) break;
+                }
+                if (v_anc != u_anc || hops > M_sk) continue;
+                for (int32_t tq : mark_tins) {
+                    if (tin_busy[tq]) { conflict = true; break; }
+                }
+                if (conflict) continue;
             }
-            if (conflict) continue;
 
-            for (int32_t pn : path_nodes) node_busy[pn] = 1;
+            for (int32_t tq : mark_tins) tin_busy[tq] = 1;
             apply_unrooted_spr_host(adj_u_cf.data(), tr, pr, dst_u, dst_v);
             n_applied++;
-            if (n_applied >= max_batch_cap) break;
+            if (n_applied >= eff_batch_cap) break;
         }
         if (n_applied == 0) {
             int32_t i = cands[0].i, dst_u = cands[0].j;
@@ -2133,7 +2376,7 @@ static double optimize_skeleton_on_gpu(
         relabel_from_adj_u(adj_u_cf.data(), K, root_u_sk, r_nb, iter & 1, v_cf, perm);
     }
 
-    if (best_L >= init_L - 1e-6) {
+    if (best_L >= init_L - 1e-7) {
         v_cf = init_v_cf;
         perm = init_perm;
         return 0.0;
@@ -2352,7 +2595,7 @@ static double optimize_skeleton_on_gpu(
                 exact_delta_L += w_diff * (double)h_D_cond[(size_t)a * K + b];
             }
 
-            if (exact_delta_L >= -1e-6) {
+            if (exact_delta_L >= -1e-7) {
                 v_cf = init_v_cf;
                 perm = init_perm;
                 return 0.0;
@@ -2430,7 +2673,7 @@ static double run_subtree_minibatch_window(
                 max_prof_leaves, prof_leaves, prof_weights
             );
             if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
-                need_exact_prof = true;
+                need_exact_prof = false;
             }
         }
         prof_offsets[K] = (int32_t)prof_leaves.size();
@@ -2438,9 +2681,10 @@ static double run_subtree_minibatch_window(
         std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
         std::vector<float> exact_prof_weights;
         if (need_exact_prof) {
+            const int32_t exact_cap = (N >= 1000000) ? 2048 : -1;
             exact_prof_offsets.resize(K + 1, 0);
-            exact_prof_leaves.reserve((size_t)N);
-            exact_prof_weights.reserve((size_t)N);
+            exact_prof_leaves.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
+            exact_prof_weights.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
             for (int32_t a = 0; a < K; ++a) {
                 exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
                 if (leaf_cnt[super_roots[a]] <= max_prof_leaves) {
@@ -2449,7 +2693,7 @@ static double run_subtree_minibatch_window(
                 } else {
                     compute_clade_dyadic_profile(
                         super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
-                        -1, exact_prof_leaves, exact_prof_weights
+                        exact_cap, exact_prof_leaves, exact_prof_weights
                     );
                 }
             }
@@ -2461,7 +2705,7 @@ static double run_subtree_minibatch_window(
         relabel_from_rooted_tree(sk_c1.data(), sk_c2.data(), K, 0, v_mb.data(), perm_mb.data());
 
         double dL = optimize_skeleton_on_gpu(
-            K, W, max_iters, 32,
+            K, W, 200, 128,
             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
             d_packed_seqs, gpu_ws, v_mb, perm_mb,
             need_exact_prof ? exact_prof_offsets.data() : NULL,
@@ -2470,16 +2714,71 @@ static double run_subtree_minibatch_window(
         );
         if (dL == 0.0) return 0.0;
 
-        int32_t R_k = 2 * K - 1;
-        std::vector<int32_t> new_sk_c1(R_k), new_sk_c2(R_k), scratch_uf(R_k);
-        decode_cf_to_rooted(v_mb.data(), K, new_sk_c1.data(), new_sk_c2.data(), scratch_uf.data());
-        std::vector<int32_t> sk_to_full(R_k);
+        // Re-root the optimized K-taxon skeleton on its exact centroid edge (closest to N/2 leaves)
+        std::vector<int32_t> c1_cf, c2_cf, v_map_cf, m_lmin_cf, next_k_cf, parent_u_cf, sub_sz_cf, tin_cf, adj_u_cf;
+        int32_t other_rc, rc0, rc1, rc2;
+        build_skeleton_metadata(
+            v_mb.data(), K, c1_cf, c2_cf, v_map_cf, m_lmin_cf, next_k_cf,
+            parent_u_cf, sub_sz_cf, tin_cf, adj_u_cf,
+            &other_rc, &rc0, &rc1, &rc2
+        );
+        const int32_t root_u_sk = 2 * K - 3;
+        std::vector<int32_t> w_sub(2 * K - 2, 0);
+        for (int32_t a = 0; a < K; ++a) w_sub[a] = leaf_cnt[super_roots[perm_mb[a]]];
+        for (int32_t u = K; u < root_u_sk; ++u) w_sub[u] = w_sub[c1_cf[u]] + w_sub[c2_cf[u]];
+        int32_t u_best = 0;
+        int32_t best_diff = std::abs(2 * w_sub[0] - N);
+        for (int32_t u = 1; u < root_u_sk; ++u) {
+            int32_t diff = std::abs(2 * w_sub[u] - N);
+            if (diff < best_diff) {
+                best_diff = diff;
+                u_best = u;
+            }
+        }
+        int32_t p_best = parent_u_cf[u_best];
+
+        std::vector<int32_t> st_u, st_p;
+        st_u.reserve(K - 2);
+        st_p.reserve(K - 2);
+        if (u_best >= K) { st_u.push_back(u_best); st_p.push_back(p_best); }
+        if (p_best >= K) { st_u.push_back(p_best); st_p.push_back(u_best); }
+        std::vector<int32_t> child0(2 * K - 2, -1), child1(2 * K - 2, -1);
+        for (size_t idx = 0; idx < st_u.size(); ++idx) {
+            int32_t u = st_u[idx];
+            int32_t p = st_p[idx];
+            int32_t b0 = -1, b1 = -1;
+            for (int32_t k = 0; k < 3; ++k) {
+                int32_t nb = adj_u_cf[3 * u + k];
+                if (nb != -1 && nb != p) {
+                    if (b0 == -1) b0 = nb;
+                    else b1 = nb;
+                }
+            }
+            child0[u] = b0;
+            child1[u] = b1;
+            if (b0 >= K) { st_u.push_back(b0); st_p.push_back(u); }
+            if (b1 >= K) { st_u.push_back(b1); st_p.push_back(u); }
+        }
+
+        std::vector<int32_t> sk_to_full(2 * K - 2, -1);
         for (int32_t a = 0; a < K; ++a) sk_to_full[a] = super_roots[perm_mb[a]];
-        for (int32_t s = 0; s < K - 1; ++s) sk_to_full[K + s] = split_internals[s];
-        for (int32_t s = 0; s < K - 1; ++s) {
-            int32_t full_u = sk_to_full[K + s];
-            int32_t b0 = sk_to_full[new_sk_c1[K + s]];
-            int32_t b1 = sk_to_full[new_sk_c2[K + s]];
+        for (int32_t s = 0; s < K - 2; ++s) {
+            int32_t u_sk = st_u[K - 3 - s];
+            sk_to_full[u_sk] = split_internals[s];
+        }
+        for (int32_t s = 0; s < K - 2; ++s) {
+            int32_t u_sk = st_u[K - 3 - s];
+            int32_t full_u = sk_to_full[u_sk];
+            int32_t b0 = sk_to_full[child0[u_sk]];
+            int32_t b1 = sk_to_full[child1[u_sk]];
+            curr_c1[full_u] = b0;
+            curr_c2[full_u] = b1;
+            update_one_node_summary(full_u, b0, b1, parent_r.data(), leaf_cnt.data(), node_rep0.data());
+        }
+        {
+            int32_t full_u = split_internals[K - 2]; // == root_r
+            int32_t b0 = sk_to_full[u_best];
+            int32_t b1 = sk_to_full[p_best];
             curr_c1[full_u] = b0;
             curr_c2[full_u] = b1;
             update_one_node_summary(full_u, b0, b1, parent_r.data(), leaf_cnt.data(), node_rep0.data());
@@ -2501,6 +2800,11 @@ static double run_subtree_minibatch_window(
         sk_c1[2 * K - 2] = K + (K_in - 2);
         sk_c2[2 * K - 2] = K_in;
 
+        const int32_t *oc1 = (outgroup_c1 != NULL) ? outgroup_c1 : curr_c1.data();
+        const int32_t *oc2 = (outgroup_c2 != NULL) ? outgroup_c2 : curr_c2.data();
+        const int32_t *opar = (outgroup_par != NULL) ? outgroup_par : parent_r.data();
+        const int32_t *orep = (outgroup_rep0 != NULL) ? outgroup_rep0 : node_rep0.data();
+
         std::vector<int32_t> prof_offsets(K + 1, 0), prof_leaves;
         std::vector<float> prof_weights;
         prof_leaves.reserve(4 * K);
@@ -2509,11 +2813,11 @@ static double run_subtree_minibatch_window(
         for (int32_t a = 0; a < K_in; ++a) {
             prof_offsets[a] = (int32_t)prof_leaves.size();
             compute_clade_dyadic_profile(
-                super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
+                super_roots[a], N, oc1, oc2, orep,
                 max_prof_leaves, prof_leaves, prof_weights
             );
             if (max_prof_leaves > 0 && leaf_cnt[super_roots[a]] > max_prof_leaves) {
-                need_exact_prof = true;
+                need_exact_prof = false;
             }
         }
         prof_offsets[K_in] = (int32_t)prof_leaves.size();
@@ -2523,20 +2827,16 @@ static double run_subtree_minibatch_window(
 
         int32_t outgroup_true_leaves = N - leaf_cnt[sub_root];
         if (max_prof_leaves > 0 && outgroup_true_leaves > (int32_t)outgroup_leaves.size()) {
-            need_exact_prof = true;
+            need_exact_prof = false;
         }
 
         std::vector<int32_t> exact_prof_offsets, exact_prof_leaves;
         std::vector<float> exact_prof_weights;
         if (need_exact_prof) {
-            const int32_t *oc1 = (outgroup_c1 != NULL) ? outgroup_c1 : curr_c1.data();
-            const int32_t *oc2 = (outgroup_c2 != NULL) ? outgroup_c2 : curr_c2.data();
-            const int32_t *opar = (outgroup_par != NULL) ? outgroup_par : parent_r.data();
-            const int32_t *orep = (outgroup_rep0 != NULL) ? outgroup_rep0 : node_rep0.data();
-
+            const int32_t exact_cap = (N >= 1000000) ? 2048 : -1;
             exact_prof_offsets.resize(K + 1, 0);
-            exact_prof_leaves.reserve((size_t)N);
-            exact_prof_weights.reserve((size_t)N);
+            exact_prof_leaves.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
+            exact_prof_weights.reserve((N >= 1000000) ? (size_t)(K * 256) : (size_t)N);
             for (int32_t a = 0; a < K_in; ++a) {
                 exact_prof_offsets[a] = (int32_t)exact_prof_leaves.size();
                 if (max_prof_leaves <= 0 || leaf_cnt[super_roots[a]] <= max_prof_leaves) {
@@ -2544,8 +2844,8 @@ static double run_subtree_minibatch_window(
                     exact_prof_weights.insert(exact_prof_weights.end(), prof_weights.begin() + prof_offsets[a], prof_weights.begin() + prof_offsets[a + 1]);
                 } else {
                     compute_clade_dyadic_profile(
-                        super_roots[a], N, curr_c1.data(), curr_c2.data(), node_rep0.data(),
-                        -1, exact_prof_leaves, exact_prof_weights
+                        super_roots[a], N, oc1, oc2, orep,
+                        exact_cap, exact_prof_leaves, exact_prof_weights
                     );
                 }
             }
@@ -2556,7 +2856,7 @@ static double run_subtree_minibatch_window(
             } else {
                 compute_outgroup_dyadic_profile(
                     sub_root, root_r, N, oc1, oc2, opar, orep,
-                    -1, exact_prof_leaves, exact_prof_weights
+                    exact_cap, exact_prof_leaves, exact_prof_weights
                 );
             }
             exact_prof_offsets[K] = (int32_t)exact_prof_leaves.size();
@@ -2567,7 +2867,7 @@ static double run_subtree_minibatch_window(
         relabel_from_rooted_tree(sk_c1.data(), sk_c2.data(), K, 0, v_mb.data(), perm_mb.data());
 
         double dL = optimize_skeleton_on_gpu(
-            K, W, max_iters, 32,
+            K, W, 200, 128,
             prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
             d_packed_seqs, gpu_ws, v_mb, perm_mb,
             need_exact_prof ? exact_prof_offsets.data() : NULL,
@@ -2627,9 +2927,16 @@ static double run_subtree_minibatch_window(
             int32_t b1 = sk_to_full[child1[u_sk]];
             curr_c1[full_u] = b0;
             curr_c2[full_u] = b1;
-            update_one_node_summary(full_u, b0, b1, parent_r.data(), leaf_cnt.data(), node_rep0.data());
+            if (outgroup_c1 == NULL) {
+                update_one_node_summary(full_u, b0, b1, parent_r.data(), leaf_cnt.data(), node_rep0.data());
+            } else {
+                leaf_cnt[full_u] = leaf_cnt[b0] + leaf_cnt[b1];
+                node_rep0[full_u] = (leaf_cnt[b0] <= leaf_cnt[b1]) ? node_rep0[b0] : node_rep0[b1];
+            }
         }
-        parent_r[sub_root] = parent_of_sub_root;
+        if (outgroup_c1 == NULL) {
+            parent_r[sub_root] = parent_of_sub_root;
+        }
         return dL;
     }
 }
@@ -2652,14 +2959,16 @@ static double run_multi_gpu_minibatch_bme(
     std::vector<int32_t> empty_out_leaves;
     std::vector<float> empty_out_weights;
 
+    int n_outer_rounds = (N <= 1000) ? 2 : ((N >= 1000000) ? 4 : 3);
+    int total_passes = (N > 1050) ? (n_outer_rounds + 1) : n_outer_rounds;
+    for (int outer_round = 0; outer_round < total_passes; ++outer_round) {
+    const bool is_final_leaf_cleanup = (outer_round == n_outer_rounds);
     /* Pass 1: Global Backbone (priority-queue bounded to max_internals = 1200 so K <= 1201 <= 2048) */
-    if (N >= 5000) {
-        int32_t bb_thresh = N / 700;
-        if (bb_thresh < 8) bb_thresh = 8;
+    if (outer_round > 0 && !is_final_leaf_cleanup && N >= 5000) {
         total_mb_delta_L += run_subtree_minibatch_window(
-            root_r, N, W, bb_thresh, 25, node_has_active, empty_out_leaves, empty_out_weights,
+            root_r, N, W, 1, 25, node_has_active, empty_out_leaves, empty_out_weights,
             d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
-            1200, NULL
+            1500, NULL
         );
         compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
     }
@@ -2669,69 +2978,208 @@ static double run_multi_gpu_minibatch_bme(
     std::vector<std::vector<int32_t>> level_waves;
     build_component_waves(N, ord, curr_c1, curr_c2, 1050, 1050, is_comp_root, level_waves);
 
-    int32_t leaves_in_lvl0 = 0;
-    if (!level_waves.empty()) {
-        for (int32_t sr : level_waves[0]) leaves_in_lvl0 += leaf_cnt[sr];
-    }
-
-    (void)n_gpus;
     for (size_t lvl = 0; lvl < level_waves.size(); ++lvl) {
         const std::vector<int32_t> &wave = level_waves[lvl];
-        std::vector<int32_t> out_leaves;
-        std::vector<float> out_weights;
-        for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
-            int32_t sr = wave[idx];
-            out_leaves.clear();
-            out_weights.clear();
-            if (sr != root_r) {
-                compute_outgroup_dyadic_profile(
-                    sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
-                    max_prof_leaves, out_leaves, out_weights
+        if (n_gpus > 1 && wave.size() > 1) {
+            std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+            double wave_dL = 0.0;
+            #pragma omp parallel for num_threads(n_gpus) schedule(dynamic, 1) reduction(+:wave_dL)
+            for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                int g = omp_get_thread_num();
+                int32_t sr = wave[idx];
+                std::vector<int32_t> out_leaves;
+                std::vector<float> out_weights;
+                if (sr != root_r) {
+                    compute_outgroup_dyadic_profile(
+                        sr, root_r, N, snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data(),
+                        max_prof_leaves, out_leaves, out_weights
+                    );
+                }
+                wave_dL += run_subtree_minibatch_window(
+                    sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
+                    d_packed_seqs[g], mb_ws[g], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                    1200, is_comp_root.data(),
+                    snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
                 );
             }
-            double dL = run_subtree_minibatch_window(
-                sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
-                d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
-                1200, is_comp_root.data()
-            );
-            if (dL != 0.0) {
-                total_mb_delta_L += dL;
-                for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
-                    update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
-                }
-                parent_r[root_r] = -1;
-            }
-        }
-        if (lvl + 1 < level_waves.size()) {
+            total_mb_delta_L += wave_dL;
             compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+        } else {
+            std::vector<int32_t> out_leaves;
+            std::vector<float> out_weights;
+            for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                int32_t sr = wave[idx];
+                out_leaves.clear();
+                out_weights.clear();
+                if (sr != root_r) {
+                    compute_outgroup_dyadic_profile(
+                        sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
+                        max_prof_leaves, out_leaves, out_weights
+                    );
+                }
+                double dL = run_subtree_minibatch_window(
+                    sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
+                    d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                    1200, is_comp_root.data()
+                );
+                if (dL != 0.0) {
+                    total_mb_delta_L += dL;
+                    for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
+                        update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
+                    }
+                    parent_r[root_r] = -1;
+                }
+            }
+            if (lvl + 1 < level_waves.size()) {
+                compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+            }
         }
     }
 
-    /* Pass 2B: Staggered Boundary-Crossing Component Waves (when spine-heavy) + Bounded Medium Cross-Clade Skeletons */
+    /* Pass 2B: Staggered Boundary-Crossing Component Waves + Full Multi-Scale V-Cycle */
     if (N > 1000) {
-        if (leaves_in_lvl0 < (9 * N) / 10) {
+        {
             compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
             std::vector<uint8_t> is_comp_root_stag;
             std::vector<std::vector<int32_t>> stag_waves;
             build_component_waves(N, ord, curr_c1, curr_c2, 525, 1050, is_comp_root_stag, stag_waves);
             for (int32_t lvl = (int32_t)stag_waves.size() - 1; lvl >= 0; --lvl) {
                 const std::vector<int32_t> &wave = stag_waves[lvl];
-                std::vector<int32_t> out_leaves;
-                std::vector<float> out_weights;
-                for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
-                    int32_t sr = wave[idx];
-                    out_leaves.clear();
-                    out_weights.clear();
+                if (n_gpus > 1 && wave.size() > 1) {
+                    std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+                    double wave_dL = 0.0;
+                    #pragma omp parallel for num_threads(n_gpus) schedule(dynamic, 1) reduction(+:wave_dL)
+                    for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                        int g = omp_get_thread_num();
+                        int32_t sr = wave[idx];
+                        std::vector<int32_t> out_leaves;
+                        std::vector<float> out_weights;
+                        if (sr != root_r) {
+                            compute_outgroup_dyadic_profile(
+                                sr, root_r, N, snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data(),
+                                max_prof_leaves, out_leaves, out_weights
+                            );
+                        }
+                        wave_dL += run_subtree_minibatch_window(
+                            sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
+                            d_packed_seqs[g], mb_ws[g], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                            1200, is_comp_root_stag.data(),
+                            snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
+                        );
+                    }
+                    total_mb_delta_L += wave_dL;
+                    compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+                } else {
+                    std::vector<int32_t> out_leaves;
+                    std::vector<float> out_weights;
+                    for (int32_t idx = 0; idx < (int32_t)wave.size(); ++idx) {
+                        int32_t sr = wave[idx];
+                        out_leaves.clear();
+                        out_weights.clear();
+                        if (sr != root_r) {
+                            compute_outgroup_dyadic_profile(
+                                sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
+                                max_prof_leaves, out_leaves, out_weights
+                            );
+                        }
+                        double dL = run_subtree_minibatch_window(
+                            sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
+                            d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                            1200, is_comp_root_stag.data()
+                        );
+                        if (dL != 0.0) {
+                            total_mb_delta_L += dL;
+                            for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
+                                update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
+                            }
+                            parent_r[root_r] = -1;
+                        }
+                    }
+                    compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+                }
+            }
+            if (outer_round > 0 && !is_final_leaf_cleanup && N >= 5000) {
+                total_mb_delta_L += run_subtree_minibatch_window(
+                    root_r, N, W, 1, 25, node_has_active, empty_out_leaves, empty_out_weights,
+                    d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                    1500, NULL
+                );
+                compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+            }
+        }
+        if (is_final_leaf_cleanup) {
+            compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+            break;
+        }
+
+        // Multi-scale V-cycle: Full Bottom-Up elevator (in every round) + Global Backbone + Top-Down cascade
+        std::vector<int32_t> scale_caps;
+        if (N > 4000) {
+            for (int32_t sc = 4096; sc < N; sc *= 4) scale_caps.push_back(sc);
+            scale_caps.push_back(N); // Global root_r after bottom-up tournament!
+        } else if (N >= 2000) {
+            scale_caps.push_back(N);
+        }
+        for (int32_t sc = N / 4; sc > 3200; sc /= 4) scale_caps.push_back(sc);
+        if (N > 1050) scale_caps.push_back(3200);
+        for (int32_t sc_cap : scale_caps) {
+            compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+            std::vector<int32_t> mid_roots;
+            {
+                std::vector<int32_t> st = {root_r};
+                while (!st.empty()) {
+                    int32_t u = st.back(); st.pop_back();
+                    if (u < N) continue;
+                    if (leaf_cnt[u] <= sc_cap) {
+                        if (leaf_cnt[u] > 1050) mid_roots.push_back(u);
+                    } else {
+                        st.push_back(curr_c2[u]);
+                        st.push_back(curr_c1[u]);
+                    }
+                }
+            }
+            if (mid_roots.empty()) continue;
+            if (n_gpus > 1 && mid_roots.size() > 1) {
+                std::vector<int32_t> snap_c1 = curr_c1, snap_c2 = curr_c2, snap_par = parent_r, snap_rep0 = node_rep0;
+                double mid_dL = 0.0;
+                #pragma omp parallel for num_threads(n_gpus) schedule(dynamic, 1) reduction(+:mid_dL)
+                for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
+                    int g = omp_get_thread_num();
+                    int32_t sr = mid_roots[idx];
+                    std::vector<int32_t> out_leaves_p2b;
+                    std::vector<float> out_weights_p2b;
+                    if (sr != root_r) {
+                        compute_outgroup_dyadic_profile(
+                            sr, root_r, N, snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data(),
+                            max_prof_leaves, out_leaves_p2b, out_weights_p2b
+                        );
+                    }
+                    mid_dL += run_subtree_minibatch_window(
+                        sr, N, W, 1, 25, node_has_active, out_leaves_p2b, out_weights_p2b,
+                        d_packed_seqs[g], mb_ws[g], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
+                        1500, NULL,
+                        snap_c1.data(), snap_c2.data(), snap_par.data(), snap_rep0.data()
+                    );
+                }
+                total_mb_delta_L += mid_dL;
+                compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+            } else {
+                std::vector<int32_t> out_leaves_p2b;
+                std::vector<float> out_weights_p2b;
+                for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
+                    int32_t sr = mid_roots[idx];
+                    out_leaves_p2b.clear();
+                    out_weights_p2b.clear();
                     if (sr != root_r) {
                         compute_outgroup_dyadic_profile(
                             sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
-                            max_prof_leaves, out_leaves, out_weights
+                            max_prof_leaves, out_leaves_p2b, out_weights_p2b
                         );
                     }
                     double dL = run_subtree_minibatch_window(
-                        sr, N, W, 1, 25, node_has_active, out_leaves, out_weights,
+                        sr, N, W, 1, 25, node_has_active, out_leaves_p2b, out_weights_p2b,
                         d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
-                        1200, is_comp_root_stag.data()
+                        1500, NULL
                     );
                     if (dL != 0.0) {
                         total_mb_delta_L += dL;
@@ -2741,67 +3189,21 @@ static double run_multi_gpu_minibatch_bme(
                         parent_r[root_r] = -1;
                     }
                 }
-                compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
-            }
-            if (N >= 5000) {
-                int32_t bb_thresh = std::max(8, N / 700);
-                total_mb_delta_L += run_subtree_minibatch_window(
-                    root_r, N, W, bb_thresh, 25, node_has_active, empty_out_leaves, empty_out_weights,
-                    d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
-                    1200, NULL
-                );
-                compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
-            }
-        }
-
-        std::vector<int32_t> mid_roots;
-        std::vector<int32_t> spine_above_p2b;
-        {
-            std::vector<int32_t> st = {root_r};
-            while (!st.empty()) {
-                int32_t u = st.back(); st.pop_back();
-                if (u < N) continue;
-                if (leaf_cnt[u] <= 3200) {
-                    if (leaf_cnt[u] > 1050) mid_roots.push_back(u);
-                } else {
-                    spine_above_p2b.push_back(u);
-                    st.push_back(curr_c2[u]);
-                    st.push_back(curr_c1[u]);
-                }
-            }
-        }
-        std::vector<int32_t> out_leaves_p2b;
-        std::vector<float> out_weights_p2b;
-        for (int32_t idx = 0; idx < (int32_t)mid_roots.size(); ++idx) {
-            int32_t sr = mid_roots[idx];
-            out_leaves_p2b.clear();
-            out_weights_p2b.clear();
-            if (sr != root_r) {
-                compute_outgroup_dyadic_profile(
-                    sr, root_r, N, curr_c1.data(), curr_c2.data(), parent_r.data(), node_rep0.data(),
-                    max_prof_leaves, out_leaves_p2b, out_weights_p2b
-                );
-            }
-            int32_t c_thresh = std::max(4, leaf_cnt[sr] / 800);
-            double dL = run_subtree_minibatch_window(
-                sr, N, W, c_thresh, 25, node_has_active, out_leaves_p2b, out_weights_p2b,
-                d_packed_seqs[0], mb_ws[0], curr_c1, curr_c2, parent_r, leaf_cnt, node_rep0,
-                1200, NULL
-            );
-            if (dL != 0.0) {
-                total_mb_delta_L += dL;
-                for (int32_t p = parent_r[sr]; p != -1; p = parent_r[p]) {
-                    update_one_node_summary(p, curr_c1[p], curr_c2[p], parent_r.data(), leaf_cnt.data(), node_rep0.data());
-                }
-                parent_r[root_r] = -1;
             }
         }
     }
 
+    compute_tree_summaries_blind(curr_c1.data(), curr_c2.data(), N, ord, parent_r, leaf_cnt, node_rep0);
+    }
     return total_mb_delta_L;
 }
 
-static FILE *open_rnasim_bin(int32_t N) {
+static FILE *open_rnasim_bin(int32_t N, const char *custom_prefix = NULL) {
+    if (custom_prefix && custom_prefix[0] != '\0') {
+        char p0[512];
+        snprintf(p0, sizeof(p0), "%s_%d.bin", custom_prefix, N);
+        return fopen(p0, "rb");
+    }
     char p1[256], p2[256], p3[256];
     snprintf(p1, sizeof(p1), "rnasim_%d.bin", N);
     FILE *fp = fopen(p1, "rb");
@@ -2933,16 +3335,21 @@ static void run_ladder_5000_verification(int n_gpus, std::vector<RnaSimGpuWorksp
 int main(int argc, char **argv) {
     bool minibatch_only = false;
     bool test_ladder = false;
+    bool emit_json = false;
+    const char *custom_prefix = NULL;
+    const char *sizes_csv = NULL;
     for (int a = 1; a < argc; ++a) {
         if (strcmp(argv[a], "--minibatch-only") == 0) minibatch_only = true;
-        if (strcmp(argv[a], "--test-ladder") == 0) test_ladder = true;
+        else if (strcmp(argv[a], "--test-ladder") == 0) test_ladder = true;
+        else if (strcmp(argv[a], "--json") == 0) emit_json = true;
+        else if (strcmp(argv[a], "--prefix") == 0 && a + 1 < argc) custom_prefix = argv[++a];
+        else if (strcmp(argv[a], "--sizes") == 0 && a + 1 < argc) sizes_csv = argv[++a];
     }
 
     int n_gpus = 0;
     CUDA_CHECK(cudaGetDeviceCount(&n_gpus));
     if (n_gpus > 8) n_gpus = 8;
     if (n_gpus < 1) n_gpus = 1;
-    if (n_gpus > 1) minibatch_only = true;
 
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
@@ -2958,34 +3365,68 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    std::vector<int32_t> sizes = {1000, 5000, 10000, 50000, 100000};
+    if (sizes_csv && sizes_csv[0] != '\0') {
+        sizes.clear();
+        const char *p = sizes_csv;
+        while (*p) {
+            char *endp = NULL;
+            long v = strtol(p, &endp, 10);
+            if (endp == p) break;
+            if (v > 0) sizes.push_back((int32_t)v);
+            p = endp;
+            while (*p == ',' || *p == ' ') ++p;
+        }
+    }
+
     printf("====================================================================================================================================\n");
-    printf("BLIND EMPIRICAL RNASIM BENCHMARK (1,596-bp 16S rRNA Sequences | %dx %s | Mode: %s)\n",
-           n_gpus, prop.name, minibatch_only ? "Minibatch-Only" : "Full-Tree + Minibatch");
+    printf("BLIND GPU PHYLO2VEC BME BENCHMARK (%dx %s | Mode: %s | Prefix: %s)\n",
+           n_gpus, prop.name, minibatch_only ? "Minibatch-Only" : "Full-Tree + Minibatch",
+           custom_prefix ? custom_prefix : "rnasim");
     printf("====================================================================================================================================\n");
     printf("%8s | %22s | %22s | %24s | %24s | %10s\n",
            "Taxa (N)", "VFT-InitNJ RF (Time)", "VFT-ME (-noml) RF", "GPU Full-Tree BME RF", "GPU Minibatch BME RF", "Delta L");
     printf("------------------------------------------------------------------------------------------------------------------------------------\n");
 
-    const int32_t sizes[] = {1000, 5000, 10000, 50000, 100000};
     const double vft_init_times[] = {0.58, 3.40, 7.82, 63.01, 179.03};
     const double vft_me_times[]   = {7.46, 36.78, 73.80, 376.54, 772.53};
 
-    for (size_t s_idx = 0; s_idx < sizeof(sizes) / sizeof(sizes[0]); ++s_idx) {
+    for (size_t s_idx = 0; s_idx < sizes.size(); ++s_idx) {
         int32_t N = sizes[s_idx];
-        FILE *fp = open_rnasim_bin(N);
-        if (!fp) { fprintf(stderr, "Missing rnasim_%d.bin\n", N); continue; }
+        FILE *fp = open_rnasim_bin(N, custom_prefix);
+        if (!fp) { fprintf(stderr, "Missing bin for N=%d (prefix=%s)\n", N, custom_prefix ? custom_prefix : "rnasim"); continue; }
 
         int32_t hdr[3];
         if (fread(hdr, sizeof(int32_t), 3, fp) != 3) exit(1);
+        int32_t L_sites = hdr[1];
         int32_t W = hdr[2];
         const int32_t n_nodes_r = 2 * N - 1;
 
-        std::vector<uint64_t> h_packed_seqs((size_t)N * 5 * W);
+        const size_t total_u64 = (size_t)N * 5 * (size_t)W;
+        std::vector<uint64_t *> d_packed_seqs(n_gpus, NULL);
+        for (int g = 0; g < n_gpus; ++g) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMalloc(&d_packed_seqs[g], total_u64 * sizeof(uint64_t)));
+        }
+        {
+            const size_t chunk_u64 = 32ULL * 1024ULL * 1024ULL; /* 256 MB staging buffer */
+            std::vector<uint64_t> h_stage(std::min(total_u64, chunk_u64));
+            size_t offset = 0;
+            while (offset < total_u64) {
+                size_t cur = std::min(chunk_u64, total_u64 - offset);
+                if (fread(h_stage.data(), sizeof(uint64_t), cur, fp) != cur) exit(1);
+                for (int g = 0; g < n_gpus; ++g) {
+                    CUDA_CHECK(cudaSetDevice(g));
+                    CUDA_CHECK(cudaMemcpy(d_packed_seqs[g] + offset, h_stage.data(), cur * sizeof(uint64_t), cudaMemcpyHostToDevice));
+                }
+                offset += cur;
+            }
+        }
+
         std::vector<int32_t> true_c1(n_nodes_r), true_c2(n_nodes_r);
         std::vector<int32_t> init_c1(n_nodes_r), init_c2(n_nodes_r);
         std::vector<int32_t> me_c1(n_nodes_r), me_c2(n_nodes_r);
 
-        if (fread(h_packed_seqs.data(), sizeof(uint64_t), h_packed_seqs.size(), fp) != h_packed_seqs.size()) exit(1);
         if (fread(true_c1.data(), sizeof(int32_t), n_nodes_r, fp) != (size_t)n_nodes_r) exit(1);
         if (fread(true_c2.data(), sizeof(int32_t), n_nodes_r, fp) != (size_t)n_nodes_r) exit(1);
         if (fread(init_c1.data(), sizeof(int32_t), n_nodes_r, fp) != (size_t)n_nodes_r) exit(1);
@@ -2993,13 +3434,6 @@ int main(int argc, char **argv) {
         if (fread(me_c1.data(),   sizeof(int32_t), n_nodes_r, fp) != (size_t)n_nodes_r) exit(1);
         if (fread(me_c2.data(),   sizeof(int32_t), n_nodes_r, fp) != (size_t)n_nodes_r) exit(1);
         fclose(fp);
-
-        std::vector<uint64_t *> d_packed_seqs(n_gpus, NULL);
-        for (int g = 0; g < n_gpus; ++g) {
-            CUDA_CHECK(cudaSetDevice(g));
-            CUDA_CHECK(cudaMalloc(&d_packed_seqs[g], h_packed_seqs.size() * sizeof(uint64_t)));
-            CUDA_CHECK(cudaMemcpy(d_packed_seqs[g], h_packed_seqs.data(), h_packed_seqs.size() * sizeof(uint64_t), cudaMemcpyHostToDevice));
-        }
 
         uint64_t rng = 123456789ULL;
         std::vector<uint64_t> leaf_hashes(N);
@@ -3021,6 +3455,7 @@ int main(int argc, char **argv) {
         int32_t R_sk = 2 * N - 1;
         std::vector<int32_t> scratch_uf(R_sk);
         double dt_full_gpu = 0.0;
+        double dL_full_gpu = 0.0;
         int64_t rf_full_gpu = -1;
 
         if (!minibatch_only && N <= 10000) {
@@ -3041,8 +3476,8 @@ int main(int argc, char **argv) {
             }
             prof_offsets[N] = N;
 
-            (void)optimize_skeleton_on_gpu(
-                N, W, 100, 64,
+            dL_full_gpu = optimize_skeleton_on_gpu(
+                N, W, std::max(400, N / 5), 128,
                 prof_offsets.data(), prof_leaves.data(), prof_weights.data(),
                 d_packed_seqs[0], full_ws, v_cf, perm
             );
@@ -3082,9 +3517,11 @@ int main(int argc, char **argv) {
         compute_xor_splits_o_n(curr_c1.data(), curr_c2.data(), N, leaf_hashes.data(), splits_mb_gpu);
         int64_t rf_mb_gpu = count_wrong_splits_rf(splits_true, splits_mb_gpu);
 
+        double t_init_ref = (s_idx < 5) ? vft_init_times[s_idx] : 0.0;
+        double t_me_ref   = (s_idx < 5) ? vft_me_times[s_idx]   : 0.0;
         char b_init[64], b_me[64], b_full[64], b_mb[64];
-        snprintf(b_init, sizeof(b_init), "%lld (%.2fs)", (long long)rf_init, vft_init_times[s_idx]);
-        snprintf(b_me,   sizeof(b_me),   "%lld (%.2fs)", (long long)rf_me,   vft_me_times[s_idx]);
+        snprintf(b_init, sizeof(b_init), "%lld (%.2fs)", (long long)rf_init, t_init_ref);
+        snprintf(b_me,   sizeof(b_me),   "%lld (%.2fs)", (long long)rf_me,   t_me_ref);
         if (rf_full_gpu >= 0) {
             snprintf(b_full, sizeof(b_full), "%lld (%.2fs)", (long long)rf_full_gpu, dt_full_gpu);
         } else {
@@ -3095,6 +3532,21 @@ int main(int argc, char **argv) {
 
         printf("%8d | %22s | %22s | %24s | %24s | %+10.2f\n",
                N, b_init, b_me, b_full, b_mb, dL_rep);
+        if (emit_json) {
+            struct rusage ru;
+            getrusage(RUSAGE_SELF, &ru);
+            double host_ram_mb = (double)ru.ru_maxrss / 1024.0;
+            size_t free_b = 0, total_b = 0;
+            CUDA_CHECK(cudaSetDevice(0));
+            CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+            double gpu_vram_mb = (double)(total_b - free_b) / (1024.0 * 1024.0);
+            int omp_thr = omp_get_max_threads();
+            printf("[RESULT_JSON] {\"N\": %d, \"L\": %d, \"W\": %d, \"max_splits\": %d, \"rf_init\": %lld, \"rf_me\": %lld, \"rf_full_gpu\": %lld, \"dt_full_gpu\": %.4f, \"dL_full_gpu\": %.4f, \"rf_mb_gpu\": %lld, \"dt_mb_gpu\": %.4f, \"dL_mb_gpu\": %.4f, \"host_ram_mb\": %.1f, \"gpu_vram_mb\": %.1f, \"n_gpus\": %d, \"cpu_threads\": %d, \"gpu_name\": \"%s\"}\n",
+                   N, L_sites, W, N - 3, (long long)rf_init, (long long)rf_me,
+                   (long long)rf_full_gpu, dt_full_gpu, dL_full_gpu,
+                   (long long)rf_mb_gpu, dt_mb_gpu, total_mb_delta_L,
+                   host_ram_mb, gpu_vram_mb, n_gpus, omp_thr, prop.name);
+        }
         fflush(stdout);
 
         for (int g = 0; g < n_gpus; ++g) {
