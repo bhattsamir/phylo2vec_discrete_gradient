@@ -190,7 +190,8 @@ The GPU solver packs SPR moves with disjoint marked paths, rescores each combine
 It tries reversed labeling when no improving row remains, without CPU batch-halving or full SPR completion.
 The best trial is checked against the entry skeleton before committing a block.
 Intermediate trial scores can increase.
-For sequence refinement above $2{,}048$ leaves, inner skeleton proposals cap component leaf-weight lists at $64$ entries; when a window's capped-profile gain satisfies $\Delta L_{\mathrm{capped}}>-\eta_{\mathrm{exact}}$ (controlled by \texttt{--eta}, with $\eta_{\mathrm{exact}}=\infty$ checking every improving window and $\eta_{\mathrm{exact}}=10^{-2}$ screening marginal gains), complete leaf profiles are lazily constructed and affected condensed pairs are verified with Equation~\eqref{eq:changed_pairs} in FP64 using acceptance margin $10^{-6}$.
+By default (\texttt{--init sample}), sequence refinement uses sample-and-place initialization ($n_0=\min(100{,}000,\lfloor N/10\rfloor)$) followed by up to $R_{\max}=8$ outer V-cycle rounds with early stopping when a round improves the BME objective by less than $10^{-6}$ (\texttt{P2V\_STOP\_ZERO=1}, \texttt{P2V\_STOP\_TOL=1e-6}).
+For sequence refinement above $2{,}048$ leaves, inner skeleton proposals cap component leaf-weight lists at $64$ entries (\texttt{max\_prof\_leaves = 64}); in default scaling runs, window commits use the capped surrogate directly (\texttt{--eta 0}), while an optional lazy exact verification mode (\texttt{--eta} $>0$) constructs full leaf profiles when $\Delta L_{\mathrm{capped}}>-\eta_{\mathrm{exact}}$ and checks Equation~\eqref{eq:changed_pairs} in FP64.
 Following topology refinement, Corollary~\ref{cor:branch_lengths} estimates all $2N-3$ FastME/BME branch lengths on GPU using top-$32$ inside and outside leaf-weight profiles per internal node.
 
 \clearpage
@@ -200,11 +201,13 @@ Following topology refinement, Corollary~\ref{cor:branch_lengths} estimates all 
 \subsection{Sequence-refinement scaling tables}
 \label{sec:jc_tables}
 
-Tables~\ref{tab:rnasim_scaling}, \ref{tab:jc10k_scaling}, and~\ref{tab:jc1k_scaling} provide the complete numerical measurements corresponding to Figures~\ref{fig:rnasim_scaling} and~\ref{fig:jc_scaling_4panel} on simulated RNASim ($L=1{,}596$) and Jukes--Cantor ($L=10{,}000$ and $1{,}000$) alignments.
+Tables~\ref{tab:rnasim_scaling}, \ref{tab:jc10k_scaling}, and~\ref{tab:jc1k_scaling} provide the complete numerical measurements corresponding to Figures~\ref{fig:rnasim_scaling}, \ref{fig:jc_scaling_4panel}, and~\ref{fig:seqlen_effect} on simulated RNASim ($L=1{,}596$) and Jukes--Cantor ($L=10{,}000$ and $1{,}000$) alignments.
+At $N\in\{1{,}000{,}000,10{,}000{,}000\}$, where the ground-truth trees are constructed by expanding each leaf of the $100{,}000$-taxon reference tree into $10$- or $100$-leaf clades, we report both the overall normalized RF across all $N-3$ splits and (in brackets) the normalized RF restricted to the $99{,}997$ non-trivial reference backbone splits.
+We also report the \texttt{Phylo2Vec-Minibatch (RandStart)} ablation, which starts directly from the same uniform random tree passed to \texttt{-intree} CPU baselines without sample-and-place initialization.
 
 \begin{table*}[!htbp]
 \centering
-\caption{Sequence-to-tree scaling on simulated \textbf{RNASim} alignments ($L=1{,}596$ sites) from $N=1{,}000$ to $10{,}000{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF), alongside \texttt{DIPPER 0.1.5} (\textit{de novo}). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates.}
+\caption{Sequence-to-tree scaling on simulated \textbf{RNASim} alignments ($L=1{,}596$ sites) from $N=1{,}000$ to $10{,}000{,}000$ leaves, comparing \textbf{Phylo2Vec-Minibatch} (sample-and-place initialization + multi-round V-cycle refinement + GPU branch lengths) and \textbf{Phylo2Vec-Minibatch (RandStart)} (uniform random start) against \texttt{DIPPER 0.1.5} (\textit{de novo}) and CPU baselines initialized from the same uniform random trees ($100.0\%$ initial RF). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates; at $N\ge 10^6$, brackets denote RF (\%) on the $99{,}997$ reference backbone splits.}
 \label{tab:rnasim_scaling}
 \scriptsize
 \setlength{\tabcolsep}{3.5pt}
@@ -215,11 +218,13 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 \midrule
 1,000 & 5 & Uniform Random Init & $99.97 \pm 0.04$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 1,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $20.98 \pm 0.82$ & $0.47 \pm 0.07$ & --- & $121.6 \pm 0.5$ & $392.0$ & 64 CPU + $1\times$ A6000\\
+1,000 & 5 & FastME 2.1.6 (\texttt{-s -u}) & $18.05 \pm 0.84$ & $114.08 \pm 9.45$ & --- & $123.3 \pm 1.2$ & --- & 64 CPU\\
 1,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $19.70 \pm 3.12$ & $11.94 \pm 0.20$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
 1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $18.62 \pm 0.89$ & $8.04 \pm 0.24$ & --- & $131.6 \pm 2.2$ & --- & 64 CPU\\
 1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{14.42 \pm 0.47}$ & $18.30 \pm 0.58$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
 1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.62 \pm 0.65$ & $9.42 \pm 0.27$ & --- & $133.5 \pm 2.9$ & --- & 64 CPU\\
-1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $18.31 \pm 1.19$ & $\mathbf{0.04 \pm 0.00}$ & $\mathbf{-144.10 \pm 1.45}$ & $735.7 \pm 1.4$ & $690.8$ & 64 CPU + $1\times$ H100\\
+1,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $18.31 \pm 1.19$ & $0.05 \pm 0.00$ & $-144.10 \pm 1.45$ & $376.2 \pm 0.0$ & $688.8$ & 64 CPU + $8\times$ H100\\
+1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $18.29 \pm 0.71$ & $\mathbf{0.03 \pm 0.00}$ & $-38.69 \pm 1.48$ & $376.2 \pm 0.0$ & $688.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 5,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $18.82 \pm 0.77$ & $2.07 \pm 0.06$ & --- & $133.0 \pm 0.0$ & $580.0$ & 64 CPU + $1\times$ A6000\\
@@ -227,7 +232,8 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $43.17 \pm 9.67$ & $42.96 \pm 0.86$ & --- & $317.6 \pm 7.4$ & --- & 64 CPU\\
 5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{13.62 \pm 1.33}$ & $117.48 \pm 5.45$ & --- & $292.2 \pm 1.8$ & --- & 64 CPU\\
 5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.85 \pm 1.41$ & $50.22 \pm 1.55$ & --- & $318.6 \pm 8.0$ & --- & 64 CPU\\
-5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $14.80 \pm 0.62$ & $\mathbf{0.49 \pm 0.05}$ & $\mathbf{-869.75 \pm 6.89}$ & $739.9 \pm 0.7$ & $696.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $14.80 \pm 0.62$ & $0.54 \pm 0.05$ & $-869.75 \pm 6.89$ & $379.4 \pm 0.7$ & $694.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $14.90 \pm 0.59$ & $\mathbf{0.35 \pm 0.02}$ & $-175.19 \pm 1.46$ & $379.4 \pm 0.7$ & $694.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $17.78 \pm 0.38$ & $8.90 \pm 0.10$ & --- & $145.8 \pm 0.8$ & $1156.0$ & 64 CPU + $1\times$ A6000\\
@@ -235,26 +241,30 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $58.97 \pm 6.78$ & $90.56 \pm 3.09$ & --- & $542.3 \pm 7.1$ & --- & 64 CPU\\
 10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $14.47 \pm 1.33$ & $280.93 \pm 11.76$ & --- & $571.8 \pm 1.3$ & --- & 64 CPU\\
 10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $14.29 \pm 0.59$ & $103.90 \pm 3.22$ & --- & $545.0 \pm 6.8$ & --- & 64 CPU\\
-10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{13.65 \pm 0.40}$ & $\mathbf{1.39 \pm 0.66}$ & $\mathbf{-1868.34 \pm 9.98}$ & $743.8 \pm 1.1$ & $700.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $\mathbf{13.65 \pm 0.40}$ & $1.79 \pm 0.91$ & $-1868.34 \pm 9.98$ & $384.6 \pm 0.7$ & $698.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $13.67 \pm 0.37$ & $\mathbf{0.95 \pm 0.10}$ & $-342.55 \pm 6.80$ & $384.8 \pm 0.5$ & $698.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
-50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $19.50 \pm 0.15$ & $59.83 \pm 5.51$ & --- & $246.6 \pm 0.8$ & $446.0$ & 64 CPU + $1\times$ A6000\\
+50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $19.44 \pm 0.17$ & $56.84 \pm 0.72$ & --- & $246.6 \pm 0.8$ & $446.0$ & 64 CPU + $1\times$ A6000\\
 50,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $89.30 \pm 1.13$ & $874.43 \pm 24.09$ & --- & $2835.9 \pm 0.6$ & --- & 64 CPU\\
 50,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $88.09 \pm 1.29$ & $486.95 \pm 38.28$ & --- & $2405.4 \pm 15.5$ & --- & 64 CPU\\
-50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{9.91 \pm 0.15}$ & $\mathbf{3.71 \pm 0.19}$ & $\mathbf{-10943.39 \pm 12.09}$ & $782.2 \pm 1.1$ & $746.8$ & 64 CPU + $8\times$ H100\\
+50,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $\mathbf{9.91 \pm 0.15}$ & $5.97 \pm 0.60$ & $-10943.39 \pm 12.09$ & $428.5 \pm 2.3$ & $744.8$ & 64 CPU + $8\times$ H100\\
+50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $9.95 \pm 0.12$ & $\mathbf{5.30 \pm 0.41}$ & $-1698.05 \pm 14.85$ & $430.9 \pm 1.9$ & $744.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 100,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.10 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 100,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $16.80 \pm 0.19$ & $216.26 \pm 0.22$ & --- & $386.5 \pm 2.8$ & $512.0$ & 64 CPU + $1\times$ A6000\\
 100,000 & 5 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $92.62 \pm 0.59$ & $1853.11 \pm 67.03$ & --- & $5677.2 \pm 2.3$ & --- & 64 CPU\\
 100,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $92.73 \pm 1.37$ & $1024.52 \pm 37.34$ & --- & $4651.7 \pm 24.7$ & --- & 64 CPU\\
-100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{8.76 \pm 0.05}$ & $\mathbf{6.75 \pm 0.30}$ & $\mathbf{-23262.65 \pm 20.42}$ & $830.2 \pm 0.9$ & $794.8$ & 64 CPU + $8\times$ H100\\
+100,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $8.75 \pm 0.05$ & $12.53 \pm 0.64$ & $-23262.69 \pm 20.40$ & $470.4 \pm 0.8$ & $792.8$ & 64 CPU + $8\times$ H100\\
+100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{8.74 \pm 0.06}$ & $\mathbf{8.34 \pm 0.49}$ & $-3326.69 \pm 23.90$ & $470.4 \pm 0.7$ & $792.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 1,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
 1,000,000 & 1 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $11.25$ & $978.23$ & --- & $4189.6$ & $1871.8$ & 64 CPU + $1\times$ A6000\\
-1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{1.17}$ & $\mathbf{69.01}$ & $\mathbf{-306164.97}$ & $\mathbf{1043.5}$ & $\mathbf{1656.8}$ & 64 CPU + $8\times$ H100\\
+1,000,000 & 1 & Phylo2Vec-Minibatch (RandStart) & $1.01$ [$9.09$] & $108.06$ & $-306187.06$ & $\mathbf{1050.8}$ & $\mathbf{1656.8}$ & 64 CPU + $8\times$ H100\\
+1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{1.00}$ [$\mathbf{9.08}$] & $\mathbf{36.61}$ & $-24068.02$ & $1531.0$ & $\mathbf{1656.8}$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
-10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{4.13}$ & $\mathbf{974.61}$ & $\mathbf{-3319791.02}$ & $\mathbf{2575.1}$ & $10240.8$ & 64 CPU + $8\times$ H100\\
+10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{0.12}$ [$\mathbf{9.15}$] & $\mathbf{430.48}$ & $-458725.25$ & $\mathbf{7092.8}$ & $10240.8$ & 64 CPU + $8\times$ H100\\
 \bottomrule
 \end{tabular}%
 }
@@ -262,7 +272,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 
 \begin{table*}[!htbp]
 \centering
-\caption{Sequence-to-tree scaling on simulated Jukes--Cantor alignments with $L=10{,}000$ sites (\texttt{JC10k}) from $N=1{,}000$ to $10{,}000{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF), alongside \texttt{DIPPER 0.1.5} (\textit{de novo}). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates.}
+\caption{Sequence-to-tree scaling on simulated Jukes--Cantor alignments with $L=10{,}000$ sites (\texttt{JC10k}) from $N=1{,}000$ to $10{,}000{,}000$ leaves, comparing \textbf{Phylo2Vec-Minibatch} (sample-and-place initialization + multi-round V-cycle refinement + GPU branch lengths) and \textbf{Phylo2Vec-Minibatch (RandStart)} (uniform random start) against \texttt{DIPPER 0.1.5} (\textit{de novo}) and CPU baselines initialized from the same uniform random trees ($100.0\%$ initial RF). Entries for $N\leq100{,}000$ report $\text{mean}\pm\text{SD}$ over $R=5$ independent replicates; at $N\ge 10^6$, brackets denote RF (\%) on the $99{,}997$ reference backbone splits.}
 \label{tab:jc10k_scaling}
 \scriptsize
 \setlength{\tabcolsep}{3.5pt}
@@ -278,7 +288,8 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 1,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $4.99 \pm 1.36$ & $47.15 \pm 1.77$ & --- & $599.4 \pm 37.4$ & --- & 64 CPU\\
 1,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $\mathbf{2.61 \pm 0.52}$ & $91.23 \pm 1.30$ & --- & $395.4 \pm 3.9$ & --- & 64 CPU\\
 1,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $2.63 \pm 0.67$ & $52.11 \pm 1.45$ & --- & $603.1 \pm 44.1$ & --- & 64 CPU\\
-1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $4.29 \pm 0.58$ & $\mathbf{0.04 \pm 0.01}$ & $\mathbf{-132.79 \pm 1.63}$ & $741.0 \pm 0.9$ & $698.8$ & 64 CPU + $1\times$ H100\\
+1,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $4.29 \pm 0.58$ & $0.05 \pm 0.01$ & $-132.79 \pm 1.63$ & $381.5 \pm 0.0$ & $696.8$ & 64 CPU + $8\times$ H100\\
+1,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $4.25 \pm 0.57$ & $\mathbf{0.03 \pm 0.00}$ & $-21.88 \pm 1.78$ & $381.2 \pm 0.7$ & $696.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 5,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 5,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.01 \pm 0.31$ & $2.32 \pm 0.10$ & --- & $193.8 \pm 0.1$ & $600.0$ & 64 CPU + $1\times$ A6000\\
@@ -286,7 +297,8 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 5,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $9.27 \pm 2.30$ & $238.48 \pm 5.14$ & --- & $1666.2 \pm 47.3$ & --- & 64 CPU\\
 5,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.04 \pm 0.31$ & $541.68 \pm 22.96$ & --- & $1742.7 \pm 4.4$ & --- & 64 CPU\\
 5,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.98 \pm 0.36}$ & $256.49 \pm 5.46$ & --- & $1649.8 \pm 45.5$ & --- & 64 CPU\\
-5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.33 \pm 0.12$ & $\mathbf{1.02 \pm 0.04}$ & $\mathbf{-738.28 \pm 9.79}$ & $765.5 \pm 0.9$ & $722.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $3.33 \pm 0.12$ & $1.08 \pm 0.03$ & $-738.28 \pm 9.79$ & $405.3 \pm 1.4$ & $720.8$ & 64 CPU + $8\times$ H100\\
+5,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.36 \pm 0.13$ & $\mathbf{0.83 \pm 0.01}$ & $-82.17 \pm 1.03$ & $404.6 \pm 1.7$ & $720.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.01 \pm 0.01$ & $0.00 \pm 0.00$ & --- & --- & ---\\
 10,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $6.21 \pm 0.11$ & $9.31 \pm 0.05$ & --- & $266.6 \pm 0.8$ & $1196.0$ & 64 CPU + $1\times$ A6000\\
@@ -294,25 +306,29 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 10,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & --- & $2766.5 \pm 14.1$ & --- & 64 CPU\\
 10,000 & 5 & FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & --- & $3411.9 \pm 9.2$ & --- & 64 CPU\\
 10,000 & 5 & VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & --- & $2770.2 \pm 26.4$ & --- & 64 CPU\\
-10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $\mathbf{-1542.67 \pm 15.40}$ & $796.2 \pm 0.0$ & $752.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $3.07 \pm 0.08$ & $3.33 \pm 0.06$ & $-1542.67 \pm 15.40$ & $435.1 \pm 1.4$ & $750.8$ & 64 CPU + $8\times$ H100\\
+10,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $3.05 \pm 0.10$ & $\mathbf{2.73 \pm 0.47}$ & $-149.89 \pm 2.55$ & $435.8 \pm 0.0$ & $750.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 50,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.04 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
-50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.90 \pm 0.17$ & $66.30 \pm 1.36$ & --- & $1038.6 \pm 6.4$ & $646.0$ & 64 CPU + $1\times$ A6000\\
+50,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.94 \pm 0.18$ & $65.60 \pm 1.75$ & --- & $1031.8 \pm 8.2$ & $646.0$ & 64 CPU + $1\times$ A6000\\
 50,000 & 4 & FastTreeMP 2.2 (\texttt{-noml -intree}) & $74.25 \pm 4.51$ & $4525.52 \pm 115.67$ & --- & $16673.0 \pm 19.7$ & --- & 64 CPU\\
 50,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $70.03 \pm 2.04$ & $2506.54 \pm 103.01$ & --- & $12062.2 \pm 61.7$ & --- & 64 CPU\\
-50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.61 \pm 0.17}$ & $\mathbf{13.19 \pm 0.21}$ & $\mathbf{-8408.27 \pm 56.33}$ & $\mathbf{990.5 \pm 1.6}$ & $1004.8$ & 64 CPU + $8\times$ H100\\
+50,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $\mathbf{2.56 \pm 0.11}$ & $21.31 \pm 3.80$ & $-8408.38 \pm 56.20$ & $630.7 \pm 1.4$ & $1002.8$ & 64 CPU + $8\times$ H100\\
+50,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $2.57 \pm 0.11$ & $\mathbf{14.17 \pm 0.05}$ & $-640.75 \pm 5.15$ & $\mathbf{629.6 \pm 0.7}$ & $1002.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 100,000 & 5 & Uniform Random Init & $100.00 \pm 0.00$ & $0.10 \pm 0.00$ & $0.00 \pm 0.00$ & --- & --- & ---\\
-100,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.41 \pm 0.12$ & $313.35 \pm 84.78$ & --- & $2001.4 \pm 3.3$ & $912.0$ & 64 CPU + $1\times$ A6000\\
+100,000 & 5 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $4.38 \pm 0.14$ & $249.05 \pm 1.33$ & --- & $1995.0 \pm 3.9$ & $912.0$ & 64 CPU + $1\times$ A6000\\
 100,000 & 5 & VeryFastTree 4.0 (\texttt{-noml -intree}) & $84.88 \pm 2.64$ & $5588.08 \pm 300.03$ & --- & $23767.2 \pm 110.4$ & --- & 64 CPU\\
-100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.45 \pm 0.15}$ & $\mathbf{21.48 \pm 0.09}$ & $\mathbf{-17306.92 \pm 122.36}$ & $\mathbf{991.5 \pm 1.4}$ & $1310.8$ & 64 CPU + $8\times$ H100\\
+100,000 & 5 & Phylo2Vec-Minibatch (RandStart) & $2.43 \pm 0.12$ & $37.28 \pm 3.98$ & $-17306.97 \pm 122.28$ & $631.1 \pm 0.9$ & $1308.8$ & 64 CPU + $8\times$ H100\\
+100,000 & 5 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.42 \pm 0.12}$ & $\mathbf{26.08 \pm 0.31}$ & $-1186.91 \pm 10.02$ & $\mathbf{630.0 \pm 1.1}$ & $1308.8$ & 64 CPU + $8\times$ H100\\
 \midrule
 1,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
 1,000,000 & 1 & DIPPER 0.1.5 (GPU, \textit{de novo}) & $5.64$ & $2592.75$ & --- & $24225.3$ & $17747.6$ & 64 CPU + $1\times$ A6000\\
-1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{1.40}$ & $\mathbf{176.97}$ & $\mathbf{-201262.38}$ & $\mathbf{1809.1}$ & $\mathbf{6806.8}$ & 64 CPU + $8\times$ H100\\
+1,000,000 & 1 & Phylo2Vec-Minibatch (RandStart) & $1.18$ [$8.31$] & $338.78$ & $-201273.28$ & $\mathbf{1046.0}$ & $\mathbf{6806.8}$ & 64 CPU + $8\times$ H100\\
+1,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{0.32}$ [$\mathbf{2.80}$] & $\mathbf{145.94}$ & $-11863.02$ & $1534.2$ & $\mathbf{6806.8}$ & 64 CPU + $8\times$ H100\\
 \midrule
 10,000,000 & 1 & Uniform Random Init & $100.00$ & $0.00$ & $0.00$ & --- & --- & ---\\
-10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{2.58}$ & $\mathbf{1887.47}$ & $\mathbf{-2232357.84}$ & $\mathbf{2814.1}$ & $61738.8$ & 64 CPU + $8\times$ H100\\
+10,000,000 & 1 & \textbf{Phylo2Vec-Minibatch} & $\mathbf{0.03}$ [$\mathbf{2.87}$] & $\mathbf{1161.52}$ & $-312968.56$ & $\mathbf{7077.0}$ & $61738.8$ & 64 CPU + $8\times$ H100\\
 \bottomrule
 \end{tabular}%
 }
@@ -320,7 +336,7 @@ $N$ & $R$ & Method & RF (\%) & Time (s) & $\Delta\text{BME}$ & Host RAM (MB) & V
 
 \begin{table*}[!htbp]
 \centering
-\caption{Sequence-length sensitivity at $N=10{,}000$ leaves starting from uniform random trees ($100.0\%$ initial RF): simulated Jukes--Cantor alignments with $L=1{,}000$ sites (\texttt{JC1k}) vs.\ $L=10{,}000$ sites (\texttt{JC10k}) over $R=5$ independent replicates ($\text{mean}\pm\text{SD}$).}
+\caption{Sequence-length sensitivity at $N=10{,}000$ leaves: simulated Jukes--Cantor alignments with $L=1{,}000$ sites (\texttt{JC1k}) vs.\ $L=10{,}000$ sites (\texttt{JC10k}) over $R=5$ independent replicates ($\text{mean}\pm\text{SD}$).}
 \label{tab:jc1k_scaling}
 \scriptsize
 \setlength{\tabcolsep}{3.5pt}
@@ -336,7 +352,8 @@ FastTreeMP 2.2 (\texttt{-noml -intree}) & $47.52 \pm 10.80$ & $85.00 \pm 3.06$ &
 VeryFastTree 4.0 (\texttt{-noml -intree}) & $41.36 \pm 5.67$ & $50.23 \pm 2.15$ & --- & $33.55 \pm 11.07$ & $475.03 \pm 13.05$ & ---\\
 FastTreeMP 2.2 (ME+ML \texttt{-intree}) & $12.18 \pm 0.80$ & $129.78 \pm 5.78$ & --- & $2.00 \pm 0.14$ & $1230.72 \pm 91.55$ & ---\\
 VeryFastTree 4.0 (ME+ML \texttt{-intree}) & $\mathbf{11.87 \pm 0.63}$ & $55.72 \pm 2.27$ & --- & $\mathbf{1.92 \pm 0.06}$ & $525.70 \pm 20.07$ & ---\\
-\textbf{Phylo2Vec-Minibatch} & $13.25 \pm 0.23$ & $\mathbf{0.90 \pm 0.03}$ & $\mathbf{-1561.84 \pm 26.90}$ & $3.07 \pm 0.08$ & $\mathbf{3.22 \pm 0.06}$ & $\mathbf{-1542.67 \pm 15.40}$\\
+Phylo2Vec-Minibatch (RandStart) & $13.25 \pm 0.23$ & $1.00 \pm 0.07$ & $-1561.84 \pm 26.90$ & $3.07 \pm 0.08$ & $3.33 \pm 0.06$ & $-1542.67 \pm 15.40$\\
+\textbf{Phylo2Vec-Minibatch} & $13.27 \pm 0.33$ & $\mathbf{0.59 \pm 0.01}$ & $-159.13 \pm 4.69$ & $3.05 \pm 0.10$ & $\mathbf{2.73 \pm 0.47}$ & $-149.89 \pm 2.55$\\
 \bottomrule
 \end{tabular*}
 \end{table*}
@@ -358,10 +375,47 @@ $N$ & Unrooted edges ($2N-3$) & \multicolumn{3}{c}{\textbf{RNASim} ($L=1{,}596$ 
 10,000 & 19,997 & 0.0023 & 0.0048 & \textbf{0.0071} & 0.0044 & 0.0077 & \textbf{0.0121}\\
 50,000 & 99,997 & 0.0325 & 0.0076 & \textbf{0.0400} & 0.0335 & 0.0129 & \textbf{0.0464}\\
 100,000 & 199,997 & 0.0732 & 0.0273 & \textbf{0.1004} & 0.0652 & 0.0219 & \textbf{0.0872}\\
-1,000,000 & 1,999,997 & 0.8760 & 0.1210 & \textbf{0.9971} & 0.6887 & 0.1972 & \textbf{0.8860}\\
-10,000,000 & 19,999,997 & 11.9402 & 1.3923 & \textbf{13.3325} & 8.4964 & 2.0030 & \textbf{10.4993}\\
+1,000,000 & 1,999,997 & 0.4779 & 0.1210 & \textbf{0.5989} & 0.4649 & 0.1972 & \textbf{0.6621}\\
+10,000,000 & 19,999,997 & 4.4016 & 1.3923 & \textbf{5.7939} & 5.8504 & 2.0030 & \textbf{7.8534}\\
 \bottomrule
 \end{tabular*}
+\end{table*}
+
+\begin{table*}[!htbp]
+\centering
+\caption{Pandemic-scale SARS-CoV-2 phylogenetic inference against \texttt{CMAPLE}~\cite{lytrong2024cmaple} and \texttt{MAPLE}~\cite{demaio2023maple} across the official simulated ($N\in\{100\text{K},200\text{K},500\text{K}\}$, $L=30{,}000$~bp) and empirical GISAID ($N=10\text{K}\to1\text{M}$, $L=29{,}891$~bp) benchmark suites. For simulated datasets, we report all-splits normalized RF error (\texttt{RF\_all}) and resolved-branch RF error on branches with expected length $\ge0.5/L$ (\texttt{RF\_0.5}) and $\ge1.0/L$ (\texttt{RF\_1.0}). \texttt{Phylo2Vec-Minibatch} times include sample-and-place initialization ($n_0=N/10$), V-cycle refinement, and $O(N)$ GPU branch lengths.}
+\label{tab:cmaple_comparison}
+\scriptsize
+\setlength{\tabcolsep}{3.0pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llrrrrrrrrrrrrrr@{}}
+\toprule
+Dataset & $N$ & \multicolumn{4}{c}{\textbf{CMAPLE} (ML)} & \multicolumn{4}{c}{\textbf{MAPLE} (ML)} & \multicolumn{4}{c}{\textbf{Phylo2Vec-Minibatch} ($8\times$ H100)} & \multicolumn{2}{c}{Speedup vs.}\\
+\cmidrule(lr){3-6}\cmidrule(lr){7-10}\cmidrule(lr){11-14}\cmidrule(lr){15-16}
+ & & Time (s) & RAM (GB) & \texttt{RF\_all} & \texttt{RF\_1.0} & Time (s) & RAM (GB) & \texttt{RF\_all} & \texttt{RF\_1.0} & Time (s) & RAM (GB) & \texttt{RF\_all} & \texttt{RF\_1.0} & CMAPLE & MAPLE\\
+\midrule
+Sim ($\bar\ell=5\cdot10^{-5}$) & 100K & 1,010.7 & 2.87 & 24.29\% & 10.08\% & 4,169.0 & 5.63 & 24.32\% & 10.12\% & \textbf{74.8} & \textbf{0.99} & 24.71\% & 10.35\% & $13.5\times$ & $55.7\times$\\
+Sim ($\bar\ell=5\cdot10^{-5}$) & 200K & 3,866.4 & 5.80 & 24.40\% & 10.03\% & 10,886.0 & 11.46 & 24.42\% & 10.03\% & \textbf{109.7} & \textbf{0.99} & 24.64\% & 10.21\% & $35.2\times$ & $99.2\times$\\
+Sim ($\bar\ell=5\cdot10^{-5}$) & 500K & 8,559.2 & 14.00 & 23.96\% & 9.81\% & 25,653.0 & 26.92 & 23.95\% & 9.80\% & \textbf{214.5} & \textbf{1.14} & 24.32\% & 9.94\% & $39.9\times$ & $119.6\times$\\
+\midrule
+Sim ($\bar\ell=10^{-4}$) & 100K & 1,189.3 & 6.94 & 11.90\% & 5.86\% & 5,543.0 & 14.82 & 11.91\% & 5.86\% & \textbf{76.0} & \textbf{0.99} & 12.00\% & 5.90\% & $15.6\times$ & $72.9\times$\\
+Sim ($\bar\ell=10^{-4}$) & 200K & 2,470.7 & 14.44 & 11.67\% & 5.74\% & 7,954.0 & 30.38 & 11.67\% & 5.74\% & \textbf{112.1} & \textbf{0.99} & 11.75\% & 5.80\% & $22.1\times$ & $71.0\times$\\
+Sim ($\bar\ell=10^{-4}$) & 500K & 5,511.9 & 37.41 & 11.68\% & 5.71\% & 23,771.0 & 79.47 & 11.68\% & 5.71\% & \textbf{212.9} & \textbf{1.15} & 11.75\% & 5.77\% & $25.9\times$ & $111.6\times$\\
+\midrule
+Sim ($\bar\ell=1.5\cdot10^{-4}$) & 100K & 1,267.3 & 12.58 & 7.26\% & 4.23\% & 8,781.0 & 28.21 & 7.27\% & 4.24\% & \textbf{76.3} & \textbf{0.99} & 7.32\% & 4.27\% & $16.6\times$ & $115.0\times$\\
+Sim ($\bar\ell=1.5\cdot10^{-4}$) & 200K & 3,443.7 & 24.20 & 7.17\% & 4.16\% & 23,829.0 & 55.99 & 7.17\% & 4.17\% & \textbf{114.3} & \textbf{0.99} & 7.26\% & 4.20\% & $30.1\times$ & $208.5\times$\\
+Sim ($\bar\ell=1.5\cdot10^{-4}$) & 500K & 8,550.3 & 64.19 & 7.12\% & 4.08\% & 51,608.0 & 145.89 & 7.12\% & 4.08\% & \textbf{213.2} & \textbf{1.15} & 7.16\% & 4.10\% & $40.1\times$ & $242.1\times$\\
+\midrule
+GISAID Empirical & 10K & 496.8 & --- & --- & --- & --- & --- & --- & --- & \textbf{9.9} & \textbf{0.91} & --- & --- & $50.1\times$ & ---\\
+GISAID Empirical & 50K & 7,524.5 & --- & --- & --- & --- & --- & --- & --- & \textbf{69.7} & \textbf{0.99} & --- & --- & $108.0\times$ & ---\\
+GISAID Empirical & 100K & 36,602.3 & --- & --- & --- & --- & --- & --- & --- & \textbf{125.6} & \textbf{0.99} & --- & --- & $291.4\times$ & ---\\
+GISAID Empirical & 200K & 70,076.9 & --- & --- & --- & --- & --- & --- & --- & \textbf{170.3} & \textbf{0.99} & --- & --- & $411.6\times$ & ---\\
+GISAID Empirical & 500K & 215,055.0 & --- & --- & --- & --- & --- & --- & --- & \textbf{333.1} & \textbf{1.10} & --- & --- & $645.5\times$ & ---\\
+GISAID Empirical & 1M & 943,582.2 & --- & --- & --- & $60{,}424.7^\dagger$ & --- & --- & --- & \textbf{609.0} & \textbf{1.40} & --- & --- & $\mathbf{1{,}549.5\times}$ & $99.2\times^\dagger$\\
+\bottomrule
+\multicolumn{16}{@{}l}{\footnotesize $^\dagger$At $N=1\text{M}$ empirical GISAID, \texttt{MAPLE} column reports placement-only \texttt{CMAPLE -no-tree-search} ($60{,}424.7$~s $=16.78$~h).}
+\end{tabular}%
+}
 \end{table*}
 
 \clearpage

@@ -1,0 +1,51 @@
+\begin{samepage}
+\subsection{Quadratic-time coordinate evaluation}
+
+The evaluator first constructs a shared table of subtree distances, then propagates score changes across regraft positions.
+For distinct vertices $u,w$, let $A(u,w)$ be the balanced mean distance under $D_\pi$ between the components rooted at $u,w$ and directed away from their connecting path.
+If $a,b$ are the two neighbours of an internal vertex $u$ away from $w$, equal weighting of the two branches gives
+\begin{equation}
+ A(u,w)=\tfrac12\{A(a,w)+A(b,w)\}.
+ \label{eq:bottom_up}
+\end{equation}
+\end{samepage}
+
+For a leaf $x$, initialize $A(y,x)=D_\pi[y,x]$ at the other leaves and apply Equation~\eqref{eq:bottom_up} towards $x$, processing children before their parent.
+Each of the $N-2$ internal entries is one average of two previously computed values, so the entire column costs $O(N)$.
+Once all leaf columns are complete, symmetry supplies the leaf entries $A(x,w)=A(w,x)$ for each internal target $w$.
+The same recurrence computes the entries in its three incident branches in $O(N)$ operations; the diagonal is unused.
+Thus all $2N-2$ columns cost $O(N^2)$, including on unbalanced trees.
+Appendix~\ref{sec:parallel_details} describes the implementation with a fixed computational root.
+
+For each coordinate $i\geq1$, varying $v_i$ regrafts a fixed subtree $P_i$ (Lemma~\ref{lem:coord_spr}).
+Moving its attachment between adjacent edges is a nearest-neighbour interchange (NNI).
+For the four components $P,Q,R,S$ surrounding the current NNI edge, let $d_{UV}$ denote the balanced mean distance between $U,V$ at their attachment roots.
+The interchange $PQ\mid RS\to PR\mid QS$ changes the BME score by
+\begin{equation}
+ \delta_{\mathrm{NNI}}=\tfrac14(d_{PR}+d_{QS}-d_{PQ}-d_{RS}).
+ \label{eq:nni_increment}
+\end{equation}
+The standard SPR recurrence accumulates these increments along the remaining tree, obtaining the changing component means from $A$ and a constant number of running averages and weights per traversal state~\cite{hordijk2005spr}.
+Each edge therefore costs $O(1)$ operations, and a single traversal scores all regraft positions for $P_i$ in $O(N)$.
+The edge-to-coordinate map in Appendix~\ref{sec:mapping} extracts the scores for the $2i+1$ coordinate values.
+
+\begin{proposition}[Quadratic coordinate evaluation]
+\label{prop:quadratic}
+Given an ordered $N$-leaf encoding $v$, its leaf permutation $\pi$, and constant-time access to $D_\pi$, all $(N-1)^2$ entries in Equation~\eqref{eq:discrete_gradient} can be evaluated using $O(N^2)$ arithmetic operations and $O(N^2)$ storage.
+In real arithmetic, every entry equals the corresponding full-tree BME difference.
+\end{proposition}
+\begin{proof}
+Constructing $A$ costs $O(N^2)$.
+For each row $i=1,\ldots,N-2$, the SPR traversal and coordinate mapping take $O(N)$ operations, while $\Delta_{0,0}=0$.
+The total is therefore
+\[
+ \underbrace{O(N^2)}_{\text{construct }A}
+ +\underbrace{(N-2)\,O(N)}_{\text{evaluate coordinate rows}}
+ =O(N^2).
+\]
+The stored tables have $O(N^2)$ entries.
+The SPR recurrence gives changes relative to the original attachment, and the edge map in Appendix~\ref{sec:mapping} identifies them with the corresponding coordinate replacements.
+\end{proof}
+
+Every candidate topology is either unchanged or an SPR neighbour; the coordinate table need not cover the full SPR neighbourhood.
+

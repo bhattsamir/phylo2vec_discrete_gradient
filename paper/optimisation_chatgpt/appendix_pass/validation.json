@@ -1,0 +1,41 @@
+{
+  "pages_before": 23,
+  "pages_after": 17,
+  "appendix_pages_before": 11,
+  "appendix_pages_after": 6,
+  "appendix_sections": [
+    "Mathematical details",
+    "Search settings",
+    "Additional experimental results"
+  ],
+  "appendix_source_tokens_before": 3578,
+  "appendix_source_tokens_after": 1668,
+  "proof_bodies_unchanged": true,
+  "section_2_3_unchanged": true,
+  "main_algorithm_floats_unchanged": true,
+  "retained_supporting_tables_byte_identical": [
+    "tab:bench_noiseless",
+    "tab:bench_noisy",
+    "tab:cuda_a6000_scaling",
+    "tab:cuda_a6000_verify",
+    "tab:h100_scaling",
+    "tab:minibatch_scaling"
+  ],
+  "archived_optional_table": [
+    "tab:bench_gpu"
+  ],
+  "no_unresolved_references_or_citations": true,
+  "no_latex_warnings": true,
+  "unchanged_files_sha256": {
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/figures/exact_block_overview.tex": "828433818eb31f2d53d64844ee6c7140e98043a4445441934df42a3d1b1a214a",
+    "paper/figures/exact_block_overview.pdf": "b2b36b2726f416fae175e6aeca9959894f8d226c5bcdc9118850efe9759c9926",
+    "src/phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+    "benchmarks/bench_rnasim_gpu.cu": "9f422fffa8ca26edea5a97242925aad32ffec96fe39969ed9073f431b86f2b7c"
+  },
+  "independent_reviews": [
+    "Mathematical conditions preserved",
+    "Search settings and scope preserved"
+  ],
+  "build_command": "./paper/build_paper.sh"
+}

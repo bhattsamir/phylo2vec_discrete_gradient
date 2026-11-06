@@ -1,0 +1,58 @@
+{
+  "compile": "pass",
+  "pages": 23,
+  "section_and_proposition_page": 4,
+  "source_token_counts_whitespace": {
+    "before": 656,
+    "after": 417
+  },
+  "scope": "Section 2.3 and Proposition 2.1 rewritten; fixed-root recurrence moved to Appendix C.1",
+  "all_previous_numbered_equations_preserved": true,
+  "new_equation": "eq:nni_increment",
+  "nni_coefficients_from_independent_pauplin_paths": {
+    "PQ": "-1/4",
+    "PR": "1/4",
+    "PS": "0",
+    "QR": "0",
+    "QS": "1/4",
+    "RS": "-1/4"
+  },
+  "other_theorems_proofs_tables_and_algorithms_unchanged": true,
+  "protected_files_unchanged": {
+    "paper/phylo2vec_bme_references.tex": true,
+    "paper/phylo2vec_bme_cpu_tables.tex": true,
+    "paper/phylo2vec_bme_scaling_tables.tex": true,
+    "paper/figures/exact_block_overview.tex": true,
+    "paper/figures/exact_block_overview.pdf": true,
+    "src/phylo2vec_fastme.c": true,
+    "benchmarks/bench_rnasim_gpu.cu": true
+  },
+  "unresolved_references": [],
+  "unresolved_citations": [],
+  "latex_warnings": [],
+  "visually_checked_pages": [
+    4,
+    15
+  ],
+  "independent_reviews": [
+    "A definition, leaf and internal target columns, D_pi indexing",
+    "NNI coefficient and current-component orientation",
+    "Running summaries per SPR traversal state",
+    "Coordinate map setup and row-zero accounting",
+    "Nontrivial topology changes versus unchanged entries"
+  ],
+  "benchmarks_rerun": false,
+  "implementation_edits": false,
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "18c3f898f6f6248a24d15b53ae34c76e86f8e10334715e6e46d6ba4a889fb04b",
+    "paper/phylo2vec_bme_appendix.tex": "d5e74f72fd36ee9f5b5e1dd71c0c4137d185c360085cd9d8032a82894a876924",
+    "paper/phylo2vec_bme_paper.pdf": "badc61281c9c2aaf1697a58c8f84c13c039b7741416fd5108d23e0db62fdae03",
+    "paper/phylo2vec_bme_references.tex": "47ab2ab64b26c51a9b3aa92c3bcd9e00ffe713a4bc4e54a5a4af6fdcd7126fb9",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "paper/figures/exact_block_overview.tex": "828433818eb31f2d53d64844ee6c7140e98043a4445441934df42a3d1b1a214a",
+    "paper/figures/exact_block_overview.pdf": "b2b36b2726f416fae175e6aeca9959894f8d226c5bcdc9118850efe9759c9926",
+    "src/phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+    "benchmarks/bench_rnasim_gpu.cu": "9f422fffa8ca26edea5a97242925aad32ffec96fe39969ed9073f431b86f2b7c"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "paper/phylo2vec_bme_paper.tex": "ff51137cee7a2cfb302d93f2e9bd45d451e69639924dbed409aba65b26ab3f6b",
+  "paper/phylo2vec_bme_appendix.tex": "4abfe9b92fb9fedafbb0fd6c5bdae03a0bf8487d46ea6e93c9431d8cb21c3437",
+  "paper/phylo2vec_bme_paper.pdf": "328c7ff77e800270fed35764d5e4330d7797d5ee9040e0637f2d886c276c3bb8",
+  "paper/phylo2vec_bme_references.tex": "47ab2ab64b26c51a9b3aa92c3bcd9e00ffe713a4bc4e54a5a4af6fdcd7126fb9",
+  "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+  "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+  "paper/figures/exact_block_overview.tex": "828433818eb31f2d53d64844ee6c7140e98043a4445441934df42a3d1b1a214a",
+  "paper/figures/exact_block_overview.pdf": "b2b36b2726f416fae175e6aeca9959894f8d226c5bcdc9118850efe9759c9926",
+  "src/phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+  "benchmarks/bench_rnasim_gpu.cu": "9f422fffa8ca26edea5a97242925aad32ffec96fe39969ed9073f431b86f2b7c"
+}

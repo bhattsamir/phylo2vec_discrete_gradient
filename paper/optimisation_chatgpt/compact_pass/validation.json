@@ -1,0 +1,88 @@
+{
+  "compile": "pass",
+  "pages": 21,
+  "algorithm_pages": {
+    "Algorithm 1 Full-tree": 6,
+    "Algorithm 2 CPU skeleton": 7,
+    "Search policies and parameters": 17
+  },
+  "main_search_prose_word_counts_excluding_math_and_algorithms": {
+    "before": 666,
+    "after": 379
+  },
+  "math_and_proof_preservation": {
+    "equation": {
+      "before": 14,
+      "after": 14,
+      "unchanged": true
+    },
+    "align*": {
+      "before": 1,
+      "after": 1,
+      "unchanged": true
+    },
+    "theorem": {
+      "before": 1,
+      "after": 1,
+      "unchanged": true
+    },
+    "lemma": {
+      "before": 1,
+      "after": 1,
+      "unchanged": true
+    },
+    "proposition": {
+      "before": 2,
+      "after": 2,
+      "unchanged": true
+    },
+    "corollary": {
+      "before": 2,
+      "after": 2,
+      "unchanged": true
+    },
+    "proof": {
+      "before": 6,
+      "after": 6,
+      "unchanged": true
+    }
+  },
+  "original_tables_unchanged": true,
+  "protected_files_unchanged": {
+    "paper/phylo2vec_bme_references.tex": true,
+    "paper/phylo2vec_bme_cpu_tables.tex": true,
+    "paper/phylo2vec_bme_scaling_tables.tex": true,
+    "src/phylo2vec_fastme.c": true,
+    "benchmarks/bench_rnasim_gpu.cu": true,
+    "benchmarks/bench_minibatch_recovery.cu": true
+  },
+  "latex_warnings": [],
+  "unresolved_references": [],
+  "unresolved_citations": [],
+  "figure_remains_vector": true,
+  "figure_text_within_bounds": true,
+  "benchmarks_rerun": false,
+  "implementation_edits": false,
+  "algorithm_review": {
+    "component_permutation": "persistent and composed by Normalise and Reverse",
+    "relabel_flag": "reset after topology changes and retained across an unsuccessful reversed-labeling sweep",
+    "batch_acceptance": "joint score, falling back to best single move",
+    "escape_margin": "passed explicitly as eta",
+    "termination": "finite block, sweep and escape budgets",
+    "final_trial": "included in returned best-tree comparison",
+    "GPU_policy": "separate solver policy, not claimed to perform CPU SPR completion"
+  },
+  "source_sha256": {
+    "paper/phylo2vec_bme_paper.tex": "bf64ca8afa409826ac0b26840af0b39cb47ddfc252126f7fd8bcef6f12f4d16c",
+    "paper/phylo2vec_bme_appendix.tex": "6b24cc1fe309894b5e449c81b9af0a75a0fa7b2e1e19efcc37993ff7a59f5bb3",
+    "paper/phylo2vec_bme_paper.pdf": "52a87d04b7c093c83518a7453204091e1a41331c243a242d70086eed8a54c8af",
+    "paper/figures/exact_block_overview.tex": "828433818eb31f2d53d64844ee6c7140e98043a4445441934df42a3d1b1a214a",
+    "paper/figures/exact_block_overview.pdf": "b2b36b2726f416fae175e6aeca9959894f8d226c5bcdc9118850efe9759c9926",
+    "paper/phylo2vec_bme_references.tex": "c4399e7a02e5d50f4703b593b67ce9a8602351cb1d919ee43eadf224affed6b3",
+    "paper/phylo2vec_bme_cpu_tables.tex": "3c7d2aeceed5ae9749a6840d1b59ac309d62ee8ab812685e025679f424603e1b",
+    "paper/phylo2vec_bme_scaling_tables.tex": "2b80f3ebbf1299be8eb3660891c48146bd4801fa5a941d49730a8fee9614f4e4",
+    "src/phylo2vec_fastme.c": "46e8392ee2fc3786439383b148a0a0a2ba33fb9566a573a68a7eaea27f1ac590",
+    "benchmarks/bench_rnasim_gpu.cu": "9f422fffa8ca26edea5a97242925aad32ffec96fe39969ed9073f431b86f2b7c",
+    "benchmarks/bench_minibatch_recovery.cu": "97ebdc87b9fac7ce183ae482bb03a129abfdef4ca78b9911ddb10aff629fcf92"
+  }
+}

@@ -1,0 +1,426 @@
+\section{Proof of the exact block reduction}
+\label{sec:block_proof}
+
+We use the component weights and attachment convention from
+Section~\ref{sec:condensation}.
+
+\begin{lemma}[Normalization of leaf weights]
+\label{lem:normalization}
+For each component, $\sum_{x\in S_a}\omega_a(x)=1$.
+\end{lemma}
+\begin{proof}
+A singleton has weight one.
+At a binary root, every leaf weight in each child component is multiplied by $1/2$.
+Induction over the component therefore gives total mass
+$\tfrac12\cdot1+\tfrac12\cdot1=1$.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:clade_condense}}
+
+\begin{proof}
+Separate the unordered leaf pairs into pairs within a component and pairs between components.
+For $x,y\in S_a$, the path stays inside $S_a$ and is unchanged by rearranging the skeleton.
+The sum of all such terms is
+\[
+ C=\sum_a\sum_{\substack{x<y\\x,y\in S_a}}
+      D_{xy}\,2^{-q_{T_G}(x,y)},
+\]
+which is independent of $G$.
+
+For $x\in S_a$ and $y\in S_b$ with $a\ne b$, the path contains the branching vertices inside $S_a$, those on the skeleton path, and those inside $S_b$.
+These sets of vertices are disjoint, giving
+\[
+ q_{T_G}(x,y)=h_a(x)+q_G(a,b)+h_b(y).
+\]
+Therefore its weight factors as
+$2^{-q_{T_G}(x,y)}=\omega_a(x)\,2^{-q_G(a,b)}\,\omega_b(y)$.
+Summing between-component terms gives
+\begin{align*}
+ \sum_{a<b}\sum_{\substack{x\in S_a\\y\in S_b}}
+ D_{xy}\,2^{-q_{T_G}(x,y)}
+ &=\sum_{a<b}2^{-q_G(a,b)}
+      \sum_{\substack{x\in S_a\\y\in S_b}}\omega_a(x)\omega_b(y)D_{xy}\\
+ &=L(G;\widetilde D).
+\end{align*}
+Adding the within-component constant proves Equation~\eqref{eq:bme_condense_decomp}.
+Subtracting two such decompositions cancels $C$ and proves Equation~\eqref{eq:condensed_delta}.
+\end{proof}
+
+\section{Ordered representation and coordinate mapping}
+\label{sec:gauge}
+
+\subsection{Linear-time decoding}
+
+For $v_i\leq i$, initialize a component-root array by $r[x]=x$.
+Process $i=N-2,\ldots,0$.
+At step $i$, join the components with roots $r[v_i]$ and $r[i+1]$ at a new node
+$m=2N-2-i$, then replace $r[v_i]$ by $m$.
+Before this step, the active components have distinct minimum labels $0,\ldots,i+1$.
+Joining the two specified components removes minimum label $i+1$ and preserves minimum label $v_i$.
+Induction therefore establishes the invariant and the correctness of the construction.
+Each step uses constant work, giving an $O(N)$ decoder.
+This argument depends on the ordered condition and does not apply unchanged to a general vector with $v_i>i$.
+
+\subsection{Relabeling a decoded tree}
+
+Relabeling uses the constructive labeling of Penn et al.~\cite[Lemmas~0.9--0.11]{penn2023gradme}.
+The root receives label zero, and a counter starts at $t=1$.
+Internal nodes are visited parent before child.
+Each node passes its label to one child, gives the other child label $t$, records the inherited label as $v_{t-1}$, and increments $t$.
+Penn et al.\ prove that the leaf labels form a permutation of $0,\ldots,N-1$, that the recorded vector is ordered, and that it decodes to the original rooted tree.
+Their argument holds for either choice of inheriting child at every node.
+Each vertex is processed a constant number of times, so the construction takes $O(N)$ time.
+Permuting both axes of $D$ by the inverse leaf-label map preserves every term in Equation~\eqref{eq:pauplin}, so the BME score is unchanged.
+
+The implementation lets the child containing the smaller minimum leaf index in the current labeling inherit, and a second orientation reverses that choice.
+These are two deterministic coordinate systems for the same current tree.
+Either gives representational coverage after relabeling, not coverage by a particular optimizer trajectory.
+For general candidate vectors, the implementation also uses a tree-to-vector encoder.
+Its unrooted version first inserts a degree-two root on the edge incident to leaf zero, so round-trip correctness is assessed by unrooted splits rather than root placement.
+
+\subsection{Coordinate replacements are SPR moves}
+\label{sec:coord_spr}
+
+For an ordered $v$ and a leaf $\ell\geq i+1$, follow the chain $\ell_0=\ell$, $\ell_{s+1}=v_{\ell_s-1}$ while $\ell_s>i+1$.
+Each step uses a coordinate with index greater than $i$, and the chain strictly decreases.
+Let $P_i$ be the set of leaves whose chain stops at $i+1$; it contains $i+1$ and does not depend on $v_i$.
+
+\begin{lemma}[Coordinate neighbors are SPR neighbors]
+\label{lem:coord_spr}
+Let $v\in\mathcal V_N^{\mathrm{cf}}$, $0\leq i\leq N-2$, and $0\leq j\leq2i$.
+Then $T(v^{(i\leftarrow j)})$ either equals $T(v)$ or is obtained from $T(v)$ by one SPR move that prunes the subtree on the leaves $P_i$.
+\end{lemma}
+\begin{proof}
+Read $w=v^{(i\leftarrow j)}$ by leaf addition~\cite{penn2024phylo2vec}.
+Starting from leaf $0$, coordinate $w_k$ inserts leaf $k+1$ on one of the $2k+1$ edges of the current rooted tree on leaves $0,\ldots,k$, including the edge above its root, and a value $w_k\leq k$ selects the pendant edge of leaf $w_k$.
+Only step $i$ depends on $j$.
+It inserts leaf $i+1$ on some edge, creating a vertex $p$.
+Every later step $k>i$ has $w_k=v_k\leq k$ and inserts leaf $k+1$ on the pendant edge of leaf $v_k$.
+The new leaf therefore lies on the same side of $p$ as leaf $v_k$.
+By induction on $k$, the leaves on the side of $p$ that contains $i+1$ are exactly $P_i$.
+The insertions among these leaves build a subtree whose topology does not depend on $j$.
+Removing $P_i$ and suppressing $p$ leaves the tree $T^-$ produced by steps $0,\ldots,i-1$ and the insertions of leaves outside $P_i$, which also does not depend on $j$.
+Thus every $T(w)$ is $T^-$ with the fixed subtree on $P_i$ attached at one edge of the unrooted $T^-$.
+If leaf $i+1$ is inserted above the root, that edge is the one through the root of $T^-$, which becomes a single edge when the artificial root is suppressed.
+Taking $j=v_i$ recovers $T(v)$.
+Two such trees differ only in the attachment edge of $P_i$, so they are equal or related by one SPR move.
+\end{proof}
+
+The lemma bounds the coordinate neighborhood by the SPR neighborhood.
+It does not show the reverse inclusion.
+The mapping below identifies the attachment edge for each $j$.
+
+\subsection{Mapping coordinate values to regraft edges}
+\label{sec:mapping}
+
+The ordered decoder numbers leaves $0,\ldots,N-1$ and internal nodes $N,\ldots,2N-2$.
+The last index is the artificial root.
+Suppressing it leaves a computational root $R=2N-3$ and the top edge joining $R$ to the artificial root's other child, denoted $c_{\mathrm{other}}$.
+Index ordinary edges by their child endpoints.
+
+For row $i$, let $E_i[u]$ be the score change from pruning the component associated with leaf $i+1$ and regrafting it on the edge indexed by $u$.
+The half-tree SPR traversal supplies these values.
+Let $b_i(j)$ be the root of the component containing leaf $j$ after the merges with coordinate index greater than $i$.
+Then the edge-to-coordinate map is
+\begin{equation}
+ \Delta_{i,j}=
+ \begin{cases}
+ E_i[b_i(j)], &0\leq j\leq i,\\[2pt]
+ E_i[(2N-2)-2i+j], &i+1\leq j\leq2i-2,\\[2pt]
+ E_i[c_{\mathrm{other}}], &j\in\{2i-1,2i\}\cap[i+1,2i].
+ \end{cases}
+ \label{eq:full_mapping}
+\end{equation}
+The first case identifies the component on the corresponding pendant edge of the prefix tree.
+In the ordered decoder's node numbering, the remaining non-root prefix edges occupy consecutive indices $2N-1-i,\ldots,2N-4$, giving the affine map in the second case.
+The last two rooted edge choices collapse onto the same unrooted top edge.
+At $i=1$, the middle case is empty and $j=1$ belongs to the first case.
+Only $j=2$ takes the collapsed-root value.
+Coordinate zero has no nontrivial alternative.
+
+On a CPU, the array $b_i$ can be maintained incrementally as the merge order advances.
+On a GPU, independent rows reconstruct their mappings using the latest eligible merge for each minimum leaf.
+When several merges have the same minimum leaf, only the latest eligible merge may write that destination.
+This avoids concurrent writes that would otherwise depend on thread scheduling.
+
+\subsection{Connection to continuous vertex derivatives}
+\label{sec:vertex_gradient}
+
+GradME defines an expected objective $F(W)=\mathbb E[f(V)]$ for independent ordered coordinates~\cite{penn2023gradme}.
+For comparison, take $f(v)=L(T(v);D_\pi)$ with the same unrooted convention as Equation~\eqref{eq:pauplin}.
+Let $W^v$ put probability one on each entry of an ordered vector $v$.
+For $j\leq i$, change only row $i$ to $(1-t)e_{v_i}+t e_j$, where $e_j$ is a unit vector.
+Only two vectors then have nonzero probability, giving
+\begin{equation}
+ F(W(t))=(1-t)f(v)+t f(v^{(i\leftarrow j)}),\qquad
+ \left.\frac{dF(W(t))}{dt}\right|_{t=0}=\Delta_{i,j}.
+ \label{eq:vertex_gradient}
+\end{equation}
+This is a direct consequence of the expected-objective definition, not a new exactness property.
+The computational distinction is the shared quadratic evaluator at a discrete tree.
+It also evaluates $j>i$, outside the ordered domain of this relaxation.
+It does not evaluate gradients at arbitrary interior $W$ in quadratic time.
+
+\section{Parallel dependencies and workspace}
+\label{sec:parallel_details}
+
+\subsection{Column ownership and ancestor traversal}
+
+For a fixed column $w$, the bottom-up update in Equation~\eqref{eq:bottom_up} reads only earlier entries of that column.
+Thus the recurrence has no cross-column dependency once its initial entries are available.
+The implementation separates the necessary transpose from the recurrence rather than writing both triangular copies concurrently.
+Top-down correction visits ancestors of $w$ in order from the computational root.
+If a node's children have contiguous depth-first intervals, comparing the entry time of $w$ with their interval boundary selects the child containing $w$.
+Only the current node and the fixed target are required as traversal state.
+The initial degree-three root update uses the other two root branches.
+
+\subsection{Autonomous row reconstruction}
+
+Store the balanced distances from internal vertices to leaves.
+For a requested row $w$, these entries supply its leaf values.
+For leaf $w$, the leaf values instead come directly from $D$.
+Average child entries bottom-up to fill internal positions, then overwrite ancestors of $w$ top-down using the sibling and parent directions.
+Initialize the degree-three root correction explicitly and set the diagonal to zero.
+
+For an internal position $u$ in a disjoint component, the bottom-up average is the required balanced distance by linearity.
+For a descendant $u$ of $w$, the stored leaf values already use the component at $w$ directed away from that descendant, so averaging within the descendant gives the correct value.
+Ancestors of $w$ require the complementary direction and are supplied by the top-down overwrite.
+These cases exhaust the row.
+The reconstruction costs $O(N+\operatorname{depth}(w))=O(N)$.
+Reconstructing a constant number of rows per pruned component therefore retains quadratic sweep complexity.
+The approximately fourfold reduction concerns the balanced-distance table only.
+
+\subsection{Traversal stack size}
+
+When a traversal reaches two outward components, push the larger component first and the smaller second on a last-in-first-out stack.
+The smaller component is processed next.
+Each extra pending larger component is associated with descent into a component at most half the size of its predecessor.
+Hence the number of simultaneously pending components is logarithmic in the number of tree vertices.
+Including the active traversal state gives a safe bound
+$\lfloor\log_2(2N-2)\rfloor+2$.
+This is a workspace bound, not a statement that the traversal visits fewer vertices.
+
+\section{Sequence-refinement variant and recorded benchmarks}
+\label{sec:sequence_variant}
+
+\subsection{Implementation used for the recorded measurements}
+
+The sequence implementation used for the measurements in this appendix differs from the exact-distance search described in Section~\ref{sec:optimizer}.
+For trees larger than 2,048 leaves, it caps the weighted leaf lists used for proposal distances at 64 entries per component.
+These lists are called profiles in the implementation.
+Above the cap, unresolved subtree mass is assigned to representative leaves, producing an approximate matrix $\widetilde D^{\mathrm{cap}}$.
+For smaller trees, the proposal calculation is uncapped.
+
+The approximate matrix guides the inner skeleton search.
+Before accepting an update, the implementation recomputes affected condensed distances involving truncated components using every leaf contribution.
+Distances for untruncated pairs can be reused.
+It then evaluates Equation~\eqref{eq:changed_pairs}, with FP64 accumulation and a numerical acceptance margin of $10^{-6}$.
+Outside weights are rebuilt from the current tree before each window, and ancestor summaries are updated after a commit.
+The acceptance calculation therefore evaluates the full-tree BME change, subject to rounding.
+It does not make the earlier proposal gradients exact, and the numerical margin is not a proved floating-point error bound.
+
+These measurements characterize that implementation variant.
+They are not timings for constructing exact condensed distances and using them throughout every minibatch search.
+
+\subsection{Sequence data and comparison protocol}
+
+The recorded comparisons use the RNASim benchmark associated with PASTA~\cite{mirarab2015pasta}, with simulated sequences and a known reference tree.
+The reported alignments have 1,596 columns.
+The minibatch comparison uses gap-aware JC69 distances.
+Selected full-tree experiments also use the eigenvalue-based distance approach~\cite{penn2025eigen}, which changes the input objective and is identified separately.
+The CPU tools are 64-thread FastME 2.1.6 and VeryFastTree 4.0.5~\cite{lefort2015fastme,pineiro2020veryfasttree}.
+VeryFastTree's minimum-evolution refinement is run without its likelihood-refinement phase.
+Refinement time is reported separately from starting-tree construction.
+The minibatch times include the final full-tree acceptance calculation and sequential maintenance of the outside distances.
+
+\subsection{Archived refinement comparison}
+
+Table~\ref{tab:rnasim_summary} retains the archived comparison of this minibatch variant with VeryFastTree refinement from the same initial topology.
+These measurements precede the subsequent acceptance-kernel optimizations and characterize that recorded implementation.
+At $N=50{,}000$, the minibatch method returns 4,950 incorrect splits in 16.84~s, compared with 4,980 in 313.53~s.
+At $N=100{,}000$, the corresponding results are 8,802 in 104.45~s and 8,857 in 593.50~s.
+The refinement-time ratios are 18.6 and 5.7 respectively.
+These exclude the shared initialization, which takes 63.01 and 179.03~s.
+Adding that initialization to both methods gives approximately 4.72-fold and 2.73-fold ratios, rather than the refinement-only ratios.
+
+\begin{table}[tb]
+\centering
+\caption{Archived RNASim refinement comparison, preceding the later acceptance-kernel optimizations. Both methods use the same starting topology. VFT denotes 64-thread VeryFastTree minimum-evolution refinement. P2V denotes the sequence variant on one RTX A6000, using capped proposal distances above 2,048 leaves and full-tree acceptance checks. Times exclude the shared initialization and characterize this proposal-and-check variant.}
+\label{tab:rnasim_summary}
+\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+$N$ & Initial & \multicolumn{2}{c}{Wrong splits} & \multicolumn{2}{c}{Refinement (s)} & Init. (s)\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+ & wrong splits & VFT & P2V & VFT & P2V & \\
+\midrule
+1,000 & 214 & 178 & 176 & 6.88 & 0.06 & 0.58\\
+5,000 & 890 & 703 & 696 & 33.38 & 0.68 & 3.40\\
+10,000 & 1,667 & 1,313 & 1,320 & 65.98 & 1.55 & 7.82\\
+50,000 & 6,729 & 4,980 & 4,950 & 313.53 & 16.84 & 63.01\\
+100,000 & 12,375 & 8,857 & 8,802 & 593.50 & 104.45 & 179.03\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The topological advantage is not uniform.
+At $N=10{,}000$, the minibatch result has 1,320 incorrect splits, compared with 1,313 for VeryFastTree.
+A full-tree run with eigenvalue-based distances reaches 1,309 in 4.57~s, but uses a different distance estimate.
+The full-tree JC69 run returns 1,320 in 3.71~s.
+These variants should therefore not be combined into a single claim of consistently better topological accuracy.
+
+At $N=1{,}000$, FastME applied to the GPU-computed JC69 distance matrix returns 177 incorrect splits in 21.68~s with its own BIONJ initialization.
+Its shared-start refinement returns 178 in 11.27~s.
+The corresponding full-tree GPU result is 176 in 0.01~s, and minibatch refinement returns 176 in 0.06~s.
+The experiments differ in initialization and timing scope, so the ratios between their raw elapsed times are not interchangeable.
+
+
+\section{Truncation and stale outside-distance counterexamples}
+\label{sec:counterexamples}
+
+Two constructions illustrate the need for exact condensed distances and current outside information.
+The first concerns the approximate-proposal variant in Appendix~\ref{sec:sequence_variant}.
+On a 4,102-leaf tree containing a balanced 4,096-leaf component, an adversarial split distance can give a capped proposal change of $-0.25$ while its true full-profile change is $+0.2421875$ for a cap of 64, or $+0.234375$ for a cap of 128.
+The proposal sign alone is therefore insufficient.
+Full-profile acceptance rejects both changes.
+
+Separately, consider two disjoint windows whose internal rearrangements change their root-to-leaf weight vectors from $p_A,p_B$ to $p_A+\delta p_A,p_B+\delta p_B$.
+With a fixed path coefficient $\kappa$ between their attachment points, their cross contribution contains
+$\kappa p_A^\top D_{AB}p_B$.
+The jointly changed contribution includes the additional term
+\[
+ \kappa\,\delta p_A^\top D_{AB}\delta p_B,
+\]
+which is absent from the sum of two changes computed against the original surroundings.
+In a 1,540-leaf test with two 768-leaf windows, changes
+$-0.0032945313$ and $-0.0254489835$ computed against frozen surroundings combine to an actual increase of $+0.0505258348$.
+Rebuilding the outside profile after the first commit makes the other proposal positive:
+$+0.0538203660$ or $+0.0759748183$, depending on the processing order.
+It is then rejected.
+These values come from controlled CPU replay of the acceptance and window-controller paths.
+They do not constitute a native-GPU concurrency test.
+
+\section{Implementation and reproducibility}
+\label{sec:software}
+
+The CPU evaluator, tree encoders, and full-tree optimizer are implemented in
+\texttt{phylo2vec\_fastme.c}, with input validation and Python bindings in
+\texttt{discrete\_gradient.py}.
+The lower-triangular and full-coordinate interfaces require an ordered baseline.
+The multi-GPU evaluator and its tiled variants are implemented in
+\texttt{phylo2vec\_cuda\_8xh100.cu}.
+Sequence refinement is exercised by \texttt{bench\_rnasim\_gpu.cu}.
+The distinct distance-oracle recovery workload is implemented in
+\texttt{bench\_minibatch\_recovery.cu}.
+
+Independent checks include \texttt{verify\_all.c} for objective identities and encoding boundaries,
+\texttt{verify\_spr\_coverage.py} for neighborhood enumeration, and
+\texttt{compare\_with\_fastme\_cli.py} for the external reference.
+The profile-completeness and window-composition constructions are recorded with their reproduction commands in the discrete-gradient review artifacts.
+CPU-emulated tests exercise the window controller, complete component-weight arithmetic, and a shared-input batching path.
+Separate native CUDA comparisons of the later split-launch implementation and its final-tree hashes are recorded in
+\texttt{GEMINI\_REPORT\_REFINE\_KERNEL.md} and the artifacts under
+\texttt{handoff\_refine\_kernel/}.
+These tests cover different execution paths and are identified separately in their records.
+
+The archived sequence measurements in Appendix~\ref{sec:sequence_variant} are preserved in
+\nolinkurl{paper/restructure_chatgpt/original.tex}.
+The later kernel report measures additional implementation optimizations, whose timings have not been substituted into that archived comparison.
+The sequence records use approximate proposals with full-objective acceptance.
+They therefore do not supply an end-to-end benchmark with exact condensed distances throughout candidate selection.
+
+\subsection{Search policies and parameters}
+\label{sec:search_policies}
+
+The procedures in Algorithms~\ref{alg:block_search} and~\ref{alg:coordinate_search} specify the search at the level of trees, coordinate encodings, and component distances.
+The following policies instantiate their scheduling and candidate-selection steps.
+The score $L$ always uses component identities restored by the recorded permutation.
+
+\paragraph{CPU block schedule.}
+Full-tree search uses a single block with $K=N$ singleton components, so $G=T$ and $M=D$.
+For requested size $3\leq K_\star<N$, the CPU minibatch implementation exposes
+$w=\min\{K_\star-2,\max\{4,\lfloor2K_\star/3\rfloor\}\}$
+consecutive leaves in the current depth-first leaf order.
+Block $b$ starts at offset $b\max\{1,\lfloor w/2\rfloor\}$ modulo $N$.
+Maximal inactive subtrees become fixed components.
+The largest such component is split while the skeleton has fewer than $K_\star$ leaves and a further split is possible.
+Thus $K_\star$ is a construction target, while $K$ is the resulting skeleton size.
+The leaf order and components are reconstructed from the updated tree for every block.
+A hierarchical schedule instead combines a global backbone, local component windows, and staggered or larger windows crossing preceding component boundaries.
+Regardless of schedule, the sequential driver constructs each block's outside information from the current tree.
+
+\paragraph{Ordered representations and row selection.}
+$\proc{Order}$ produces an ordered encoding and its component permutation by the construction in Appendix~\ref{sec:gauge}.
+$\proc{Normalise}$ invokes this construction only when the current encoding contains a value $v_i>i$, composing the new map with $\pi$.
+$\proc{Decode}(v,\pi)$ restores original component identities and suppresses the artificial root.
+For each row, $\proc{RankMin}$ selects
+$j_i\in\arg\min_{0\leq j\leq2i}\Delta_{i,j}$,
+keeps rows with $\Delta_{i,j_i}<-\eta$, and sorts them by increasing change.
+The CPU policy uses deterministic traversal and row order to resolve ties.
+It uses $I=500$ and $\epsilon(\ell)=10^{-12}(|\ell|+1)$.
+
+\paragraph{Joint batch acceptance.}
+Let $d_{\min}<0$ be the best single change.
+$\proc{BatchStep}$ greedily packs at most eight rows, excluding shared marked pruned-subtree nodes and attachment endpoints.
+After the first row, it retains only rows with $\Delta_{i,j_i}<0.05d_{\min}$.
+It tests a batch only if its predicted changes sum to less than $1.05d_{\min}$.
+Every trial applies the selected replacements to the same pre-trial encoding $v$ and evaluates the complete candidate $v'$.
+A batch is accepted when
+$L(T(v');M_\pi)<\ell+d_{\min}-\eta$.
+If rejected, the retained ranked prefix is halved and evaluated again, down to two moves.
+If no batch is accepted, the best single replacement is used.
+The predicted sum screens a batch but does not determine its acceptance.
+
+\paragraph{SPR completion and deterministic escapes.}
+When no improving coordinate row remains, the CPU solver first tests additional regraft edges for its already-scanned pruned components.
+If this fails, it tries the reversed ordered labeling.
+Only after both stages fail does it scan the remaining unrooted SPR moves, including complement-side prunes.
+$\proc{ExtraSPR}$ and $\proc{RemainingSPR}$ return an updated encoding in the current component labeling, or $\bot$ when no change is below $-\eta$.
+
+Following an unsuccessful completion scan, $\proc{Escape}$ permits at most $E=2$ attempts, each with at least one subsequent sweep available.
+For each row it retains the smallest change strictly between $\eta$ and $0.05$, then sorts these candidates by increasing change.
+Attempt $e\in\{1,2\}$ combines the first and $(e+1)$th candidates if both exist and their predicted changes sum to less than $0.02$.
+Otherwise it returns $\bot$.
+These thresholds are in objective units.
+An escape may increase the working score. The return rule compares the final trial with the retained best scored tree.
+Consequently, a completed scan and a budget-limited exit represent different stopping conditions.
+
+\paragraph{GPU skeleton solver.}
+The GPU policy performs a bounded sequence of trial updates, packs SPR moves whose marked paths are disjoint, and rescores each combined tree on the next sweep.
+It retains the best scored skeleton and tries the reversed labeling when no improving row remains.
+It does not use the CPU batch-halving or full SPR completion steps.
+The best trial is compared with the entry skeleton before committing the block.
+Intermediate trial scores can increase, so only the retained best score and accepted block changes have a monotonicity interpretation.
+For the approximate-proposal sequence variant, the acceptance conditions and measurement scope are given in Appendix~\ref{sec:sequence_variant}.
+
+\section{Supplementary CPU comparisons}
+\label{sec:cpu_tables}
+
+Tables~\ref{tab:bench_noiseless} and~\ref{tab:bench_noisy} give the full Apple M5 comparisons.
+FME denotes the in-memory reference implementation.
+P2V denotes Phylo2Vec.
+RF denotes normalized Robinson--Foulds distance.
+Wins and ties refer to the BME objective, with tolerance $10^{-9}$.
+Timings and evaluation counts are means, with standard deviations and the reported P2V median and interquartile range retained.
+
+\input{phylo2vec_bme_cpu_tables}
+
+\clearpage
+\section{Supplementary scaling measurements}
+\label{sec:scaling_tables}
+
+The tables below retain the reported sweep measurements, separating CPU/Metal, CUDA, sharded, and embedding-based workloads.
+The single-GPU speedups use their respective host CPU references.
+They should not be interpreted as comparisons against one common host baseline.
+Stage timings measure balanced-distance construction and SPR evaluation, rather than optimization to convergence.
+The $2N^2$ column in the sharded table is the original rectangular-workload size proxy.
+It is not the number of valid Phylo2Vec coordinate entries, which is $(N-1)^2$, nor a count of distinct neighboring trees.
+Reported memory units are retained from the benchmark records.
+
+For the embedding workload, each batch has 20,000 skeleton leaves, comprising 15,000 expanded leaves and 5,000 condensed components.
+Its epoch columns multiply average condensation-plus-gradient time by
+$\lceil N/15{,}000\rceil$.
+They are workload estimates rather than measured convergence times.
+The largest listed validation discrepancy in this workload is $1.4\times10^{-5}$, and the listed validation outcomes refer to the benchmark's own checks.
+
+\input{phylo2vec_bme_scaling_tables}

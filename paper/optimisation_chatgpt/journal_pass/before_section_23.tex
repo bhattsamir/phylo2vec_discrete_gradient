@@ -1,0 +1,74 @@
+\subsection{Quadratic-time coordinate evaluation}
+
+For two distinct vertices $u,w$, define $A(u,w)$ as the balanced average distance between the two components oriented away from the path joining $u$ and $w$.
+At an internal vertex, the two outward branches each receive weight $1/2$.
+At a leaf, the corresponding distribution is concentrated on that leaf.
+Consequently, when the component at $u$ has children $a,b$,
+\begin{equation}
+ A(u,w)=\tfrac12\{A(a,w)+A(b,w)\}.
+ \label{eq:bottom_up}
+\end{equation}
+
+To count the work, first fix a target leaf $x$.
+The input distances initialize its column: $A(y,x)=D_{yx}$ for every other leaf $y$.
+Orient the tree toward $x$ and visit children before their parent.
+Each internal vertex has two neighbours farther from $x$, so Equation~\eqref{eq:bottom_up} computes its entry from two values already available.
+Each update uses one addition and one multiplication by $1/2$, regardless of how many leaves lie below that vertex.
+There are $N-2$ internal vertices, giving $O(N)$ work for the entire column $A(\cdot,x)$.
+Repeating this for all $N$ target leaves costs $O(N^2)$.
+
+The SPR evaluator also needs columns indexed by internal vertices.
+For an internal target $w$, symmetry supplies every leaf entry $A(x,w)=A(w,x)$ from the columns just computed.
+Orienting the tree toward $w$ then permits the same averaging recurrence within each of its three incident branches.
+There are $N-3$ internal vertices other than $w$, and the diagonal $A(w,w)$ is unused.
+Thus each of the remaining $N-2$ columns also costs $O(N)$, including initialization and traversal:
+\[
+ \underbrace{N\,O(N)}_{\text{leaf-target columns}}
+ +\underbrace{(N-2)\,O(N)}_{\text{internal-target columns}}
+ =O(N^2).
+\]
+
+The implementation uses a fixed computational rooting to realize these dependencies through bottom-up and top-down passes.
+When $u$ is an ancestor of $w$, the component at $u$ away from $w$ combines the sibling branch and the parent branch:
+\begin{equation}
+ A(u,w)=\tfrac12\{A(\operatorname{sib}_u(w),w)
+                         +A(\operatorname{parent}(u),w)\}.
+ \label{eq:top_down}
+\end{equation}
+At the degree-three computational root, the analogous average uses the two branches not containing $w$.
+Each column requires $O(N)$ visits across the two passes, including on an unbalanced tree.
+
+Once $A$ is available, a second reuse argument gives all coordinate changes.
+For a fixed pruned component, one traversal of the standard BME SPR recurrence propagates score differences across all regraft edges in $O(N)$ time~\cite{hordijk2005spr}.
+Each propagation step is an adjacent interchange of four directed components.
+Its score change is a linear combination of their balanced distances, with coefficient $1/4$, requiring a constant number of table lookups and arithmetic operations.
+Successive steps accumulate the change relative to the original attachment.
+Phylo2Vec supplies the mapping from each valid coordinate value to one of these regraft edges.
+For row $i$, the traversal therefore supplies all $2i+1$ coordinate entries through $O(i+1)$ lookups.
+The explicit mapping, including the collapsed-root boundary, is in Appendix~\ref{sec:mapping}.
+
+\begin{proposition}[Cost and scope of a coordinate sweep]
+\label{prop:quadratic}
+Given an ordered baseline, its leaf permutation, and constant-time access to the entries of a supplied distance matrix, constructing $A$ and computing all $(N-1)^2$ entries in Equation~\eqref{eq:discrete_gradient} requires $O(N^2)$ arithmetic operations.
+The dense implementation uses $O(N^2)$ storage.
+In exact arithmetic, these entries equal the corresponding full-tree BME differences.
+\end{proposition}
+\begin{proof}
+There are $2N-2$ columns of $A$, each constructed in $O(N)$ work by the recurrences above.
+For coordinate $i$, the two half-tree traversals visit $O(N)$ regraft edges, with constant work per edge, and the coordinate mapping takes $O(i+1)$ work.
+Thus the total is
+\[
+ \underbrace{O(N^2)}_{\text{construct }A}
+ +\underbrace{\sum_{i=0}^{N-2}\bigl[O(N)+O(i+1)\bigr]}_{\text{traverse regraft edges and extract each row}}
+ =O(N^2).
+\]
+The dense distance and coordinate tables each have $O(N^2)$ entries.
+The recurrence preserves the Pauplin score difference at each traversal step, so selecting a mapped edge gives Equation~\eqref{eq:discrete_gradient}.
+\end{proof}
+
+The proposition concerns the coordinate neighborhood of the current labeling.
+It does not assert that this neighborhood is the entire SPR neighborhood, or that coordinate descent finds a global BME optimum.
+There are $\sum_{i=0}^{N-2}(2i+1)=(N-1)^2$ valid entries.
+Any algorithm that explicitly writes one scalar per entry requires $\Omega(N^2)$ work in the standard unit-cost model, so the evaluator matches this output-size lower bound.
+This observation does not give a lower bound for returning only the best move, and does not improve the asymptotic sweep cost of classical BME SPR evaluation.
+

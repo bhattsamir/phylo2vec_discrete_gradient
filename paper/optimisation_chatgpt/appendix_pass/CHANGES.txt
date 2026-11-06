@@ -1,0 +1,15 @@
+Appendix reduction
+
+The complete pre-edit sources, PDF, bibliography, and result tables are in before/.
+They preserve the removed material, including the archived sequence-refinement
+variant, truncation and stale-window counterexamples, audit history, stack-size
+analysis, and CPU/Metal sweep table. These files are not included in the manuscript.
+
+The compiled paper now has three appendices: mathematical details, search settings,
+and additional experimental results. Core proof bodies, the main algorithms, and
+the six retained result tables are unchanged. CUDA tables are reordered for layout.
+The GradME connection is a short introductory footnote. Main-text references and
+experimental scope are updated, and three uncited bibliography entries are removed.
+
+Build: ./paper/build_paper.sh
+Checks and page counts: validation.json
